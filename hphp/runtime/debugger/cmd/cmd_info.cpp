@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,8 +23,10 @@
 #include "hphp/runtime/debugger/cmd/cmd_variable.h"
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/vm/named-entity-defs.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP { namespace Eval {
@@ -126,7 +128,7 @@ void CmdInfo::help(DebuggerClient &client) {
 }
 
 bool CmdInfo::parseZeroArg(DebuggerClient &client) {
-  assert(client.argCount() == 0);
+  assertx(client.argCount() == 0);
   BreakPointInfoPtr bpi = client.getCurrentLocation();
   if (bpi) {
     m_symbol = bpi->getClass();
@@ -140,7 +142,7 @@ bool CmdInfo::parseZeroArg(DebuggerClient &client) {
 }
 
 void CmdInfo::parseOneArg(DebuggerClient &client, std::string &subsymbol) {
-  assert(client.argCount() == 1);
+  assertx(client.argCount() == 1);
   string symbol = client.argValue(1);
   size_t pos = symbol.find("::");
   if (pos != string::npos) {
@@ -185,7 +187,7 @@ void CmdInfo::onClient(DebuggerClient &client) {
   } else {
     for (ArrayIter iter(info); iter; ++iter) {
       StringBuffer sb;
-      PrintInfo(client, sb, iter.second().toArray(), subsymbol);
+      PrintInfo(&client, sb, iter.second().toArray(), subsymbol);
       client.code(sb.detach());
     }
   }
@@ -237,11 +239,10 @@ void getClassSymbolNames(
   auto& clsConstants =
     liveLists->get(DebuggerClient::AutoCompleteClassConstants);
 
-  for (AllCachedClasses ac; !ac.empty(); ) {
-    auto c = ac.popFront();
+  NamedEntity::foreach_cached_class([&](Class* c) {
     if (interface ? !(c->attrs() & AttrInterface) :
         c->attrs() & (AttrInterface | AttrTrait)) {
-      continue;
+      return; // continue
     }
     classes.push_back(c->name()->toCppString());
     for (Slot i = 0; i < c->numMethods(); i++) {
@@ -261,7 +262,7 @@ void getClassSymbolNames(
       auto const_name = c->nameStr() + s_constSep + StrNR(cns.name);
       clsConstants.push_back(const_name.get()->toCppString());
     }
-  }
+  });
 }
 
 /* Caches an estimate of the number of named entities we have. */
@@ -306,7 +307,7 @@ void getSymbolNames(std::shared_ptr<DebuggerClient::LiveLists>& liveLists) {
     functions.push_back(iter.second().toString().toCppString());
   }
   auto consts = lookupDefinedConstants();
-  constants.reserve(consts.size());
+  constants.reserve(consts.size() + constants.size());
   for (ArrayIter iter(consts); iter; ++iter) {
     constants.push_back(iter.first().toString().toCppString());
   }
@@ -327,7 +328,7 @@ bool CmdInfo::onServer(DebuggerProxy &proxy) {
       Logger::Error("Caught unknown exception, auto-complete lists incomplete");
     }
 
-    Array variables = g_context->getLocalDefinedVariables(0);
+    Array variables = g_context->getLocalDefinedVariablesDebugger(0);
     variables += CmdVariable::GetGlobalVariables();
     auto& vars = m_acLiveLists->get(DebuggerClient::AutoCompleteVariables);
     vars.reserve(variables.size());
@@ -370,15 +371,15 @@ void CmdInfo::PrintDocComments(StringBuffer &sb, const Array& info) {
     if (!same(ret1, false) && !same(ret2, false) &&
         matches1.isArray() && matches2.isArray()) {
       // we have perfect doc comment blocks, so we can re-adjust spaces
-      space1 = matches1.toCArrRef()[1].toString().size();
-      space2 = matches2.toCArrRef()[1].toString().size();
+      space1 = matches1.asCArrRef()[1].toString().size();
+      space2 = matches2.asCArrRef()[1].toString().size();
     }
     String spaces = HHVM_FN(str_repeat)(" ", space2 - space1 - 1);
     sb.printf("%s%s\n", spaces.data(), doc.data());
   }
 }
 
-void CmdInfo::PrintHeader(DebuggerClient &client, StringBuffer &sb,
+void CmdInfo::PrintHeader(DebuggerClient* client, StringBuffer &sb,
                           const Array& info) {
   if (!info[s_internal].toBoolean()) {
     String file = info[s_file].toString();
@@ -391,11 +392,15 @@ void CmdInfo::PrintHeader(DebuggerClient &client, StringBuffer &sb,
     } else if (line1 && line2 && line1 != line2) {
       sb.printf("// defined on line %d to %d of %s\n", line1, line2,
                 file.data());
-      client.setListLocation(file.data(), line1 - 1, false);
+      if (client != nullptr) {
+        client->setListLocation(file.data(), line1 - 1, false);
+      }
     } else {
       int line = line1 ? line1 : line2;
       sb.printf("// defined on line %d of %s\n", line, file.data());
-      client.setListLocation(file.data(), line - 1, false);
+      if (client != nullptr) {
+        client->setListLocation(file.data(), line - 1, false);
+      }
     }
   }
 
@@ -429,7 +434,7 @@ String CmdInfo::GetParams(const Array& params, bool varg,
         // ClassInfo was not able to serialize the value, so ext_reflection
         // prepared a stdClass error object. We should fall back to display
         // the original PHP text, if there.
-        Object obj{defValue.asCell()->m_data.pobj};
+        Object obj{defValue.asTypedValue()->m_data.pobj};
         args.append(obj->o_get(s_msg).toString());
       } else if (detailed) {
         args.append(DebuggerClient::FormatVariable(arg[s_default]));
@@ -506,8 +511,8 @@ bool CmdInfo::TryProperty(StringBuffer &sb, const Array& info,
   return false;
 }
 
-bool CmdInfo::TryMethod(DebuggerClient &client, StringBuffer &sb, const Array& info,
-                        std::string subsymbol) {
+bool CmdInfo::TryMethod(DebuggerClient* client, StringBuffer &sb,
+                         const Array& info, std::string subsymbol) {
   if (subsymbol.size() > 2 && subsymbol.substr(subsymbol.size() - 2) == "()") {
     subsymbol = subsymbol.substr(0, subsymbol.size() - 2);
   }
@@ -578,8 +583,8 @@ String CmdInfo::GetTypeProfilingInfo(const Array& profilingArray, const Array& p
   return profile.detach();
 }
 
-void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, const Array& info,
-                        const std::string &subsymbol) {
+void CmdInfo::PrintInfo(DebuggerClient* client, StringBuffer &sb,
+                        const Array& info, const std::string &subsymbol) {
   if (info.exists(s_params)) {
     PrintHeader(client, sb, info);
     sb.printf("function %s%s(%s);\n",
@@ -601,7 +606,9 @@ void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, const Array& i
     if (TryProperty(sb, info, subsymbol)) found = true;
     if (TryMethod(client, sb, info, subsymbol)) found = true;
     if (found) return;
-    client.info("Specified symbol cannot be found. Here the whole class:\n");
+    if (client != nullptr) {
+      client->info("Specified symbol cannot be found. Here the whole class:\n");
+    }
   }
 
   PrintHeader(client, sb, info);

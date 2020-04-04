@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,12 +21,13 @@
 #include <atomic>
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
+#include "hphp/runtime/ext/asio/asio-session.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class AsioSession;
-class c_ExternalThreadEventWaitHandle;
+struct AsioSession;
+struct c_ExternalThreadEventWaitHandle;
 
 /**
  * An asynchronous external thread event.
@@ -45,7 +46,7 @@ class c_ExternalThreadEventWaitHandle;
  *
  * Example:
  *
- * class FooEvent : public AsioExternalThreadEvent {
+ * struct FooEvent : AsioExternalThreadEvent {
  *   public:
  *     FooEvent(int max_value) : m_maxValue(max_value), m_failed(false) {}
  *     ~FooEvent() {}
@@ -58,20 +59,20 @@ class c_ExternalThreadEventWaitHandle;
  *       markAsFinished();
  *     }
  *   protected:
- *     void unserialize(Cell& result) const {
+ *     void unserialize(TypedValue& result) const {
  *       if (UNLIKELY(m_failed)) {
- *         Object e(SystemLib::AllocInvalidOperationExceptionObject(
- *           "An error has occurred while scheduling the operation"));
- *         throw e;
+ *         SystemLib::throwInvalidOperationExceptionObject(
+ *           "An error has occurred while scheduling the operation"
+ *         );
  *       }
  *
  *       if (UNLIKELY(m_value > m_maxValue)) {
- *         Object e(SystemLib::AllocInvalidOperationExceptionObject(
- *           "Invalid response returned by Foo backend"));
- *         throw e;
+ *         SystemLib::throwInvalidOperationExceptionObject(
+ *           "Invalid response returned by Foo backend"
+ *         );
  *       }
  *
- *       cellDup(make_tv<KindOfInt64>(m_value), result);
+ *       tvDup(make_tv<KindOfInt64>(m_value), result);
  *     }
  *   private:
  *     int m_value, m_maxValue;
@@ -86,9 +87,9 @@ class c_ExternalThreadEventWaitHandle;
  * Object f_gen_foo(int max_value) {
  *   // validate user input early
  *   if (max_value < 0) {
- *     Object e(SystemLib::AllocInvalidArgumentExceptionObject(
- *       "Expected max_value to be non-negative"));
- *     throw e;
+ *     SystemLib::throwInvalidArgumentExceptionObject(
+ *       "Expected max_value to be non-negative"
+ *     );
  *   }
  *
  *   FooEvent* event = new FooEvent(max_value);
@@ -100,11 +101,11 @@ class c_ExternalThreadEventWaitHandle;
  *     event->setException(exception);
  *   } catch (...) {
  *     // unknown exception; should be never reached
- *     assert(false);
+ *     assertx(false);
  *     event->abandon();
- *     Object e(SystemLib::AllocInvalidOperationExceptionObject(
- *       "Encountered unexpected exception"));
- *     throw e;
+ *     SystemLib::throwInvalidOperationExceptionObject(
+ *       "Encountered unexpected exception"
+ *     );
  *   }
  *   return event->getWaitHandle();
  * }
@@ -113,8 +114,7 @@ class c_ExternalThreadEventWaitHandle;
  *  - web request may die before the event is finished; never store pointers
  *    to any data owned by PHP as the PHP thread may die at any time
  */
-class AsioExternalThreadEvent {
-  public:
+struct AsioExternalThreadEvent {
     /**
      * Get wait handle representing this external thread event.
      *
@@ -192,7 +192,13 @@ class AsioExternalThreadEvent {
      * If a result was already initialized, it must be uninitialized (decref
      * if needed) prior to throwing an exception.
      */
-    virtual void unserialize(Cell& result) = 0;
+    virtual void unserialize(TypedValue& result) = 0;
+
+    /**
+     * Get the time markAsFinished was called to retroactively reference
+     * when the underlying IO operation was over
+     */
+    AsioSession::TimePoint getFinishTime() const { return m_finishTime; };
 
   protected:
     /**
@@ -213,7 +219,7 @@ class AsioExternalThreadEvent {
      * is eventually called.
      */
     virtual ~AsioExternalThreadEvent() {
-      assert(
+      assertx(
         m_state.load() == Finished ||
         m_state.load() == Canceled ||
         m_state.load() == Abandoned
@@ -241,7 +247,7 @@ class AsioExternalThreadEvent {
      * called only from the unserialize() implementation.
      */
     ObjectData* getPrivData() const {
-      assert(m_state.load() == Finished);
+      assertx(m_state.load() == Finished);
       return m_waitHandle->getPrivData();
     }
 
@@ -283,6 +289,7 @@ class AsioExternalThreadEvent {
     AsioExternalThreadEventQueue* m_queue;
     c_ExternalThreadEventWaitHandle* m_waitHandle;
     std::atomic<uint32_t/*state_t*/> m_state;
+    AsioSession::TimePoint m_finishTime;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

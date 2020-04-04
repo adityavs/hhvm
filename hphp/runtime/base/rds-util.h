@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,13 +17,14 @@
 #define incl_HPHP_RUNTIME_BASE_RDS_UTIL_H_
 
 #include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/base/ref-data.h"
 #include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
   struct NamedEntity;
+  struct Class;
   struct Func;
   struct StringData;
+  struct MemoCacheBase;
 }
 
 namespace HPHP { namespace rds {
@@ -35,19 +36,34 @@ namespace HPHP { namespace rds {
  */
 
 /*
- * Static locals.
- *
- * For normal functions, static locals are allocated as RefData's that
- * live in RDS.  Note that we don't put closure locals here because
- * they are per-instance.
- */
-Link<RefData> bindStaticLocal(const Func*, const StringData*);
-
-/*
  * Allocate storage for the value of a class constant in RDS.
  */
-Link<TypedValue> bindClassConstant(const StringData* className,
-                                   const StringData* constName);
+Link<TypedValue, rds::Mode::Normal>
+bindClassConstant(const StringData* clsName, const StringData* cnsName);
+
+Link<TypedValue, rds::Mode::Normal>
+bindStaticMemoValue(const Func*);
+
+Link<MemoCacheBase*, rds::Mode::Normal>
+bindStaticMemoCache(const Func*);
+
+Link<TypedValue, rds::Mode::Normal>
+attachStaticMemoValue(const Func*);
+
+Link<MemoCacheBase*, rds::Mode::Normal>
+attachStaticMemoCache(const Func*);
+
+Link<TypedValue, rds::Mode::Normal>
+bindLSBMemoValue(const Class*, const Func*);
+
+Link<MemoCacheBase*, rds::Mode::Normal>
+bindLSBMemoCache(const Class*, const Func*);
+
+Link<TypedValue, rds::Mode::Normal>
+attachLSBMemoValue(const Class*, const Func*);
+
+Link<MemoCacheBase*, rds::Mode::Normal>
+attachLSBMemoCache(const Class*, const Func*);
 
 //////////////////////////////////////////////////////////////////////
 

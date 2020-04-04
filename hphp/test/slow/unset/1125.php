@@ -1,5 +1,9 @@
-<?php
+<?hh
 
-$a = array(1,2);
+
+<<__EntryPoint>>
+function main_1125() {
+$a = varray[1,2];
 unset($a[true]);
 var_dump($a);
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -45,14 +45,15 @@ enum Rank {
   RankUnitInit,
   RankEvaledUnits,
   RankWriteLease,
+  RankCodeCache,
+  RankCodeMetadata,
 
   RankStatCache,
 
   RankUnitCache,
   RankStatCacheNode = RankUnitCache,
 
-  RankInstanceCounts,
-  RankInstanceBits = RankInstanceCounts,
+  RankInstanceBitsInit,
 
   RankTreadmill,
 
@@ -64,7 +65,7 @@ enum Rank {
   RankLeaf
 };
 
-#ifdef DEBUG
+#ifndef NDEBUG
 extern Rank currentRank();
 extern void checkRank(Rank r);
 extern void pushRank(Rank r);

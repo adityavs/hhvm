@@ -1,4 +1,4 @@
-<?php
+<?hh
 class C {
   private function foo() {
     echo "C::foo\n";
@@ -13,5 +13,7 @@ class D extends C {
     echo "D::foo\n";
   }
 }
+<<__EntryPoint>> function main(): void {
 $obj = new C;
 $obj->test();
+}

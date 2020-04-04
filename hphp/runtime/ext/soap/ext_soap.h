@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -31,8 +31,7 @@ int64_t HHVM_FUNCTION(_soap_active_version);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapServer {
-public:
+struct SoapServer {
   SoapServer();
 
   int                        m_type;
@@ -55,8 +54,7 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapClient {
-public:
+struct SoapClient {
   SoapClient();
 
   int                         m_soap_version;
@@ -81,6 +79,7 @@ public:
   int                         m_max_redirect;
   bool                        m_use11;
   String                      m_user_agent;
+  int                         m_ssl_method = -1;
   int                         m_compression;
   Variant                     m_default_headers;
   Array                       m_cookies;
@@ -103,8 +102,7 @@ extern const StaticString
   s_enc_type, s_enc_value, s_enc_stype,
   s_enc_ns, s_enc_name, s_enc_namens;
 
-class SoapVar {
-public:
+struct SoapVar {
   static Class* getClass();
 
   static int64_t getEncType(ObjectData* obj) {
@@ -112,13 +110,13 @@ public:
     if (!enc_type.isInitialized()) {
       raise_error("Encoding: SoapVar has no 'enc_type' property");
       not_reached();
-      assert(false);
+      assertx(false);
     }
     return enc_type.toInt64();
   }
 
   static void setEncType(ObjectData* obj, int64_t t) {
-    obj->o_set(s_enc_type, t);
+    obj->setProp(nullptr, s_enc_type.get(), make_tv<KindOfInt64>(t));
   }
 
   static Variant getEncValue(ObjectData* obj) {
@@ -126,12 +124,16 @@ public:
   }
 
   static void setEncValue(ObjectData* obj, const Variant& val) {
-    obj->o_set(s_enc_value, val);
+    obj->setProp(nullptr, s_enc_value.get(), *val.asTypedValue());
   }
 
 #define X(Name, str_name) \
   static void setEnc##Name(ObjectData* obj, const String& str) { \
-    obj->o_set(s_enc_##str_name, str); \
+    if (str.isNull()) { \
+      obj->setProp(nullptr, s_enc_##str_name.get(), make_tv<KindOfNull>()); \
+    } else { \
+      obj->setProp(nullptr, s_enc_##str_name.get(), str.asTypedValue()); \
+    } \
   } \
   static String getEnc##Name(ObjectData* obj) { \
     return getStrValue(obj, s_enc_##str_name); \
@@ -160,8 +162,7 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapParam {
-public:
+struct SoapParam {
   static Class* getClass();
 
   String                      m_name;
@@ -173,8 +174,7 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SoapHeader {
-public:
+struct SoapHeader {
   static Class* getClass();
 
   String                      m_namespace;

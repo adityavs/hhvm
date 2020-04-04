@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,7 +36,8 @@ namespace HPHP {
 void ThreadLocalManager::OnThreadExit(void* p) {
   auto list = getList(p);
   p = list->head;
-  delete list;
+  list->~ThreadLocalList();
+  local_free(list);
   while (p != nullptr) {
     auto* pNode = static_cast<ThreadLocalNode<void>*>(p);
     if (pNode->m_on_thread_exit_fn) {
@@ -46,16 +47,29 @@ void ThreadLocalManager::OnThreadExit(void* p) {
   }
 }
 
-void ThreadLocalManager::PushTop(void* nodePtr, size_t nodeSize) {
+void ThreadLocalManager::initTypeIndices() {
+  auto list = getList(pthread_getspecific(m_key));
+  if (!list) return;
+  for (auto p = list->head; p != nullptr;) {
+    auto node = static_cast<ThreadLocalNode<void>*>(p);
+    node->m_init_tyindex(node);
+    p = node->m_next;
+  }
+}
+
+void ThreadLocalManager::PushTop(void* nodePtr, uint32_t nodeSize,
+                                 type_scan::Index tyindex) {
   auto& node = *static_cast<ThreadLocalNode<void>*>(nodePtr);
   auto key = GetManager().m_key;
   auto list = getList(pthread_getspecific(key));
   if (UNLIKELY(!list)) {
-    ThreadLocalSetValue(key, list = new ThreadLocalList);
+    list = new (local_malloc(sizeof(ThreadLocalList))) ThreadLocalList;
+    ThreadLocalSetValue(key, list);
   }
   node.m_next = list->head;
   node.m_size = nodeSize;
-  list->head = node.m_next;
+  node.m_tyindex = tyindex;
+  list->head = &node;
 }
 
 ThreadLocalManager& ThreadLocalManager::GetManager() {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/vm/jit/irgen-arith.h"
+
 #include "hphp/runtime/base/strings.h"
 
 #include "hphp/runtime/vm/jit/irgen-exit.h"
@@ -23,12 +25,6 @@
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 
 namespace HPHP { namespace jit { namespace irgen {
-
-namespace {
-
-//////////////////////////////////////////////////////////////////////
-
-const StaticString s_emptyString("");
 
 bool areBinaryArithTypesSupported(Op op, Type t1, Type t2) {
   auto checkArith = [](Type ty) {
@@ -127,11 +123,13 @@ Opcode promoteBinaryDoubles(IRGS& env, Op op, SSATmp*& src1, SSATmp*& src2) {
   return opc;
 }
 
+namespace {
+
 void binaryBitOp(IRGS& env, Op op) {
-  auto const type2 = topC(env, BCSPOffset{0})->type();
-  auto const type1 = topC(env, BCSPOffset{1})->type();
+  auto const type2 = topC(env, BCSPRelOffset{0})->type();
+  auto const type1 = topC(env, BCSPRelOffset{1})->type();
   if (!areBinaryArithTypesSupported(op, type1, type2)) {
-    PUNT(BunaryBitOp-Unsupported);
+    PUNT(BinaryBitOp-Unsupported);
     return;
   }
 
@@ -141,12 +139,11 @@ void binaryBitOp(IRGS& env, Op op) {
 }
 
 void binaryArith(IRGS& env, Op op) {
-  auto const type2 = topC(env, BCSPOffset{0})->type();
-  auto const type1 = topC(env, BCSPOffset{1})->type();
+  auto const type2 = topC(env, BCSPRelOffset{0})->type();
+  auto const type1 = topC(env, BCSPRelOffset{1})->type();
   if (!areBinaryArithTypesSupported(op, type1, type2)) {
     // either an int or a dbl, but can't tell
     PUNT(BinaryArith-Unsupported);
-    return;
   }
 
   auto const exitSlow = makeExitSlow(env);
@@ -269,6 +266,41 @@ Opcode toArrCmpOpcode(Op op) {
   }
 }
 
+Opcode toVecCmpOpcode(Op op) {
+  switch (op) {
+    case Op::Gt:    return GtVec;
+    case Op::Gte:   return GteVec;
+    case Op::Lt:    return LtVec;
+    case Op::Lte:   return LteVec;
+    case Op::Eq:    return EqVec;
+    case Op::Same:  return SameVec;
+    case Op::Neq:   return NeqVec;
+    case Op::NSame: return NSameVec;
+    case Op::Cmp:   return CmpVec;
+    default: always_assert(false);
+  }
+}
+
+Opcode toDictCmpOpcode(Op op) {
+  switch (op) {
+    case Op::Eq:    return EqDict;
+    case Op::Same:  return SameDict;
+    case Op::Neq:   return NeqDict;
+    case Op::NSame: return NSameDict;
+    default: always_assert(false);
+  }
+}
+
+Opcode toKeysetCmpOpcode(Op op) {
+  switch (op) {
+    case Op::Eq:    return EqKeyset;
+    case Op::Same:  return SameKeyset;
+    case Op::Neq:   return NeqKeyset;
+    case Op::NSame: return NSameKeyset;
+    default: always_assert(false);
+  }
+}
+
 Opcode toResCmpOpcode(Op op) {
   switch (op) {
     case Op::Gt:    return GtRes;
@@ -377,7 +409,7 @@ SSATmp* emitObjStrCmp(IRGS& env, Op op, SSATmp* obj, SSATmp* str) {
       // object into a string, and then do a string comparison.
       auto const converted = gen(env, ConvObjToStr, obj);
       auto const result = gen(env, toStrCmpOpcode(op), converted, str);
-      gen(env, DecRef, converted);
+      decRef(env, converted);
       return result;
     }
   );
@@ -389,8 +421,165 @@ SSATmp* emitConstCmp(IRGS& env, Op op, bool left, bool right) {
   return gen(env, toBoolCmpOpcode(op), cns(env, left), cns(env, right));
 }
 
+SSATmp* emitHackArrBoolCmp(IRGS& env, Op op, SSATmp* arr, SSATmp* right) {
+  auto const arrTy = arr->type();
+  assertx(arrTy.subtypeOfAny(TVec, TDict, TKeyset));
+  assertx(right->type() <= TBool);
+
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp: {
+      auto const m = arrTy <= TVec  ? s_cmpWithVec :
+                     arrTy <= TDict ? s_cmpWithDict :
+                                      s_cmpWithKeyset;
+      gen(env, ThrowInvalidOperation, cns(env, m.get()));
+      return cns(env, op == Op::Cmp ? 0 : false);
+    }
+    case Op::Eq:
+      if (RO::EvalHackArrEmptyBasedBoolEqCmp) {
+        return gen(env, EqBool, gen(env, ConvTVToBool, arr), right);
+      }
+      if (RO::EvalHackArrCompatHackArrCmpNotices) {
+        gen(
+          env,
+          RaiseHackArrCompatNotice,
+          cns(env, makeStaticString(Strings::HACKARR_COMPAT_HACK_ARR_BOOL_CMP))
+        );
+      }
+      return cns(env, false);
+    case Op::Neq:
+      if (RO::EvalHackArrEmptyBasedBoolEqCmp) {
+        return gen(env, NeqBool, gen(env, ConvTVToBool, arr), right);
+      }
+      if (RO::EvalHackArrCompatHackArrCmpNotices) {
+        gen(
+          env,
+          RaiseHackArrCompatNotice,
+          cns(env, makeStaticString(Strings::HACKARR_COMPAT_HACK_ARR_BOOL_CMP))
+        );
+      }
+      return cns(env, true);
+    default: always_assert(false);
+  }
+}
+
+// Relational comparisons of vecs with non-vecs isn't allowed and will always
+// throw. Equality comparisons always act as if they are not equal.
+SSATmp* emitMixedVecCmp(IRGS& env, Op op) {
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp:
+      gen(
+        env,
+        ThrowInvalidOperation,
+        cns(env, s_cmpWithVec.get())
+      );
+      return cns(env, false);
+    case Op::Same:
+    case Op::Eq: return cns(env, false);
+    case Op::NSame:
+    case Op::Neq: return cns(env, true);
+    default: always_assert(false);
+  }
+}
+
+// Relational comparisons of dicts with non-dicts isn't allowed and will always
+// throw. Equality comparisons always act as if they are not equal.
+SSATmp* emitMixedDictCmp(IRGS& env, Op op) {
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp:
+      gen(
+        env,
+        ThrowInvalidOperation,
+        cns(env, s_cmpWithDict.get())
+      );
+      return cns(env, false);
+    case Op::Same:
+    case Op::Eq: return cns(env, false);
+    case Op::NSame:
+    case Op::Neq: return cns(env, true);
+    default: always_assert(false);
+  }
+}
+
+// Relational comparisons of keysets with non-keysets isn't allowed and will
+// always throw. Equality comparisons always act as if they are not equal.
+SSATmp* emitMixedKeysetCmp(IRGS& env, Op op) {
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp:
+      gen(
+        env,
+        ThrowInvalidOperation,
+        cns(env, s_cmpWithKeyset.get())
+      );
+      return cns(env, false);
+    case Op::Same:
+    case Op::Eq: return cns(env, false);
+    case Op::NSame:
+    case Op::Neq: return cns(env, true);
+    default: always_assert(false);
+  }
+}
+
+SSATmp* emitMixedClsMethCmp(IRGS& env, Op op) {
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp:
+      gen(env, ThrowInvalidOperation, cns(env, s_cmpWithClsMeth.get()));
+      return cns(env, false);
+    case Op::Same:
+    case Op::Eq:  return cns(env, false);
+    case Op::NSame:
+    case Op::Neq: return cns(env, true);
+    default: always_assert(false);
+  }
+}
+
+namespace {
+
+void raiseClsMethCompareWarningHelper(IRGS& env, Op op) {
+  if (!RuntimeOption::EvalRaiseClsMethComparisonWarning) return;
+  switch (op) {
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Cmp:
+      gen(
+        env,
+        RaiseNotice,
+        cns(env, makeStaticString(Strings::CLSMETH_COMPAT_NON_CLSMETH_REL_CMP))
+      );
+      return;
+    case Op::Same:
+    case Op::Eq:
+    case Op::NSame:
+    case Op::Neq: return;
+    default: always_assert(false);
+  }
+}
+
+}
+
 void implNullCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TNull);
+  assertx(left->type() <= TNull);
   auto const rightTy = right->type();
 
   // Left operand is null.
@@ -400,7 +589,7 @@ void implNullCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
     push(env,
          gen(env,
              toStrCmpOpcode(op),
-             cns(env, s_emptyString.get()),
+             cns(env, staticEmptyString()),
              right));
   } else if (rightTy <= TObj) {
     // When compared to an object, null is treated as false, and the object as
@@ -408,29 +597,68 @@ void implNullCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
     // in certain cases, which we do not want here. Also note that no collection
     // check is done.
     push(env, emitConstCmp(env, op, false, true));
+  } else if (rightTy.subtypeOfAny(TVec, TDict, TKeyset)) {
+    // Treat null as false when comparing to an array.
+    push(
+      env,
+      emitCommutedOp(
+        env,
+        op,
+        [&](Op op){
+          return emitHackArrBoolCmp(env, op, right, cns(env, false));
+        }
+      )
+    );
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, false, true));
+    }
   } else {
     // Otherwise, convert both sides to booleans (with null becoming false).
     push(env,
          gen(env,
              toBoolCmpOpcode(op),
              cns(env, false),
-             gen(env, ConvCellToBool, right)));
+             gen(env, ConvTVToBool, right)));
   }
 }
 
 void implBoolCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TBool);
-  // Convert whatever is on the right to a boolean and compare. The conversion
-  // may be a no-op if the right operand is already a bool.
-  push(env,
-       gen(env,
-           toBoolCmpOpcode(op),
-           left,
-           gen(env, ConvCellToBool, right)));
+  assertx(left->type() <= TBool);
+  auto const rightTy = right->type();
+
+  if (rightTy.subtypeOfAny(TVec, TDict, TKeyset)) {
+    push(
+      env,
+      emitCommutedOp(
+        env,
+        op,
+        [&](Op op){ return emitHackArrBoolCmp(env, op, right, left); }
+      )
+    );
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, gen(env, toBoolCmpOpcode(op), left, cns(env, true)));
+    }
+  } else {
+    // Convert whatever is on the right to a boolean and compare. The conversion
+    // may be a no-op if the right operand is already a bool.
+    push(env,
+         gen(env,
+             toBoolCmpOpcode(op),
+             left,
+             gen(env, ConvTVToBool, right)));
+  }
 }
 
 void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TInt);
+  assertx(left->type() <= TInt);
   auto const rightTy = right->type();
 
   // Left operand is int.
@@ -450,7 +678,7 @@ void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
       emitCommutedOp(
         env,
         op,
-        [&](Op op){ return gen(env, toStrIntCmpOpcode(op), right, left); }
+        [&](Op op2){ return gen(env, toStrIntCmpOpcode(op2), right, left); }
       )
     );
   } else if (rightTy.subtypeOfAny(TNull, TBool)) {
@@ -459,10 +687,16 @@ void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toBoolCmpOpcode(op),
              gen(env, ConvIntToBool, left),
-             gen(env, ConvCellToBool, right)));
+             gen(env, ConvTVToBool, right)));
   } else if (rightTy <= TArr) {
     // All ints are implicity less than arrays.
     push(env, emitConstCmp(env, op, false, true));
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
   } else if (rightTy <= TObj) {
     // If compared against an object, emit a collection check before performing
     // the comparison.
@@ -482,6 +716,13 @@ void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         }
       )
     );
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, false, true));
+    }
   } else {
     // For everything else, convert to an int. The conversion may be a no-op if
     // the right operand is already an int.
@@ -489,12 +730,12 @@ void implIntCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toIntCmpOpcode(op),
              left,
-             gen(env, ConvCellToInt, right)));
+             gen(env, ConvTVToInt, right)));
   }
 }
 
 void implDblCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TDbl);
+  assertx(left->type() <= TDbl);
   auto const rightTy = right->type();
 
   // Left operand is a double.
@@ -505,10 +746,16 @@ void implDblCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toBoolCmpOpcode(op),
              gen(env, ConvDblToBool, left),
-             gen(env, ConvCellToBool, right)));
+             gen(env, ConvTVToBool, right)));
   } else if (rightTy <= TArr) {
     // All doubles are implicitly less than arrays.
     push(env, emitConstCmp(env, op, false, true));
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
   } else if (rightTy <= TObj) {
     // If compared against an object, emit a collection check before performing
     // the comparison.
@@ -528,6 +775,13 @@ void implDblCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         }
       )
     );
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, false, true));
+    }
   } else {
     // For everything else, convert to a double. The conversion may be a no-op
     // if the right operand is already a double.
@@ -535,12 +789,63 @@ void implDblCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toDblCmpOpcode(op),
              left,
-             gen(env, ConvCellToDbl, right)));
+             gen(env, ConvTVToDbl, right)));
   }
 }
 
+const StaticString
+  s_funcToStringWarning(Strings::FUNC_TO_STRING),
+  s_clsToStringWarning(Strings::CLASS_TO_STRING);
+
+namespace {
+
+SSATmp* equalClsMeth(IRGS& env, SSATmp* left, SSATmp* right) {
+  assertx(left->type() <= TClsMeth);
+  assertx(right->type() <= TClsMeth);
+  return cond(
+      env,
+      [&](Block* taken) {
+        auto const leftCls = gen(env, LdClsFromClsMeth, left);
+        auto const rightCls = gen(env, LdClsFromClsMeth, right);
+        assertx(leftCls->type() <= TCls);
+        assertx(rightCls->type() <= TCls);
+        gen(env, JmpZero, taken, gen(env, EqCls, leftCls, rightCls));
+      },
+      [&] {
+        auto const leftFunc = gen(env, LdFuncFromClsMeth, left);
+        auto const rightFunc = gen(env, LdFuncFromClsMeth, right);
+        assertx(leftFunc->type() <= TFunc);
+        assertx(rightFunc->type() <= TFunc);
+        return gen(env, EqFunc, leftFunc, rightFunc);
+       },
+      [&] {
+        return cns(env, false);
+       }
+    );
+}
+
+void raiseClsMethToVecWarningHelper(IRGS& env) {
+  if (RuntimeOption::EvalRaiseClsMethConversionWarning) {
+    gen(env, RaiseNotice, cns(env, makeStaticString(
+      folly::sformat("Implicit clsmeth to {} conversion",
+        RuntimeOption::EvalHackArrDVArrs ? "vec" : "varray"))));
+  }
+}
+
+void raiseHACCompareWarningHelper(IRGS& env) {
+  if (checkHACCompare()) {
+    gen(
+      env,
+      RaiseHackArrCompatNotice,
+      cns(env, makeStaticString(Strings::HACKARR_COMPAT_ARR_HACK_ARR_CMP))
+    );
+  }
+}
+
+}
+
 void implArrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TArr);
+  assertx(left->type() <= TArr);
   auto const rightTy = right->type();
 
   // Left operand is an array.
@@ -554,7 +859,7 @@ void implArrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toBoolCmpOpcode(op),
              gen(env, ConvArrToBool, left),
-             gen(env, ConvCellToBool, right)));
+             gen(env, ConvTVToBool, right)));
   } else if (rightTy <= TObj) {
     // Objects are always greater than arrays. Emit a collection check first.
     push(
@@ -566,14 +871,123 @@ void implArrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         [&]{ return emitConstCmp(env, op, false, true); }
       )
     );
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethToVecWarningHelper(env);
+      auto const arr = convertClsMethToVec(env, right);
+      push(env, gen(env, toArrCmpOpcode(op), left, arr));
+      decRef(env, arr);
+    }
   } else {
     // Array is always greater than everything else.
     push(env, emitConstCmp(env, op, true, false));
   }
 }
 
+void implVecCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  assertx(left->type() <= TVec);
+  auto const rightTy = right->type();
+
+  // Left operand is a vec.
+  if (rightTy.subtypeOfAny(TNull, TBool)) {
+    push(env, emitHackArrBoolCmp(env, op, left, gen(env, ConvTVToBool, right)));
+  } else if (rightTy <= TVec) {
+    push(env, gen(env, toVecCmpOpcode(op), left, right));
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      raiseClsMethToVecWarningHelper(env);
+      auto const arr = convertClsMethToVec(env, right);
+      push(env, gen(env, toVecCmpOpcode(op), left, arr));
+      decRef(env, arr);
+    } else {
+      raiseHACCompareWarningHelper(env);
+      if (RuntimeOption::EvalRaiseClsMethComparisonWarning) {
+        gen(
+          env,
+          RaiseNotice,
+          cns(env, makeStaticString(Strings::CLSMETH_COMPAT_VEC_CMP))
+        );
+      }
+      push(env, emitMixedVecCmp(env, op));
+    }
+  } else {
+    push(env, emitMixedVecCmp(env, op));
+  }
+}
+
+void implDictCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  assertx(left->type() <= TDict);
+  auto const rightTy = right->type();
+
+  // Left operand is a dict.
+  if (rightTy.subtypeOfAny(TNull, TBool)) {
+    push(env, emitHackArrBoolCmp(env, op, left, gen(env, ConvTVToBool, right)));
+  } else if (rightTy <= TDict) {
+    // Dicts can't use relational comparisons.
+    if (op == Op::Eq || op == Op::Neq ||
+        op == Op::Same || op == Op::NSame) {
+      push(env, gen(env, toDictCmpOpcode(op), left, right));
+    } else {
+      gen(
+        env,
+        ThrowInvalidOperation,
+        cns(env, s_cmpWithDict.get())
+      );
+      push(env, cns(env, false));
+    }
+  } else {
+    push(env, emitMixedDictCmp(env, op));
+  }
+}
+
+void implKeysetCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  assertx(left->type() <= TKeyset);
+  auto const rightTy = right->type();
+
+  // Left operand is a keyset.
+  if (rightTy.subtypeOfAny(TNull, TBool)) {
+    push(env, emitHackArrBoolCmp(env, op, left, gen(env, ConvTVToBool, right)));
+  } else if (rightTy <= TKeyset) {
+    // Keysets can't use relational comparisons.
+    if (op == Op::Eq || op == Op::Neq ||
+        op == Op::Same || op == Op::NSame) {
+      push(env, gen(env, toKeysetCmpOpcode(op), left, right));
+    } else {
+      gen(
+        env,
+        ThrowInvalidOperation,
+        cns(env, s_cmpWithKeyset.get())
+      );
+      push(env, cns(env, false));
+    }
+  } else {
+    push(env, emitMixedKeysetCmp(env, op));
+  }
+}
+
 void implStrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TStr);
+  assertx(left->type() <= TStr);
+
+  if (right->isA(TFunc)) {
+    if (RuntimeOption::EvalRaiseFuncConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_funcToStringWarning.get()));
+    }
+    right = gen(env, LdFuncName, right);
+  } else if (right->isA(TCls)) {
+    if (RuntimeOption::EvalRaiseClassConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_clsToStringWarning.get()));
+    }
+    right = gen(env, LdClsName, right);
+  }
+
   auto const rightTy = right->type();
 
   // Left operand is a string.
@@ -588,7 +1002,7 @@ void implStrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
          gen(env,
              toStrCmpOpcode(op),
              left,
-             cns(env, s_emptyString.get())));
+             cns(env, staticEmptyString())));
   } else if (rightTy <= TBool) {
     // If compared against a bool, convert the string to a bool.
     push(env,
@@ -638,6 +1052,19 @@ void implStrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         }
       )
     );
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, false, true));
+    }
   } else {
     // Strings are less than anything else (usually arrays).
     push(env, emitConstCmp(env, op, false, true));
@@ -645,7 +1072,7 @@ void implStrCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
 }
 
 void implObjCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TObj);
+  assertx(left->type() <= TObj);
   auto const rightTy = right->type();
 
   // Left operand is an object.
@@ -710,6 +1137,32 @@ void implObjCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         [&]{ return emitObjStrCmp(env, op, left, right); }
       )
     );
+  } else if (rightTy <= TFunc) {
+    if (RuntimeOption::EvalRaiseFuncConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_funcToStringWarning.get()));
+    }
+    push(
+      env,
+      emitCollectionCheck(
+        env,
+        op,
+        left,
+        [&]{ return emitObjStrCmp(env, op, left, gen(env, LdFuncName, right)); }
+      )
+    );
+  } else if (rightTy <= TCls) {
+    if (RuntimeOption::EvalRaiseClassConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_clsToStringWarning.get()));
+    }
+    push(
+      env,
+      emitCollectionCheck(
+        env,
+        op,
+        left,
+        [&]{ return emitObjStrCmp(env, op, left, gen(env, LdClsName, right)); }
+      )
+    );
   } else if (rightTy <= TArr) {
     // Object is always greater than array, but we need a collection check
     // first.
@@ -722,6 +1175,27 @@ void implObjCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
         [&]{ return emitConstCmp(env, op, true, false); }
       )
     );
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(
+        env,
+        emitCollectionCheck(
+          env,
+          op,
+          left,
+          [&]{ return emitConstCmp(env, op, true, false); }
+        )
+      );
+    }
   } else {
     // For anything else, the object is always greater.
     push(env, emitConstCmp(env, op, true, false));
@@ -729,7 +1203,7 @@ void implObjCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
 }
 
 void implResCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
-  assert(left->type() <= TRes);
+  assertx(left->type() <= TRes);
   auto const rightTy = right->type();
 
   // Left operand is a resource.
@@ -769,10 +1243,155 @@ void implResCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
              toDblCmpOpcode(op),
              gen(env, ConvResToDbl, left),
              gen(env, ConvStrToDbl, right)));
+  } else if (rightTy <= TVec) {
+    push(env, emitMixedVecCmp(env, op));
+  } else if (rightTy <= TDict) {
+    push(env, emitMixedDictCmp(env, op));
+  } else if (rightTy <= TKeyset) {
+    push(env, emitMixedKeysetCmp(env, op));
+  } else if (rightTy <= TClsMeth) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      push(env, emitMixedClsMethCmp(env, op));
+    } else {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, false, true));
+    }
   } else {
     // Resources are always less than anything else.
     push(env, emitConstCmp(env, op, false, true));
   }
+}
+
+void implFunCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  auto const rightTy = right->type();
+
+  if (rightTy <= TFunc) {
+    if (op == Op::Eq || op == Op::Same) {
+      push(env, gen(env, EqFunc, left, right));
+      return;
+    }
+    if (op == Op::Neq || op == Op::NSame) {
+      push(
+        env, gen(env, XorBool, gen(env, EqFunc, left, right), cns(env, true)));
+      return;
+    }
+  }
+
+  if (rightTy <= TStr) {
+    if (RuntimeOption::EvalRaiseFuncConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_funcToStringWarning.get()));
+    }
+    auto const str = gen(env, LdFuncName, left);
+    implStrCmp(env, op, str, right);
+    return;
+  }
+
+  PUNT(Func-cmp);
+}
+
+void implClsCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  auto const rightTy = right->type();
+
+  if (rightTy <= TCls) {
+    if (op == Op::Eq || op == Op::Same) {
+      push(env, gen(env, EqCls, left, right));
+      return;
+    }
+    if (op == Op::Neq || op == Op::NSame) {
+      push(
+        env, gen(env, XorBool, gen(env, EqCls, left, right), cns(env, true)));
+      return;
+    }
+  }
+
+  if (rightTy <= TStr) {
+    if (RuntimeOption::EvalRaiseClassConversionWarning) {
+      gen(env, RaiseWarning, cns(env, s_clsToStringWarning.get()));
+    }
+    auto const str = gen(env, LdClsName, left);
+    implStrCmp(env, op, str, right);
+    return;
+  }
+
+  PUNT(Cls-cmp);
+}
+
+void implClsMethCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  auto const rightTy = right->type();
+  if (rightTy <= TClsMeth) {
+    if (op == Op::Eq || op == Op::Same) {
+      push(env, equalClsMeth(env, left, right));
+      return;
+    }
+    if (op == Op::Neq || op == Op::NSame) {
+      push(
+        env, gen(env, XorBool, equalClsMeth(env, left, right), cns(env, true)));
+      return;
+    }
+    PUNT(ClsMeth-ClsMeth-cmp);
+  }
+
+  if (RuntimeOption::EvalHackArrDVArrs) {
+    // Left (TClsMeth) is compatible with vec
+    if (rightTy <= TVec) {
+      raiseClsMethToVecWarningHelper(env);
+      auto const arr = convertClsMethToVec(env, left);
+      implVecCmp(env, op, arr, right);
+      decRef(env, arr);
+    } else {
+      push(env, emitMixedClsMethCmp(env, op));
+    }
+  } else {
+    // Left (TClsMeth) is compatible with varray
+    if (rightTy.subtypeOfAny(TNull, TInt, TDbl, TStr)) {
+      // Null is always less than TClsMeth
+      // ints,dbls,strs are implicitly less than TClsMeth
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitConstCmp(env, op, true, false));
+    } else if (rightTy <= TBool) {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, gen(env, toBoolCmpOpcode(op), cns(env, true), right));
+    } else if (rightTy <= TObj) {
+      raiseClsMethCompareWarningHelper(env, op);
+      // collections are greater than TClsMeth
+      push(
+        env,
+        emitCollectionCheck(
+          env,
+          op,
+          right,
+          [&]{ return emitConstCmp(env, op, false, true); }
+        )
+      );
+    } else if (rightTy <= TArr) {
+      raiseClsMethToVecWarningHelper(env);
+      auto const arr = convertClsMethToVec(env, left);
+      implArrCmp(env, op, arr, right);
+      decRef(env, arr);
+    } else if (rightTy <= TVec) {
+      raiseHACCompareWarningHelper(env);
+      if (RuntimeOption::EvalRaiseClsMethComparisonWarning) {
+        gen(
+          env,
+          RaiseNotice,
+          cns(env, makeStaticString(Strings::CLSMETH_COMPAT_VEC_CMP))
+        );
+      }
+      push(env, emitMixedVecCmp(env, op));
+    } else if (rightTy <= TDict) {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitMixedDictCmp(env, op));
+    } else if (rightTy <= TKeyset) {
+      raiseClsMethCompareWarningHelper(env, op);
+      push(env, emitMixedKeysetCmp(env, op));
+    } else {
+      PUNT(ClsMeth-cmp);
+    }
+  }
+}
+
+void implRecordCmp(IRGS& env, Op op, SSATmp* left, SSATmp* right) {
+  PUNT(Record-cmp);
 }
 
 /*
@@ -793,31 +1412,96 @@ void implCmp(IRGS& env, Op op) {
     PUNT(cmpUnknownDataType);
   }
 
+  // With EvalHackArrCompatNotices enabled, we'll raise a notice on ===, !==,
+  // ==, or != between a PHP array and a Hack array. On relational compares,
+  // we'll throw between a PHP array and any other type.
+  auto const is_php_arr_hack_arr_cmp =
+    (leftTy <= TArr && rightTy <= (TVec|TDict|TKeyset)) ||
+    (leftTy <= (TVec|TDict|TKeyset) && rightTy <= TArr);
+  switch (op) {
+    case Op::Same:
+    case Op::NSame:
+    case Op::Eq:
+    case Op::Neq:
+      if (is_php_arr_hack_arr_cmp) raiseHACCompareWarningHelper(env);
+      break;
+    case Op::Lt:
+    case Op::Lte:
+    case Op::Gt:
+    case Op::Gte:
+    case Op::Cmp:
+      if (is_php_arr_hack_arr_cmp) raiseHACCompareWarningHelper(env);
+      else {
+        auto const is_php_arr_non_arr_cmp =
+          ((leftTy <= TArr) != (rightTy <= (TArr|TClsMeth))) &&
+          ((leftTy <= (TArr|TClsMeth)) != (rightTy <= TArr));
+        if (is_php_arr_non_arr_cmp) {
+          auto const nonArr = [&]{
+            gen(
+              env,
+              ThrowInvalidOperation,
+              cns(env, s_cmpWithNonArr.get())
+            );
+            return cns(env, false);
+          };
+          if (leftTy <= TObj || rightTy <= TObj) {
+            emitCollectionCheck(env, op, leftTy <= TObj ? left : right, nonArr);
+          } else {
+            nonArr();
+          }
+        }
+      }
+      break;
+    default:
+      always_assert(false);
+  }
+
+  auto equiv = [&] {
+    return
+      equivDataTypes(leftTy.toDataType(), rightTy.toDataType()) ||
+      (isFuncType(leftTy.toDataType()) && isClassType(rightTy.toDataType())) ||
+      (isClassType(leftTy.toDataType()) && isFuncType(rightTy.toDataType())) ||
+      (isFuncType(leftTy.toDataType()) && isStringType(rightTy.toDataType())) ||
+      (isStringType(leftTy.toDataType()) && isFuncType(rightTy.toDataType())) ||
+      (isClassType(leftTy.toDataType()) && isStringType(rightTy.toDataType()))||
+      (isStringType(leftTy.toDataType()) &&
+        isClassType(rightTy.toDataType())) ||
+      (isClsMethType(leftTy.toDataType()) &&
+        isArrayLikeType(rightTy.toDataType())) ||
+      (isArrayLikeType(leftTy.toDataType()) &&
+        isClsMethType(rightTy.toDataType()));
+  };
+
   // If it's a same-ish comparison and the types don't match (taking into
   // account Str and StaticStr), lower to a bool comparison of
   // constants. Otherwise, switch on the type of the left operand to emit the
   // right kind of comparison.
-  if ((op == Op::Same || op == Op::NSame) &&
-      leftTy.toDataType() != rightTy.toDataType() &&
-      !(leftTy <= TStr && rightTy <= TStr)) {
+  if ((op == Op::Same || op == Op::NSame) && !equiv()) {
     push(env, emitConstCmp(env, op, false, true));
   } else if (leftTy <= TNull) implNullCmp(env, op, left, right);
   else if (leftTy <= TBool) implBoolCmp(env, op, left, right);
   else if (leftTy <= TInt) implIntCmp(env, op, left, right);
   else if (leftTy <= TDbl) implDblCmp(env, op, left, right);
   else if (leftTy <= TArr) implArrCmp(env, op, left, right);
+  else if (leftTy <= TVec) implVecCmp(env, op, left, right);
+  else if (leftTy <= TDict) implDictCmp(env, op, left, right);
+  else if (leftTy <= TKeyset) implKeysetCmp(env, op, left, right);
   else if (leftTy <= TStr) implStrCmp(env, op, left, right);
   else if (leftTy <= TObj) implObjCmp(env, op, left, right);
   else if (leftTy <= TRes) implResCmp(env, op, left, right);
+  else if (leftTy <= TFunc) implFunCmp(env, op, left, right);
+  else if (leftTy <= TCls) implClsCmp(env, op, left, right);
+  else if (leftTy <= TClsMeth) implClsMethCmp(env, op, left, right);
+  else if (leftTy <= TRecord) implRecordCmp(env, op, left, right);
   else always_assert(false);
 
-  gen(env, DecRef, left);
-  gen(env, DecRef, right);
+  decRef(env, left);
+  decRef(env, right);
 }
 
 void implAdd(IRGS& env, Op op) {
-  if (topC(env, BCSPOffset{0})->type() <= TArr &&
-      topC(env, BCSPOffset{1})->type() <= TArr) {
+  if (topC(env, BCSPRelOffset{0})->type() <= TArr &&
+      topC(env, BCSPRelOffset{1})->type() <= TArr) {
     auto const tr = popC(env);
     auto const tl = popC(env);
     // The ArrayAdd helper decrefs its args, so don't decref pop'ed values.
@@ -829,24 +1513,30 @@ void implAdd(IRGS& env, Op op) {
 
 template<class PreDecRef>
 void implConcat(IRGS& env, SSATmp* c1, SSATmp* c2, PreDecRef preDecRef) {
-  auto const t1 = c1->type();
-  auto const t2 = c2->type();
+  auto cast =
+    [&] (SSATmp* s) {
+      if (s->isA(TStr)) return s;
+      auto const ret = gen(env, ConvTVToStr, s);
+      decRef(env, s);
+      return ret;
+    };
 
   /*
    * We have some special translations for common combinations that avoid extra
    * conversion calls.
    */
-  auto const str = [&] () -> SSATmp* {
-    if (t2 <= TInt && t1 <= TStr) return gen(env, ConcatIntStr, c2, c1);
-    if (t2 <= TStr && t1 <= TInt) return gen(env, ConcatStrInt, c2, c1);
-    return nullptr;
-  }();
+  auto const str =
+    [&] () -> SSATmp* {
+      if (c1->isA(TInt)) return gen(env, ConcatStrInt, cast(c2), c1);
+      if (c2->isA(TInt)) return gen(env, ConcatIntStr, c2, c1 = cast(c1));
+      return nullptr;
+    }();
 
   if (str) {
     preDecRef(str);
     // Note that the ConcatFoo opcode consumed the reference on its first
     // argument, so we only need to decref the second one.
-    gen(env, DecRef, c1);
+    decRef(env, c1);
     return;
   }
 
@@ -854,21 +1544,18 @@ void implConcat(IRGS& env, SSATmp* c1, SSATmp* c2, PreDecRef preDecRef) {
    * Generic translation: convert both to strings, and then concatenate them.
    *
    * NB: the order we convert to strings is observable (because of __toString
-   * methods), and the order we run DecRefs of the input cells is also
-   * observable.
+   * methods).
    *
    * We don't want to convert to strings if either was already a string.  Note
    * that for the c2 string, failing to do this could change big-O program
    * behavior if refcount opts were off, since we'd COW strings that we
-   * shouldn't (a ConvCellToStr of a Str will simplify into an IncRef).
+   * shouldn't (a ConvTVToStr of a Str will simplify into an IncRef).
    */
-  auto const s2 = t2 <= TStr ? c2 : gen(env, ConvCellToStr, c2);
-  auto const s1 = t1 <= TStr ? c1 : gen(env, ConvCellToStr, c1);
+  auto const s2 = cast(c2);
+  auto const s1 = cast(c1);
   auto const r  = gen(env, ConcatStrStr, s2, s1);  // consumes s2 reference
   preDecRef(r);
-  gen(env, DecRef, s1);
-  if (s2 != c2) gen(env, DecRef, c2);
-  if (s1 != c1) gen(env, DecRef, c1);
+  decRef(env, s1);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -881,34 +1568,34 @@ void emitConcat(IRGS& env) {
   implConcat(env, c1, c2, [&] (SSATmp* r) { push(env, r); });
 }
 
-void emitConcatN(IRGS& env, int32_t n) {
+void emitConcatN(IRGS& env, uint32_t n) {
   if (n == 2) return emitConcat(env);
 
   auto const t1 = popC(env);
   auto const t2 = popC(env);
   auto const t3 = popC(env);
+  auto const t4 = n == 4 ? popC(env) : nullptr;
 
-  if (!(t1->type() <= TStr) ||
-      !(t2->type() <= TStr) ||
-      !(t3->type() <= TStr)) {
-    PUNT(ConcatN);
-  }
+  auto const s4 = !t4 || t4->isA(TStr) ? t4 : gen(env, ConvTVToStr, t4);
+  auto const s3 = t3->isA(TStr) ? t3 : gen(env, ConvTVToStr, t3);
+  auto const s2 = t2->isA(TStr) ? t2 : gen(env, ConvTVToStr, t2);
+  auto const s1 = t1->isA(TStr) ? t1 : gen(env, ConvTVToStr, t1);
 
   if (n == 3) {
-    push(env, gen(env, ConcatStr3, t3, t2, t1));
-    gen(env, DecRef, t2);
-    gen(env, DecRef, t1);
-    return;
+    push(env, gen(env, ConcatStr3, s3, s2, s1));
+  } else {
+    always_assert(n == 4);
+
+    push(env, gen(env, ConcatStr4, s4, s3, s2, s1));
+    decRef(env, s3);
   }
+  decRef(env, s2);
+  decRef(env, s1);
 
-  always_assert(n == 4);
-  auto const t4 = popC(env);
-  if (!(t4->type() <= TStr)) PUNT(ConcatN);
-
-  push(env, gen(env, ConcatStr4, t4, t3, t2, t1));
-  gen(env, DecRef, t3);
-  gen(env, DecRef, t2);
-  gen(env, DecRef, t1);
+  if (s1 != t1) decRef(env, t1);
+  if (s2 != t2) decRef(env, t2);
+  if (s3 != t3) decRef(env, t3);
+  if (s4 != t4) decRef(env, t4);
 }
 
 void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
@@ -946,7 +1633,7 @@ void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
    * boxed locals.
    */
   bool const isAdd = (*subOpc == Op::Add || *subOpc == Op::AddO);
-  if (isAdd && (env.irb->localType(id, DataTypeSpecific) <= TArr) &&
+  if (isAdd && (env.irb->local(id, DataTypeSpecific).type <= TArr) &&
       topC(env)->isA(TArr)) {
     /*
      * ArrayAdd decrefs its sources and returns a new array with
@@ -961,8 +1648,7 @@ void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
     return;
   }
 
-  auto const ldrefExit = makeExit(env);
-  auto loc = ldLocInner(env, id, ldrefExit, ldPMExit, DataTypeGeneric);
+  auto loc = ldLoc(env, id, ldPMExit, DataTypeGeneric);
 
   if (*subOpc == Op::Concat) {
     /*
@@ -972,17 +1658,7 @@ void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
     auto const val    = popC(env);
     env.irb->constrainValue(loc, DataTypeSpecific);
     implConcat(env, val, loc, [&] (SSATmp* result) {
-      /*
-       * Null exit block for 'ldrefExit' because we won't actually need to
-       * reload the inner cell since we are doing a stLocNRC.  (Note that the
-       * inner cell may have changed type if we re-entered during Concat.)
-       *
-       * We can't put a non-null block here either, because it may need to
-       * side-exit and we've already made observable progress executing this
-       * instruction.  If we ever change ConcatStrFoo not to decref its sources
-       * we'll need to address this (or punt on a boxed source).
-       */
-      pushIncRef(env, stLocNRC(env, id, nullptr, ldPMExit, result));
+      pushIncRef(env, stLocNRC(env, id, ldPMExit, result));
     });
     return;
   }
@@ -1006,16 +1682,14 @@ void emitSetOpL(IRGS& env, int32_t id, SetOpOp subop) {
   auto const result = opc == AddIntO || opc == SubIntO || opc == MulIntO
     ? gen(env, opc, exitSlow, loc, val)
     : gen(env, opc, loc, val);
-  pushStLoc(env, id, ldrefExit, ldPMExit, result);
+  pushStLoc(env, id, ldPMExit, result);
 }
 
-void emitIncDecL(IRGS& env, int32_t id, IncDecOp subop) {
-  auto const ldrefExit = makeExit(env);
+void emitIncDecL(IRGS& env, NamedLocal loc, IncDecOp subop) {
   auto const ldPMExit = makePseudoMainExit(env);
-  auto const src = ldLocInnerWarn(
+  auto const src = ldLocWarn(
     env,
-    id,
-    ldrefExit,
+    loc,
     ldPMExit,
     DataTypeSpecific
   );
@@ -1024,7 +1698,7 @@ void emitIncDecL(IRGS& env, int32_t id, IncDecOp subop) {
     pushIncRef(env, isPre(subop) ? result : src);
     // Update marker to ensure newly-pushed value isn't clobbered by DecRef.
     updateMarker(env);
-    stLoc(env, id, ldrefExit, ldPMExit, result);
+    stLoc(env, loc.id, ldPMExit, result);
     return;
   }
 
@@ -1034,18 +1708,18 @@ void emitIncDecL(IRGS& env, int32_t id, IncDecOp subop) {
 void emitXor(IRGS& env) {
   auto const btr = popC(env);
   auto const btl = popC(env);
-  auto const tr = gen(env, ConvCellToBool, btr);
-  auto const tl = gen(env, ConvCellToBool, btl);
+  auto const tr = gen(env, ConvTVToBool, btr);
+  auto const tl = gen(env, ConvTVToBool, btl);
   push(env, gen(env, XorBool, tl, tr));
-  gen(env, DecRef, btl);
-  gen(env, DecRef, btr);
+  decRef(env, btl);
+  decRef(env, btr);
 }
 
 void implShift(IRGS& env, Opcode op) {
   auto const shiftAmount    = popC(env);
   auto const lhs            = popC(env);
-  auto const lhsInt         = gen(env, ConvCellToInt, lhs);
-  auto const shiftAmountInt = gen(env, ConvCellToInt, shiftAmount);
+  auto const lhsInt         = gen(env, ConvTVToInt, lhs);
+  auto const shiftAmountInt = gen(env, ConvTVToInt, shiftAmount);
 
   // - PHP7 defines shifts of width >= 64 to return the value you get from a
   //   naive shift, i.e., either 0 or -1 depending on the shift and value. This
@@ -1053,66 +1727,9 @@ void implShift(IRGS& env, Opcode op) {
   //   to do some comparison logic here.
   // - PHP7 defines negative shifts to throw an ArithmeticError.
   // - PHP5 semantics for such operations are machine-dependent.
-  if (RuntimeOption::PHP7_IntSemantics &&
-      !(shiftAmountInt->hasConstVal() &&
-        shiftAmountInt->intVal() < 64 && shiftAmountInt->intVal() >= 0)) {
-    push(env, cond(
-      env,
-      [&] (Block* taken) {
-        auto const checkShift = gen(env, GteInt, shiftAmountInt, cns(env, 64));
-        gen(env, JmpNZero, taken, checkShift);
-      },
-      [&] {
-        return cond(
-          env,
-          [&] (Block* taken) {
-            auto const checkShift =
-              gen(env, LtInt, shiftAmountInt, cns(env, 0));
-            gen(env, JmpNZero, taken, checkShift);
-          },
-          [&] {
-            return gen(env, op, lhsInt, shiftAmountInt);
-          },
-          [&] {
-            // Unlikely: shifting by a negative amount.
-            hint(env, Block::Hint::Unlikely);
-
-            // TODO(https://github.com/facebook/hhvm/issues/6012)
-            // This should throw an ArithmeticError.
-            gen(env, ThrowInvalidOperation,
-                cns(env, makeStaticString(Strings::NEGATIVE_SHIFT)));
-
-            // Dead-code, but needed to satisfy cond().
-            return cns(env, false);
-          }
-        );
-      },
-      [&] {
-        // Unlikely: shifting by >= 64.
-        hint(env, Block::Hint::Unlikely);
-
-        if (op != Shr) {
-          return cns(env, 0);
-        }
-
-        if (lhsInt->hasConstVal()) {
-          int64_t lhsConst = lhsInt->intVal();
-          if (lhsConst >= 0) {
-            return cns(env, 0);
-          } else {
-            return cns(env, -1);
-          }
-        }
-
-        return gen(env, op, lhsInt, cns(env, 63));
-      }
-    ));
-  } else {
-    push(env, gen(env, op, lhsInt, shiftAmountInt));
-  }
-
-  gen(env, DecRef, lhs);
-  gen(env, DecRef, shiftAmount);
+  push(env, gen(env, op, lhsInt, shiftAmountInt));
+  decRef(env, lhs);
+  decRef(env, shiftAmount);
 }
 
 void emitShl(IRGS& env) {
@@ -1124,6 +1741,34 @@ void emitShr(IRGS& env) {
 }
 
 void emitPow(IRGS& env) {
+  // Special-case exponent of 2 or 3, i.e.
+  // $x**2 becomes $x*$x,
+  // $x**3 becomes ($x*$x)*$x
+  // TODO(t14096669) if input will result in integer overflow,
+  // compute double result and return instead of slow exit path.
+  auto exponent = topC(env);
+  auto base = topC(env, BCSPRelOffset{1});
+  if ((exponent->hasConstVal(2) || exponent->hasConstVal(3)) &&
+      (base->isA(TDbl) || base->isA(TInt))) {
+    auto intVal = exponent->intVal();
+    SSATmp* genPowResult;
+    auto const exitSlow = makeExitSlow(env);
+    if (base->isA(TInt)) {
+      genPowResult = gen(env, MulIntO, exitSlow, base, base);
+    } else {
+      genPowResult = gen(env, MulDbl, base, base);
+    }
+    if (intVal == 3) {
+      if (genPowResult->isA(TInt)) {
+        genPowResult = gen(env, MulIntO, exitSlow, genPowResult, base);
+      } else {
+        genPowResult = gen(env, MulDbl, genPowResult, base);
+      }
+    }
+    discard(env, 2);
+    push(env, genPowResult);
+    return;
+  }
   interpOne(env, TUncountedInit, 2);
 }
 
@@ -1141,7 +1786,7 @@ void emitBitNot(IRGS& env) {
     return;
   }
 
-  auto const resultType = srcType <= TStr ? TStr
+  auto const resultType = srcType <= TStr || srcType <= TFunc ? TStr
                         : srcType.needsReg() ? TCell
                         : TInt;
   interpOne(env, resultType, 1);
@@ -1150,13 +1795,14 @@ void emitBitNot(IRGS& env) {
 
 void emitNot(IRGS& env) {
   auto const src = popC(env);
-  push(env, gen(env, XorBool, gen(env, ConvCellToBool, src), cns(env, true)));
-  gen(env, DecRef, src);
+  push(env, gen(env, XorBool, gen(env, ConvTVToBool, src), cns(env, true)));
+  decRef(env, src);
 }
 
+const StaticString s_DIVISION_BY_ZERO(Strings::DIVISION_BY_ZERO);
 void emitDiv(IRGS& env) {
-  auto const divisorType  = topC(env, BCSPOffset{0})->type();
-  auto const dividendType = topC(env, BCSPOffset{1})->type();
+  auto const divisorType  = topC(env, BCSPRelOffset{0})->type();
+  auto const dividendType = topC(env, BCSPRelOffset{1})->type();
 
   auto isNumeric = [&] (Type type) {
     return type.subtypeOfAny(TInt, TDbl, TBool);
@@ -1168,103 +1814,95 @@ void emitDiv(IRGS& env) {
     return;
   }
 
-  auto divisor  = topC(env, BCSPOffset{0});
-  auto dividend = topC(env, BCSPOffset{1});
+  auto toDbl = [&] (SSATmp* x) {
+    return
+      x->isA(TInt)  ? gen(env, ConvIntToDbl, x) :
+      x->isA(TBool) ? gen(env, ConvBoolToDbl, x) :
+      x;
+  };
 
-  // we can't codegen this but we may be able to special case it away
-  if (!divisor->isA(TDbl) && !dividend->isA(TDbl)) {
-    // TODO(#2570625): support integer-integer division, move this to
-    // simplifier:
-    if (divisor->hasConstVal()) {
-      int64_t divisorVal;
-      if (divisor->isA(TInt)) {
-        divisorVal = divisor->intVal();
+  auto toInt = [&] (SSATmp* x) {
+    return x->isA(TBool) ? gen(env, ConvBoolToInt, x) : x;
+  };
+
+  auto const divisor  = popC(env);
+  auto const dividend = popC(env);
+
+  ifThen(
+    env,
+    [&] (Block* taken) {
+      auto const checkZero =
+        divisor->isA(TInt) ? gen(env, EqInt,  divisor, cns(env, 0)) :
+        divisor->isA(TDbl) ? gen(env, EqDbl,  divisor, cns(env, 0.0)) :
+                             gen(env, EqBool, divisor, cns(env, false));
+      gen(env, JmpNZero, taken, checkZero);
+    },
+    [&] {
+      hint(env, Block::Hint::Unlikely);
+
+      // PHP5 results in false; we side exit since the type of the result
+      // has now dramatically changed.
+      if (RuntimeOption::EvalForbidDivisionByZero) {
+        gen(env, ThrowDivisionByZeroException);
       } else {
-        assertx(divisor->isA(TBool));
-        divisorVal = divisor->boolVal();
-      }
-
-      if (divisorVal == 0 && !RuntimeOption::PHP7_IntSemantics) {
-        popC(env);
-        popC(env);
-        gen(env, RaiseWarning,
-            cns(env, makeStaticString(Strings::DIVISION_BY_ZERO)));
+        auto const msg = cns(env, s_DIVISION_BY_ZERO.get());
+        gen(env, RaiseWarning, msg);
         push(env, cns(env, false));
-        return;
+        gen(env, Jmp, makeExit(env, nextBcOff(env)));
+        }
       }
+  );
 
-      if (dividend->hasConstVal()) {
-        int64_t dividendVal;
-        if (dividend->isA(TInt)) {
-          dividendVal = dividend->intVal();
-        } else {
-          assertx(dividend->isA(TBool));
-          dividendVal = dividend->boolVal();
-        }
-        popC(env);
-        popC(env);
-        if (!divisorVal) {
-          gen(env, RaiseWarning,
-              cns(env, makeStaticString(Strings::DIVISION_BY_ZERO)));
-          push(env, cns(env, dividendVal / 0.0));
-        } else if (dividendVal == LLONG_MIN || dividendVal % divisorVal) {
-          push(env, cns(env, (double)dividendVal / divisorVal));
-        } else {
-          push(env, cns(env, dividendVal / divisorVal));
-        }
-        return;
-      }
-      /* fall through */
-    }
-    interpOne(env, TUncountedInit, 2);
+  if (divisor->isA(TDbl) || dividend->isA(TDbl)) {
+    push(env, gen(env, DivDbl, toDbl(dividend), toDbl(divisor)));
     return;
   }
 
-  auto make_double = [&] (SSATmp* src) {
-    if (src->isA(TInt)) {
-      return gen(env, ConvIntToDbl, src);
-    } else if (src->isA(TBool)) {
-      return gen(env, ConvBoolToDbl, src);
-    }
-    assertx(src->isA(TDbl));
-    return src;
-  };
-
-  divisor  = make_double(popC(env));
-  dividend = make_double(popC(env));
-
-  if (!divisor->hasConstVal() || divisor->dblVal() == 0.0) {
+  if (divisor->isA(TInt) && dividend->isA(TInt)) {
     ifThen(
       env,
       [&] (Block* taken) {
-        auto const checkZero = gen(env, EqDbl, divisor, cns(env, 0.0));
-        gen(env, JmpNZero, taken, checkZero);
+        auto const badDividend = gen(env, EqInt, dividend, cns(env, LLONG_MIN));
+        gen(env, JmpNZero, taken, badDividend);
       },
       [&] {
         hint(env, Block::Hint::Unlikely);
-        auto const msg = cns(env, makeStaticString(Strings::DIVISION_BY_ZERO));
-        gen(env, RaiseWarning, msg);
+        ifThen(
+          env,
+          [&] (Block* taken) {
+            auto const badDivisor = gen(env, EqInt, divisor, cns(env, -1));
+            gen(env, JmpNZero, taken, badDivisor);
+          },
+          [&] {
+            hint(env, Block::Hint::Unlikely);
 
-        // PHP5 results in false; we side exit since the type of the result
-        // has now dramatically changed. PHP7 falls through to the IEEE
-        // division semantics below (and doesn't side exit since the type is
-        // still a double).
-        if (!RuntimeOption::PHP7_IntSemantics) {
-          push(env, cns(env, false));
-          gen(env, Jmp, makeExit(env, nextBcOff(env)));
-        }
+            // Avoid SIGFPE when dividing the miniumum respresentable integer
+            // by -1.
+            push(env, gen(env, DivDbl, toDbl(dividend), toDbl(divisor)));
+            gen(env, Jmp, makeExit(env, nextBcOff(env)));
+          }
+        );
       }
     );
   }
 
-  push(env, gen(env, DivDbl, dividend, divisor));
+  auto const result = cond(
+    env,
+    [&] (Block* taken) {
+      auto const mod = gen(env, Mod, toInt(dividend), toInt(divisor));
+      gen(env, JmpNZero, taken, mod);
+    },
+    [&] { return gen(env, DivInt, toInt(dividend), toInt(divisor)); },
+    [&] { return gen(env, DivDbl, toDbl(dividend), toDbl(divisor)); }
+  );
+  push(env, result);
 }
 
 void emitMod(IRGS& env) {
   auto const btr = popC(env);
   auto const btl = popC(env);
-  auto const tr = gen(env, ConvCellToInt, btr);
-  auto const tl = gen(env, ConvCellToInt, btl);
+  auto const tr = gen(env, ConvTVToInt, btr);
+  auto const tl = gen(env, ConvTVToInt, btl);
 
   // Generate an exit for the rare case that r is zero.
   ifThen(
@@ -1275,18 +1913,15 @@ void emitMod(IRGS& env) {
     [&] {
       hint(env, Block::Hint::Unlikely);
 
-      if (RuntimeOption::PHP7_IntSemantics) {
-        // TODO(https://github.com/facebook/hhvm/issues/6012)
-        // This should throw a DivisionByZeroError.
-        auto const msg = cns(env, makeStaticString(Strings::MODULO_BY_ZERO));
-        gen(env, ThrowInvalidOperation, msg);
+      if (RuntimeOption::EvalForbidDivisionByZero) {
+        gen(env, ThrowDivisionByZeroException);
       } else {
         // Make progress before side-exiting to the next instruction: raise a
         // warning and push false.
-        auto const msg = cns(env, makeStaticString(Strings::DIVISION_BY_ZERO));
+        auto const msg = cns(env, s_DIVISION_BY_ZERO.get());
         gen(env, RaiseWarning, msg);
-        gen(env, DecRef, btr);
-        gen(env, DecRef, btl);
+        decRef(env, btr);
+        decRef(env, btl);
         push(env, cns(env, false));
         gen(env, Jmp, makeExit(env, nextBcOff(env)));
       }
@@ -1296,8 +1931,8 @@ void emitMod(IRGS& env) {
   // DecRefs on the main line must happen after the potentially-throwing exit
   // above: if we throw during the RaiseWarning, those values must still be on
   // the stack.
-  gen(env, DecRef, btr);
-  gen(env, DecRef, btl);
+  decRef(env, btr);
+  decRef(env, btl);
 
   // Check for -1.  The Mod IR instruction has undefined behavior for -1, but
   // php semantics are to return zero.

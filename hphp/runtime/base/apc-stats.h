@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -42,7 +42,8 @@ struct ArrayData;
 size_t getMemSize(const APCHandle*);
 size_t getMemSize(const APCArray*);
 size_t getMemSize(const APCObject*);
-size_t getMemSize(const ArrayData*);
+/* Recurses on array/object values iff 'recurse'. Always includes strings. */
+size_t getMemSize(const ArrayData*, bool recurse = true);
 
 inline
 size_t getMemSize(const StringData* string) {
@@ -81,8 +82,9 @@ struct APCDetailedStats {
   void removeAPCValue(APCHandle* handle, bool expired);
 
 private:
-  void addType(APCHandle* handle);
-  void removeType(APCHandle* handle);
+  void addType(const APCHandle* handle);
+  void removeType(const APCHandle* handle);
+  ServiceData::ExportedCounter* counterFor(const APCHandle*);
 
 private:
   /*
@@ -95,15 +97,36 @@ private:
   // Number of APC strings
   ServiceData::ExportedCounter* m_apcString;
   // Number of uncounted strings. Uncounted strings are kind of
-  // static strings whose lifetime is controlled by the cache
+  // static strings whose lifetime is controlled by the treadmill
   ServiceData::ExportedCounter* m_uncString;
   // Number of serialized arrays
   ServiceData::ExportedCounter* m_serArray;
+  // Number of serialized vecs
+  ServiceData::ExportedCounter* m_serVec;
+  // Number of serialized dicts
+  ServiceData::ExportedCounter* m_serDict;
+  // Number of serialized keysets
+  ServiceData::ExportedCounter* m_serKeyset;
   // Number of APC arrays
   ServiceData::ExportedCounter* m_apcArray;
+  // Number of APC vecs
+  ServiceData::ExportedCounter* m_apcVec;
+  // Number of APC dicts
+  ServiceData::ExportedCounter* m_apcDict;
+  // Number of APC keysets
+  ServiceData::ExportedCounter* m_apcKeyset;
   // Number of uncounted arrays. Uncounted arrays are kind of
-  // static arrays whose lifetime is controlled by the cache
+  // static arrays whose lifetime is controlled by the treadmill
   ServiceData::ExportedCounter* m_uncArray;
+  // Number of uncounted vecs. Uncounted vecs are kind of
+  // static vecs whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncVec;
+  // Number of uncounted dicts. Uncounted dicts are kind of
+  // static dicts whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncDict;
+  // Number of uncounted keysets. Uncounted keysets are kind of
+  // static keysets whose lifetime is controlled by the treadmill
+  ServiceData::ExportedCounter* m_uncKeyset;
   // Number of serialized objects
   ServiceData::ExportedCounter* m_serObject;
   // Number of APC objects
@@ -134,6 +157,9 @@ struct APCStats {
   static APCStats& getAPCStats() {
     return *s_apcStats.get();
   }
+  static bool IsCreated(){
+    return s_apcStats != nullptr;
+  }
 
   static void Create();
 
@@ -147,21 +173,21 @@ struct APCStats {
 
   // A new key is added. Value is added through addAPCValue()
   void addKey(size_t len) {
-    assert(len > 0);
+    assertx(len > 0);
     m_entries->increment();
     m_keySize->addValue(len);
   }
 
   // A key is removed. Value is removed through removeAPCValue()
   void removeKey(size_t len) {
-    assert(len > 0);
+    assertx(len > 0);
     m_entries->decrement();
     m_keySize->addValue(-len);
   }
 
   // A primed key is added. Implies a key is added as well.
   void addPrimedKey(size_t len) {
-    assert(len > 0);
+    assertx(len > 0);
     m_primedEntries->increment();
     addKey(len);
   }
@@ -169,16 +195,29 @@ struct APCStats {
   // A value of a certain size was added to the primed set that is mapped
   // to file
   void addInFileValue(size_t size) {
-    assert(size > 0);
+    assertx(size > 0);
     m_inFileSize->addValue(size);
+  }
+
+  // Only call this method from ::MakeUncounted()
+  void addAPCUncountedBlock() {
+    m_uncountedBlocks->increment();
+  }
+
+  // Only call this method from ::ReleaseUncounted()
+  void removeAPCUncountedBlock() {
+    m_uncountedBlocks->decrement();
   }
 
   // A new value was added to APC. This is a fresh value not replacing
   // an existing value. However the key may exists already a be a primed
   // mapped to file entry
   void addAPCValue(APCHandle* handle, size_t size, bool livePrimed) {
-    assert(handle && size > 0);
+    assertx(handle && size > 0);
     m_valueSize->addValue(size);
+    if (handle->isUncounted()) {
+      m_uncountedEntries->increment();
+    }
     if (livePrimed) {
       m_livePrimedSize->addValue(size);
       m_livePrimedEntries->increment();
@@ -195,7 +234,7 @@ struct APCStats {
                       size_t oldSize,
                       bool livePrimed,
                       bool expired) {
-    assert(handle && size > 0 && oldHandle && oldSize > 0);
+    assertx(handle && size > 0 && oldHandle && oldSize > 0);
     auto diff = size - oldSize;
     if (diff != 0) {
       m_valueSize->addValue(diff);
@@ -213,8 +252,11 @@ struct APCStats {
                       APCHandle* handle,
                       bool livePrimed,
                       bool expired) {
-    assert(size > 0);
+    assertx(size > 0);
     m_valueSize->addValue(-size);
+    if (handle->isUncounted()) {
+      m_uncountedEntries->decrement();
+    }
     if (livePrimed) {
       m_livePrimedSize->addValue(-size);
       m_livePrimedEntries->decrement();
@@ -263,6 +305,10 @@ private:
   ServiceData::ExportedCounter* m_primedEntries;
   // Number of live primed entries
   ServiceData::ExportedCounter* m_livePrimedEntries;
+  // Number of uncounted entries
+  ServiceData::ExportedCounter* m_uncountedEntries;
+  // Number of uncounted blocks
+  ServiceData::ExportedCounter* m_uncountedBlocks;
 
   // detailed info
   APCDetailedStats* m_detailedStats;

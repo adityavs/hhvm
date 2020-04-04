@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,8 @@
 
 #include "hphp/runtime/base/type-variant.h"
 
+#include <folly/Range.h>
+
 #include <cstdint>
 #include <functional>
 #include <set>
@@ -27,9 +29,9 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Array;
-class Extension;
-class String;
+struct Array;
+struct Extension;
+struct String;
 
 bool ini_on_update(const Variant& value, bool& p);
 bool ini_on_update(const Variant& value, double& p);
@@ -45,7 +47,10 @@ bool ini_on_update(const Variant& value, std::string& p);
 bool ini_on_update(const Variant& value, String& p);
 bool ini_on_update(const Variant& value, Array& p);
 bool ini_on_update(const Variant& value, std::set<std::string>& p);
+bool ini_on_update(const Variant& value, std::vector<uint32_t>& p);
 bool ini_on_update(const Variant& value, std::vector<std::string>& p);
+bool ini_on_update(const Variant& value,
+                   std::unordered_map<std::string, int>& p);
 bool ini_on_update(const Variant& value,
                    std::map<std::string, std::string>& p);
 bool ini_on_update(const Variant& value,
@@ -70,7 +75,9 @@ Variant ini_get(std::string& p);
 Variant ini_get(String& p);
 Variant ini_get(Array& p);
 Variant ini_get(std::set<std::string>& p);
-Variant ini_get(std::vector<std::string>& p);
+template<typename T>
+Variant ini_get(std::vector<T>& p);
+Variant ini_get(std::unordered_map<std::string, int>& p);
 Variant ini_get(std::map<std::string, std::string>& p);
 Variant ini_get(std::map<std::string, std::string, stdltistr>& p);
 Variant ini_get(std::set<std::string, stdltistr>& p);
@@ -98,12 +105,12 @@ const IniSettingMap ini_iterate(const IniSettingMap& ini,
  * is done privately with the statics s_user_callbacks and
  * s_system_ini_callbacks.
  *
- * In addition, a unique instance of the class UserIniData can be
+ * In addition, a unique instance of the struct UserIniData can be
  * associated with the IniCallbackData. The IniCallbackData instance
  * is the point of ownership of the instance of UserIniData, and is
  * responsible for firing the destructor.
  *
- * The class UserIniData should be subclassed to hold data specific
+ * The struct UserIniData should be subclassed to hold data specific
  * to an initialization regime, such as the zend compatibility layer
  * implementation of zend_ini_entry. That subclass is responsible for
  * allocating/freeing its own internal data.
@@ -112,8 +119,7 @@ const IniSettingMap ini_iterate(const IniSettingMap& ini,
  * produce UserIniData. This registration is done at the same time that
  * the setter and getter are established; see the class SetAndGet
  */
-class UserIniData {
-public:
+struct UserIniData {
   virtual ~UserIniData() {}
 };
 
@@ -140,13 +146,18 @@ public:
   bool isObject() const { return m_map.isObject();}
   Variant& toVariant() { return m_map; }
   void set(const String& key, const Variant& v);
+  TypedValue detach() noexcept {
+    return m_map.detach();
+  }
 private:
   Variant m_map;
 };
 
-class IniSetting {
+struct IniSetting {
+private:
 
   struct CallbackData {
+    String active_name;
     Variant active_section;
     Variant arr;
   };
@@ -154,15 +165,14 @@ class IniSetting {
 public:
   // can remove later in a diff that explicitly changes all uses of
   // IniSetting::Map to IniSettingMap
-  typedef IniSettingMap Map;
+  using Map = IniSettingMap;
   static const Extension* CORE;
   enum ScannerMode {
     NormalScanner,
     RawScanner,
   };
 
-  class ParserCallback {
-  public:
+  struct ParserCallback {
     virtual ~ParserCallback() {};
     virtual void onSection(const std::string &name, void *arg);
     virtual void onLabel(const std::string &name, void *arg);
@@ -175,27 +185,39 @@ public:
     virtual void onOp(std::string &result, char type, const std::string& op1,
                       const std::string& op2);
   protected:
-    void makeArray(Variant &hash, const std::string &offset,
+    void makeArray(tv_lval hash, const std::string &offset,
                    const std::string &value);
-  };
-  class SectionParserCallback : public ParserCallback {
-  public:
-    virtual void onSection(const std::string &name, void *arg);
-    virtual void onLabel(const std::string &name, void *arg);
-    virtual void onEntry(const std::string &key, const std::string &value,
-                         void *arg);
-    virtual void onPopEntry(const std::string &key, const std::string &value,
-                            const std::string &offset, void *arg);
   private:
+    // Substitution copy or symlink via @ or : markers in the config line
+    void makeSettingSub(const String &key, const std::string &offset,
+                        const std::string &value, Variant& cur_settings);
+    void traverseToSet(const String &key, const std::string& offset,
+                       tv_lval value, Variant& cur_settings,
+                       const std::string& stopChar);
+  };
+  struct SectionParserCallback : ParserCallback {
+    void onSection(const std::string& name, void* arg) override;
+    void onLabel(const std::string& name, void* arg) override;
+    void onEntry(const std::string& key, const std::string& value, void* arg)
+        override;
+    void onPopEntry(
+        const std::string& key,
+        const std::string& value,
+        const std::string& offset,
+        void* arg) override;
+
+   private:
     Variant* activeArray(CallbackData* data);
   };
-  class SystemParserCallback : public ParserCallback {
-  public:
-    virtual void onEntry(const std::string &key, const std::string &value,
-                         void *arg);
-    virtual void onPopEntry(const std::string &key, const std::string &value,
-                            const std::string &offset, void *arg);
-    virtual void onConstant(std::string &result, const std::string &name);
+  struct SystemParserCallback : ParserCallback {
+    void onEntry(const std::string& key, const std::string& value, void* arg)
+        override;
+    void onPopEntry(
+        const std::string& key,
+        const std::string& value,
+        const std::string& offset,
+        void* arg) override;
+    void onConstant(std::string& result, const std::string& name) override;
   };
 
   enum Mode {
@@ -225,6 +247,7 @@ public:
   static bool Get(const String& name, String& value);
   static std::string Get(const std::string& name);
   static Array GetAll(const String& extension, bool details);
+  static std::string GetAllAsJSON();
 
   /**
    * Change an INI setting as if it was in the php.ini file
@@ -239,6 +262,13 @@ public:
    * Change an INI setting as if there was a call to ini_set()
    */
   static bool SetUser(const String& name, const Variant& value);
+
+  /**
+   * Restore an INI setting to the default value before the first call to
+   * SetUser().
+   */
+  static void RestoreUser(const String& name);
+
   /**
    * Fill in constant that may not have been bound when an
    * ini file was initially parsed
@@ -255,7 +285,7 @@ public:
     explicit SetAndGet(
       std::function<bool (const T&)> setter,
       std::function<T ()> getter,
-      std::function<class UserIniData *()>initter = nullptr)
+      std::function<struct UserIniData *()>initter = nullptr)
       : setter(setter),
         getter(getter),
         initter(initter) {}
@@ -264,7 +294,7 @@ public:
 
     std::function<bool (const T&)> setter;
     std::function<T ()> getter;
-    std::function<class UserIniData *()> initter;
+    std::function<struct UserIniData *()> initter;
   };
 
   /**
@@ -385,7 +415,8 @@ private:
     std::function<UserIniData *(void)> userDataCallback = nullptr);
 };
 
-int64_t convert_bytes_to_long(const std::string& value);
+int64_t convert_bytes_to_long(folly::StringPiece value);
+std::string convert_long_to_bytes(int64_t value);
 
 void add_default_config_files_globbed(
   const char *default_config_file,

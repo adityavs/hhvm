@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -30,11 +30,10 @@ IMPLEMENT_DEFAULT_EXTENSION_VERSION(pdo_sqlite, 1.0.1);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class PDOSqliteStatement : public PDOStatement {
-public:
+struct PDOSqliteStatement : PDOStatement {
   DECLARE_RESOURCE_ALLOCATION(PDOSqliteStatement);
   PDOSqliteStatement(sqlite3 *db, sqlite3_stmt* stmt);
-  virtual ~PDOSqliteStatement();
+  ~PDOSqliteStatement() override;
 
   bool support(SupportedMethod method) override;
   bool executer() override;
@@ -56,8 +55,9 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static int authorizer(void *autharg, int access_type, const char *arg3,
-                      const char *arg4, const char *arg5, const char *arg6) {
+static int
+authorizer(void* /*autharg*/, int access_type, const char* arg3,
+           const char* arg4, const char* /*arg5*/, const char* /*arg6*/) {
   switch (access_type) {
   case SQLITE_COPY: {
     String filename = File::TranslatePath(arg4);
@@ -86,7 +86,7 @@ PDOSqliteConnection::PDOSqliteConnection() : m_db(NULL) {
 
 PDOSqliteConnection::~PDOSqliteConnection() {
   if (m_db) {
-    sqlite3_close(m_db);
+    sqlite3_close_v2(m_db);
   }
   if (m_einfo.errmsg) {
     free(m_einfo.errmsg);
@@ -97,7 +97,7 @@ bool PDOSqliteConnection::create(const Array& options) {
   String filename = data_source.substr(0,1) == ":" ? String(data_source) :
                     File::TranslatePath(data_source);
   if (filename.empty()) {
-    throw_pdo_exception(0, Array(),
+    throw_pdo_exception(Array(),
                         "safe_mode/open_basedir prohibits opening %s",
                         data_source.c_str());
     return false;
@@ -137,19 +137,19 @@ int PDOSqliteConnection::handleError(const char *file, int line,
     }
     m_einfo.errmsg = strdup((char*)sqlite3_errmsg(m_db));
   } else { /* no error */
-    strcpy(*pdo_err, PDO_ERR_NONE);
+    setPDOErrorNone(*pdo_err);
     return false;
   }
 
   switch (m_einfo.errcode) {
-  case SQLITE_NOTFOUND:    strcpy(*pdo_err, "42S02");  break;
-  case SQLITE_INTERRUPT:   strcpy(*pdo_err, "01002");  break;
-  case SQLITE_NOLFS:       strcpy(*pdo_err, "HYC00");  break;
-  case SQLITE_TOOBIG:      strcpy(*pdo_err, "22001");  break;
-  case SQLITE_CONSTRAINT:  strcpy(*pdo_err, "23000");  break;
+  case SQLITE_NOTFOUND:    setPDOError(*pdo_err, "42S02");  break;
+  case SQLITE_INTERRUPT:   setPDOError(*pdo_err, "01002");  break;
+  case SQLITE_NOLFS:       setPDOError(*pdo_err, "HYC00");  break;
+  case SQLITE_TOOBIG:      setPDOError(*pdo_err, "22001");  break;
+  case SQLITE_CONSTRAINT:  setPDOError(*pdo_err, "23000");  break;
   case SQLITE_ERROR:
   default:
-    strcpy(*pdo_err, "HY000");
+    setPDOError(*pdo_err, "HY000");
     break;
   }
 
@@ -158,7 +158,7 @@ int PDOSqliteConnection::handleError(const char *file, int line,
 
 bool PDOSqliteConnection::closer() {
   if (m_db) {
-    sqlite3_close(m_db);
+    sqlite3_close_v2(m_db);
     m_db = NULL;
   }
   if (m_einfo.errmsg) {
@@ -179,7 +179,7 @@ bool PDOSqliteConnection::preparer(const String& sql, sp_PDOStatement *stmt,
 
   const char *tail;
   sqlite3_stmt *rawstmt = NULL;
-  if (sqlite3_prepare(m_db, sql.data(), sql.size(), &rawstmt, &tail)
+  if (sqlite3_prepare_v2(m_db, sql.data(), sql.size(), &rawstmt, &tail)
       == SQLITE_OK) {
 
     *stmt = req::make<PDOSqliteStatement>(m_db, rawstmt);
@@ -200,8 +200,8 @@ int64_t PDOSqliteConnection::doer(const String& sql) {
   return sqlite3_changes(m_db);
 }
 
-bool PDOSqliteConnection::quoter(const String& input, String &quoted,
-                                 PDOParamType paramtype) {
+bool PDOSqliteConnection::quoter(const String& input, String& quoted,
+                                 PDOParamType /*paramtype*/) {
   int len = 2 * input.size() + 3;
   String s(len, ReserveString);
   char *buf = s.mutableData();
@@ -249,11 +249,11 @@ bool PDOSqliteConnection::setAttribute(int64_t attr, const Variant& value) {
   return false;
 }
 
-String PDOSqliteConnection::lastId(const char *name) {
+String PDOSqliteConnection::lastId(const char* /*name*/) {
   return (int64_t)sqlite3_last_insert_rowid(m_db);
 }
 
-bool PDOSqliteConnection::fetchErr(PDOStatement *stmt, Array &info) {
+bool PDOSqliteConnection::fetchErr(PDOStatement* /*stmt*/, Array& info) {
   if (m_einfo.errcode) {
     info.append((int64_t)m_einfo.errcode);
     info.append(String(m_einfo.errmsg, CopyString));
@@ -277,49 +277,54 @@ int PDOSqliteConnection::getAttribute(int64_t attr, Variant &value) {
 void php_sqlite3_callback_func(sqlite3_context* context, int argc,
                                sqlite3_value** argv);
 
-bool PDOSqliteConnection::createFunction(const String& name,
-                                         const Variant& callback,
-                                         int argcount) {
+///////////////////////////////////////////////////////////////////////////////
+
+bool PDOSqliteResource::createFunction(const String& name,
+                                       const Variant& callback,
+                                       int argcount) {
   if (!is_callable(callback)) {
     raise_warning("function '%s' is not callable", callback.toString().data());
     return false;
   }
 
-  auto udf = std::make_shared<UDF>();
+  auto udf = req::make_unique<UDF>();
 
   udf->func = callback;
   udf->argc = argcount;
   udf->name = name.toCppString();
 
-  auto stat = sqlite3_create_function(m_db, udf->name.c_str(), argcount,
-                                      SQLITE_UTF8, udf.get(),
-                                      php_sqlite3_callback_func,
-                                      nullptr, nullptr);
+  auto stat = sqlite3_create_function(
+    conn()->m_db,
+    udf->name.c_str(),
+    argcount,
+    SQLITE_UTF8,
+    static_cast<SQLite3::UserDefinedFunc*>(udf.get()),
+    php_sqlite3_callback_func,
+    nullptr,
+    nullptr
+  );
+
   if (stat != SQLITE_OK) {
     return false;
   }
-  m_udfs.push_back(udf);
+  m_udfs.emplace_back(std::move(udf));
 
   return true;
 }
 
-void PDOSqliteConnection::clearFunctions() {
-  for (auto& udf : m_udfs) {
-    sqlite3_create_function(m_db, udf->name.data(), 0, SQLITE_UTF8,
-                            nullptr, nullptr, nullptr, nullptr);
-  }
-  m_udfs.clear();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
 void PDOSqliteResource::sweep() {
-  for (auto& udf : conn()->m_udfs) {
+  for (auto& udf : m_udfs) {
     udf->func.releaseForSweep();
     udf->step.releaseForSweep();
     udf->fini.releaseForSweep();
   }
-  conn()->clearFunctions();
+
+  for (auto const& udf : m_udfs) {
+    sqlite3_create_function(conn()->m_db, udf->name.data(), 0, SQLITE_UTF8,
+                            nullptr, nullptr, nullptr, nullptr);
+  }
+  m_udfs.clear();
+
   PDOResource::sweep();
 }
 
@@ -354,9 +359,9 @@ bool PDOSqliteStatement::support(SupportedMethod method) {
 
 int PDOSqliteStatement::handleError(const char *file, int line) {
   auto rsrc = unsafe_cast<PDOSqliteResource>(dbh);
-  assert(rsrc);
+  assertx(rsrc);
   auto conn = rsrc->conn();
-  assert(conn);
+  assertx(conn);
   return conn->handleError(file, line, this);
 }
 
@@ -389,7 +394,7 @@ bool PDOSqliteStatement::executer() {
   }
 }
 
-bool PDOSqliteStatement::fetcher(PDOFetchOrientation ori, long offset) {
+bool PDOSqliteStatement::fetcher(PDOFetchOrientation /*ori*/, long /*offset*/) {
   SYNC_VM_REGS_SCOPED();
   if (!m_stmt) {
     return false;
@@ -491,7 +496,6 @@ bool PDOSqliteStatement::paramHook(PDOBoundParam* param,
       m_done = 1;
     }
 
-    if (param->is_param) {
       if (param->paramno == -1) {
         param->paramno = sqlite3_bind_parameter_index(m_stmt,
                                                       param->name.c_str()) - 1;
@@ -570,7 +574,6 @@ bool PDOSqliteStatement::paramHook(PDOBoundParam* param,
         handleError(__FILE__, __LINE__);
         return false;
       }
-    }
     break;
 
   default:;
@@ -599,8 +602,8 @@ bool PDOSqliteStatement::getColumnMeta(int64_t colno, Array &ret) {
     return false;
   }
 
-  ret = Array::Create();
-  Array flags = Array::Create();
+  ret = Array::CreateDArray();
+  Array flags = Array::CreateVArray();
   switch (sqlite3_column_type(m_stmt, colno)) {
   case SQLITE_NULL:    ret.set(s_native_type, s_null);    break;
   case SQLITE_FLOAT:   ret.set(s_native_type, s_double);  break;

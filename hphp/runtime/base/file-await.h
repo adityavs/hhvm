@@ -5,35 +5,40 @@
 #include "hphp/runtime/ext/asio/asio-external-thread-event.h"
 #include "hphp/runtime/ext/asio/socket-event.h"
 
+#include <atomic>
+#include <chrono>
+#include <memory>
+
 namespace HPHP {
 /////////////////////////////////////////////////////////////////////////////
 
-class FileAwait;
+struct FileAwait;
 
-class FileTimeoutHandler : public AsioTimeoutHandler {
- friend class FileAwait;
- public:
-  FileTimeoutHandler(AsioEventBase* base, FileAwait* fa):
+struct FileTimeoutHandler : AsioTimeoutHandler {
+ friend struct FileAwait;
+
+  FileTimeoutHandler(AsioEventBase* base, FileAwait& fa):
     AsioTimeoutHandler(base), m_fileAwait(fa) {}
 
   void timeoutExpired() noexcept override;
+
  private:
-  FileAwait* m_fileAwait;
+  FileAwait& m_fileAwait;
 };
 
-class FileEventHandler : public AsioEventHandler {
- friend class FileAwait;
- public:
-  FileEventHandler(AsioEventBase* base, int fd, FileAwait* fa):
-    AsioEventHandler(base, fd), m_fileAwait(fa) {}
+struct FileEventHandler : AsioEventHandler {
+ friend struct FileAwait;
+
+  FileEventHandler(AsioEventBase* base, int fd, FileAwait& fa):
+    AsioEventHandler(base, folly::NetworkSocket::fromFd(fd)), m_fileAwait(fa) {}
 
   void handlerReady(uint16_t events) noexcept override;
+
  private:
-  FileAwait* m_fileAwait;
+  FileAwait& m_fileAwait;
 };
 
-class FileAwait : public AsioExternalThreadEvent {
- public:
+struct FileAwait : AsioExternalThreadEvent {
   enum Status {
     ERROR = -1,
     TIMEOUT = 0,
@@ -41,15 +46,15 @@ class FileAwait : public AsioExternalThreadEvent {
     CLOSED,
   };
 
-  FileAwait(int fd, uint16_t events, double timeout);
+  FileAwait(int fd, uint16_t events, std::chrono::nanoseconds timeout);
   ~FileAwait();
-  void unserialize(Cell& c) override;
+  void unserialize(TypedValue& c) override;
   void setFinished(int64_t status);
  private:
-  std::shared_ptr<FileEventHandler> m_file;
-  std::shared_ptr<FileTimeoutHandler> m_timeout;
+  std::unique_ptr<FileEventHandler> m_file;
+  std::unique_ptr<FileTimeoutHandler> m_timeout;
   int m_result{-1};
-  bool m_finished{false};
+  std::atomic<bool> m_finished{false};
 };
 
 /////////////////////////////////////////////////////////////////////////////

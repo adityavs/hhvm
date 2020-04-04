@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,14 +26,13 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Capability {
-public:
+struct Capability {
   /**
    * This sets the  effective user ID of the current process, leaving
    * capability of binding to system ports (< 1024) to the user.
    */
-  static bool ChangeUnixUser(uid_t uid);
-  static bool ChangeUnixUser(const std::string &username);
+  static bool ChangeUnixUser(uid_t uid, bool allowRoot);
+  static bool ChangeUnixUser(const std::string &username, bool allowRoot);
   static bool SetDumpable();
 };
 

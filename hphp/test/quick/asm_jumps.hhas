@@ -1,11 +1,14 @@
+.hh_file 1;
 #
 # Test some jumps
 #
 
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
   Int 1
   RetC
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 #ifndef incl_HPHP_IR_UNIT_H_
 #define incl_HPHP_IR_UNIT_H_
 
+#include "hphp/runtime/vm/jit/annotation-data.h"
 #include "hphp/runtime/vm/jit/block.h"
 #include "hphp/runtime/vm/jit/check.h"
 #include "hphp/runtime/vm/jit/containers.h"
@@ -26,9 +27,11 @@
 #include "hphp/runtime/vm/jit/translator.h"
 
 #include "hphp/util/arena.h"
+#include "hphp/util/struct-log.h"
 
 #include <string>
 #include <type_traits>
+#include <folly/Optional.h>
 
 namespace HPHP {
 //////////////////////////////////////////////////////////////////////
@@ -83,7 +86,8 @@ struct IRUnit {
   /*
    * Construct an IRUnit with a single, empty entry Block.
    */
-  explicit IRUnit(TransContext context);
+  explicit IRUnit(TransContext context,
+                  std::unique_ptr<AnnotationData> = nullptr);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -154,9 +158,8 @@ struct IRUnit {
   // TODO(#3538578): The above should return `const Block*'.
 
   /*
-   * Starting positions, from the TransContext.
+   * Starting position, from the TransContext.
    */
-  uint32_t bcOff() const;
   SrcKey initSrcKey() const;
 
   /*
@@ -188,12 +191,41 @@ struct IRUnit {
    */
   SSATmp* mainFP() const;
 
+  /*
+   * Return the main StkPtr for the unit, a result of DefFrameRelSP or DefRegSP
+   * instruction on the entry block. This is used only when eliding DefInlineFP,
+   * which assumes that there are no other stack pointers in the unit. This
+   * assumption is no true in general, as prologues redefine their SP.
+   */
+  SSATmp* mainSP() const;
+
+  /*
+   * Return the "start" timestamp when this IRUnit was constructed.
+   */
+  int64_t startNanos() const;
+  folly::Optional<StructuredLogEntry>& logEntry() const;
+  void initLogEntry(const Func*);
+
   /////////////////////////////////////////////////////////////////////////////
+
+  struct Hinter {
+    Hinter(IRUnit& unit, Block::Hint defHint) :
+        m_unit(unit), m_saved(unit.m_defHint) {
+      m_unit.m_defHint = defHint;
+    }
+    ~Hinter() {
+      m_unit.m_defHint = m_saved;
+    }
+   private:
+    IRUnit& m_unit;
+    Block::Hint m_saved;
+  };
 
   /*
    * Add a block to the IRUnit's arena.
    */
-  Block* defBlock(Block::Hint hint = Block::Hint::Neither);
+  Block* defBlock(uint64_t profCount = 1,
+                  Block::Hint hint = Block::Hint::Neither);
 
   /*
    * Add a DefConst instruction to the const table.
@@ -203,9 +235,9 @@ struct IRUnit {
   SSATmp* cns(Type type);
 
   /*
-   * Create a DefLabel instruction.
+   * Create a DefLabel with `numDst` dests at the start of `block`.
    */
-  IRInstruction* defLabel(unsigned numDst, BCMarker marker);
+  IRInstruction* defLabel(unsigned numDst, Block* block, BCContext bcctx);
 
   /*
    * Add some extra destinations to a defLabel.
@@ -216,6 +248,10 @@ struct IRUnit {
    * Add an extra SSATmp to jmp.
    */
   void expandJmp(IRInstruction* jmp, SSATmp* value);
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Annotation data
+  std::unique_ptr<AnnotationData> annotationData;
 
 private:
   template<class... Args> SSATmp* newSSATmp(Args&&...);
@@ -239,7 +275,22 @@ private:
 
   // Map from SSATmp ids to SSATmp*.
   jit::vector<SSATmp*> m_ssaTmps;
+
+  // Default hint value for new blocks in this unit.
+  Block::Hint m_defHint{Block::Hint::Neither};
+
+  int64_t m_startNanos; // Timestamp at construction time.
+  mutable folly::Optional<StructuredLogEntry> m_logEntry;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+inline tracing::Props traceProps(const IRUnit& u) {
+  return traceProps(u.context())
+    .add("num_tmps", u.numTmps())
+    .add("num_blocks", u.numBlocks())
+    .add("num_insts", u.numInsts());
+}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -250,6 +301,13 @@ std::string show(const IRUnit&);
 
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * Find and return a unique block that ends the unit at lastSk.
+ *
+ * If one cannot be found, abort, unless the unit has 0 main exits and 1 or
+ * more blocks that end with Unreachable, in which case return nullptr. This
+ * indicates regions that ended early due to type contradictions.
+ */
 Block* findMainExitBlock(const IRUnit& unit, SrcKey lastSk);
 
 //////////////////////////////////////////////////////////////////////

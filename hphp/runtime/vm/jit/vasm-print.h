@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,12 +30,15 @@ namespace HPHP { namespace jit {
 struct Vinstr;
 struct Vunit;
 struct Vconst;
+struct VregSet;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 std::string show(Vreg r);
 std::string show(Vptr p);
 std::string show(Vconst c);
+std::string show(const VregSet&);
+std::string show(const VregList&);
 std::string show(const Vunit& unit);
 std::string show(const Vunit& unit, const Vinstr& inst);
 
@@ -50,7 +53,9 @@ constexpr int kVasmImmsLevel = 2;
 constexpr int kVasmSimplifyLevel = 2;
 constexpr int kVasmFusionLevel = 2;
 constexpr int kVasmCodeGenLevel = 2;
+constexpr int kVasmAnnotateSFLevel = 2;
 constexpr int kVasmRegAllocLevel = 3;
+constexpr int kVasmRegAllocDetailLevel = 4;
 constexpr int kVasmCopyPropLevel = 4;
 constexpr int kVasmARMFoldLevel = 4;
 constexpr int kVasmJumpsLevel = 4;

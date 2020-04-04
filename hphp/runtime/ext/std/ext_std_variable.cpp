@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,18 +16,26 @@
 */
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 
-#include <folly/Likely.h>
-
-#include "hphp/util/logger.h"
+#include "hphp/runtime/base/array-provenance.h"
+#include "hphp/runtime/base/backtrace.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/zend-functions.h"
-#ifdef ENABLE_EXTENSION_XDEBUG
-#include "hphp/runtime/ext/xdebug/ext_xdebug.h"
-#endif
+#include "hphp/runtime/vm/class-meth-data-ref.h"
+#include "hphp/runtime/vm/globals-array.h"
+
 #include "hphp/runtime/vm/jit/translator-inline.h"
+
+#include "hphp/runtime/ext/collections/ext_collections-pair.h"
+#include "hphp/runtime/ext/collections/ext_collections.h"
 #include "hphp/runtime/server/http-protocol.h"
+
+#include "hphp/util/hphp-config.h"
+#include "hphp/util/logger.h"
+
+#include <folly/Likely.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -44,7 +52,8 @@ const StaticString
   s_object("object"),
   s_array("array"),
   s_NULL("NULL"),
-  s_null("null");
+  s_null("null"),
+  s_meth_caller_cls("__SystemLib\\MethCallerHelper");
 
 String HHVM_FUNCTION(gettype, const Variant& v) {
   if (v.getType() == KindOfResource && v.toCResRef().isInvalid()) {
@@ -55,6 +64,11 @@ String HHVM_FUNCTION(gettype, const Variant& v) {
    * gettype(). So we make an exception here. */
   if (v.isNull()) {
     return s_NULL;
+  }
+  if (RuntimeOption::EvalLogArrayProvenance &&
+      v.isArray() && arrprov::arrayWantsTag(v.asCArrRef().get())) {
+    raise_array_serialization_notice(SerializationSite::Gettype,
+                                     v.getArrayData());
   }
   return getDataTypeString(v.getType());
 }
@@ -79,37 +93,20 @@ String HHVM_FUNCTION(strval, const Variant& v) {
   return v.toString();
 }
 
-bool HHVM_FUNCTION(settype, VRefParam var, const String& type) {
-  Variant val;
-  if      (type == s_boolean) val = var.toBoolean();
-  else if (type == s_bool   ) val = var.toBoolean();
-  else if (type == s_integer) val = var.toInt64();
-  else if (type == s_int    ) val = var.toInt64();
-  else if (type == s_float  ) val = var.toDouble();
-  else if (type == s_double ) val = var.toDouble();
-  else if (type == s_string ) val = var.toString();
-  else if (type == s_array  ) val = var.toArray();
-  else if (type == s_object ) val = var.toObject();
-  else if (type == s_null   ) val = uninit_null();
-  else return false;
-  var.assignIfRef(val);
-  return true;
-}
-
 bool HHVM_FUNCTION(is_null, const Variant& v) {
-  return is_null(v);
+  return is_null(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_bool, const Variant& v) {
-  return is_bool(v);
+  return is_bool(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_int, const Variant& v) {
-  return is_int(v);
+  return is_int(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_float, const Variant& v) {
-  return is_double(v);
+  return is_double(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_numeric, const Variant& v) {
@@ -117,23 +114,95 @@ bool HHVM_FUNCTION(is_numeric, const Variant& v) {
 }
 
 bool HHVM_FUNCTION(is_string, const Variant& v) {
-  return is_string(v);
+  return is_string(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_scalar, const Variant& v) {
   return v.isScalar();
 }
 
+bool HHVM_FUNCTION(HH_is_php_array, const Variant& v) {
+  // We want this set to false as this is meant to be the "this can receive
+  // both PHP and Hack arrays" version of `is_array`.
+  return is_array(v.asTypedValue(), /* logOnHackArrays = */ false);
+}
+
 bool HHVM_FUNCTION(is_array, const Variant& v) {
-  return is_array(v);
+  if (UNLIKELY(RuntimeOption::EvalWidenIsArray)) {
+    return HHVM_FUNCTION(HH_is_any_array, v);
+  }
+  return is_array(v.asTypedValue(), /*logOnHackArrays=*/true);
+}
+
+bool HHVM_FUNCTION(HH_is_vec, const Variant& v) {
+  return is_vec(v.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_dict, const Variant& v) {
+  return is_dict(v.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_keyset, const Variant& v) {
+  return is_keyset(v.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_varray, const Variant& val) {
+  return is_varray(val.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_darray, const Variant& val) {
+  return is_darray(val.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_any_array, const Variant& val) {
+  if (tvIsClsMeth(val.asTypedValue())) {
+    if (RuntimeOption::EvalIsCompatibleClsMethType) {
+      if (RuntimeOption::EvalIsVecNotices) {
+        raise_notice(Strings::CLSMETH_COMPAT_IS_ANY_ARR);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  return tvIsArrayLike(val.asTypedValue()) || tvIsClsMeth(val.asTypedValue());
+}
+
+bool HHVM_FUNCTION(HH_is_list_like, const Variant& val) {
+  if (val.isClsMeth()) {
+    raiseClsMethToVecWarningHelper();
+    return true;
+  }
+  auto const& ty = val.getType();
+  if (!isArrayLikeType(ty)) return false;
+  if (isVecType(ty) || isVArrayType(ty)) return true;
+  auto const& arr = val.asCArrRef();
+  return arr->isVectorData();
 }
 
 bool HHVM_FUNCTION(is_object, const Variant& v) {
-  return is_object(v);
+  return is_object(v.asTypedValue());
 }
 
 bool HHVM_FUNCTION(is_resource, const Variant& v) {
   return (v.getType() == KindOfResource && !v.toCResRef().isInvalid());
+}
+
+bool HHVM_FUNCTION(HH_is_meth_caller, TypedValue v) {
+  if (tvIsFunc(v)) {
+    return val(v).pfunc->isMethCaller();
+  } else if (tvIsObject(v)) {
+    auto const mcCls = Unit::lookupClass(s_meth_caller_cls.get());
+    assertx(mcCls);
+    return mcCls == val(v).pobj->getVMClass();
+  }
+  return false;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+Array HHVM_FUNCTION(HH_object_prop_array, const Object& obj) {
+  return obj.toArray().toDArray();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -150,7 +219,7 @@ Variant HHVM_FUNCTION(print_r, const Variant& expression,
       vs.serialize(expression, ret);
       res = true;
     }
-  } catch (StringBufferLimitException &e) {
+  } catch (StringBufferLimitException& e) {
     raise_notice("print_r() exceeded max bytes limit");
     res = e.m_result;
   }
@@ -168,13 +237,13 @@ Variant HHVM_FUNCTION(var_export, const Variant& expression,
       vs.serialize(expression, ret);
       res = true;
     }
-  } catch (StringBufferLimitException &e) {
+  } catch (StringBufferLimitException& e) {
     raise_notice("var_export() exceeded max bytes limit");
   }
   return res;
 }
 
-static ALWAYS_INLINE void do_var_dump(VariableSerializer vs,
+static ALWAYS_INLINE void do_var_dump(VariableSerializer& vs,
                                       const Variant& expression) {
   // manipulate maxCount to match PHP behavior
   if (!expression.isObject()) {
@@ -185,13 +254,6 @@ static ALWAYS_INLINE void do_var_dump(VariableSerializer vs,
 
 void HHVM_FUNCTION(var_dump, const Variant& expression,
                              const Array& _argv /*=null_array */) {
-#ifdef ENABLE_EXTENSION_XDEBUG
-  if (UNLIKELY(XDEBUG_GLOBAL(OverloadVarDump) &&
-               XDEBUG_GLOBAL(DefaultEnable))) {
-    HHVM_FN(xdebug_var_dump)(expression, _argv);
-    return;
-  }
-#endif
 
   VariableSerializer vs(VariableSerializer::Type::VarDump, 0, 2);
   do_var_dump(vs, expression);
@@ -207,14 +269,171 @@ void HHVM_FUNCTION(debug_zval_dump, const Variant& variable) {
   vs.serialize(variable, false);
 }
 
+/*
+ * Intrinsic for Containers, i.e. the subset of \HH\Traversable including
+ * 1. array:
+ *   array, vec, dict, keyset
+ * 2. collection: Vector, Map, Set
+ * but not including Objects that implement e.g. \HH\Iterable or \HH\Iterator.
+ */
+Variant HHVM_FUNCTION(HH_first, const Variant& v) {
+  // 1. array, vec, dict, keyset
+  if (v.isArray() || v.isClsMeth()) {
+    auto arr = v.toArray();
+    if (arr->empty()) {
+      return init_null();
+    }
+    return arr->getValue(arr->iter_begin());
+  }
+
+  if (v.isObject()) {
+    auto obj = v.asCObjRef();
+    // 2. collection
+    if (obj->isCollection()) {
+      // Pair
+      if (obj->collectionType() == CollectionType::Pair) {
+        auto const pair = static_cast<c_Pair*>(obj.get());
+        return Variant::wrap(*pair->at(0));
+      }
+
+      // Vector, Map, Set, and Imm variants
+      auto arr = collections::asArray(obj.get());
+      if (arr->empty()) {
+        return init_null();
+      }
+      return arr->getValue(arr->iter_begin());
+    }
+  }
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Argument 1 passed to HH\\Lib\\_Private\\Native\\first() "
+     "must be a Container");
+}
+
+Variant HHVM_FUNCTION(HH_last, const Variant& v) {
+  // 1. array, vec, dict, keyset
+  if (v.isArray() || v.isClsMeth()) {
+    auto arr = v.toArray();
+    if (arr->empty()) {
+      return init_null();
+    }
+    return arr->getValue(arr->iter_last());
+  }
+
+  if (v.isObject()) {
+    auto obj = v.asCObjRef();
+    // 2. collection
+    if (obj->isCollection()) {
+      // Pair
+      if (obj->collectionType() == CollectionType::Pair) {
+        auto const pair = static_cast<c_Pair*>(obj.get());
+        return Variant::wrap(*pair->at(1));
+      }
+
+      // Vector, Map, Set, and Imm variants
+      auto arr = collections::asArray(obj.get());
+      if (arr->empty()) {
+        return init_null();
+      }
+      return arr->getValue(arr->iter_last());
+    }
+  }
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Argument 1 passed to HH\\Lib\\_Private\\Native\\last() "
+    "must be a Container");
+}
+
+Variant HHVM_FUNCTION(HH_first_key, const Variant& v) {
+  // 1. array, vec, dict, keyset
+  if (v.isArray() || v.isClsMeth()) {
+    auto arr = v.toArray();
+    if (arr->empty()) {
+      return init_null();
+    }
+    return arr->getKey(arr->iter_begin());
+  }
+
+  if (v.isObject()) {
+    auto obj = v.asCObjRef();
+    // 2. collection
+    if (obj->isCollection()) {
+      // Pair
+      if (obj->collectionType() == CollectionType::Pair) {
+        return Variant::wrap(make_tv<KindOfInt64>(0));
+      }
+
+      // Vector, Map, Set, and Imm variants
+      auto arr = collections::asArray(obj.get());
+      if (arr->empty()) {
+        return init_null();
+      }
+      return arr->getKey(arr->iter_begin());
+    }
+  }
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Argument 1 passed to HH\\Lib\\_Private\\Native\\first_key() "
+    "must be a Container");
+}
+
+Variant HHVM_FUNCTION(HH_last_key, const Variant& v) {
+  // 1. array, vec, dict, keyset
+  if (v.isArray() || v.isClsMeth()) {
+    auto arr = v.toArray();
+    if (arr->empty()) {
+      return init_null();
+    }
+    return arr->getKey(arr->iter_last());
+  }
+
+  if (v.isObject()) {
+    auto obj = v.asCObjRef();
+    // 2. collection
+    if (obj->isCollection()) {
+      // Pair
+      if (obj->collectionType() == CollectionType::Pair) {
+        return Variant::wrap(make_tv<KindOfInt64>(1));
+      }
+
+      // Vector, Map, Set, and Imm variants
+      auto arr = collections::asArray(obj.get());
+      if (arr->empty()) {
+        return init_null();
+      }
+      return arr->getKey(arr->iter_last());
+    }
+  }
+  SystemLib::throwInvalidArgumentExceptionObject(
+    "Argument 1 passed to HH\\Lib\\_Private\\Native\\last_key() "
+    "must be a Container");
+}
+
+namespace {
+
 const StaticString
   s_Null("N;"),
   s_True("b:1;"),
   s_False("b:0;"),
   s_Res("i:0;"),
-  s_EmptyArray("a:0:{}");
+  s_EmptyArray("a:0:{}"),
+  s_EmptyVArray("y:0:{}"),
+  s_EmptyDArray("Y:0:{}"),
+  s_EmptyVecArray("v:0:{}"),
+  s_EmptyDictArray("D:0:{}"),
+  s_EmptyKeysetArray("k:0:{}");
 
-String HHVM_FUNCTION(serialize, const Variant& value) {
+ALWAYS_INLINE String serialize_impl(const Variant& value,
+                                    bool keepDVArrays,
+                                    bool forcePHPArrays,
+                                    bool hackWarn,
+                                    bool phpWarn,
+                                    bool ignoreLateInit) {
+  auto const empty_hack = [&](const ArrayData* arr, const StaticString& empty) {
+    if (UNLIKELY(RuntimeOption::EvalHackArrCompatSerializeNotices &&
+                 hackWarn)) {
+      raise_hack_arr_compat_serialize_notice(arr);
+    }
+    return forcePHPArrays ? s_EmptyArray : empty;
+  };
+
   switch (value.getType()) {
     case KindOfUninit:
     case KindOfNull:
@@ -228,261 +447,224 @@ String HHVM_FUNCTION(serialize, const Variant& value) {
       sb.append(';');
       return sb.detach();
     }
-    case KindOfStaticString:
+    case KindOfClass:
+    case KindOfFunc:
+    case KindOfPersistentString:
     case KindOfString: {
-      StringData *str = value.getStringData();
+      auto const str =
+        isStringType(value.getType()) ? value.getStringData() :
+        isFuncType(value.getType())   ? funcToStringHelper(value.toFuncVal()) :
+                                        classToStringHelper(value.toClassVal());
+      auto const size = str->size();
+      if (size >= RuntimeOption::MaxSerializedStringSize) {
+        throw Exception("Size of serialized string (%d) exceeds max", size);
+      }
       StringBuffer sb;
       sb.append("s:");
-      sb.append(str->size());
+      sb.append(size);
       sb.append(":\"");
-      sb.append(str->data(), str->size());
+      sb.append(str->data(), size);
       sb.append("\";");
       return sb.detach();
     }
     case KindOfResource:
       return s_Res;
+
+    case KindOfPersistentVec:
+    case KindOfVec: {
+      ArrayData* arr = value.getArrayData();
+      assertx(arr->isVecArrayType());
+      if (arr->empty()) {
+        return UNLIKELY(RuntimeOption::EvalHackArrDVArrs &&
+                        !arr->isLegacyArray())
+          ? s_EmptyArray
+          : empty_hack(arr, s_EmptyVecArray);
+      }
+      break;
+    }
+
+    case KindOfPersistentDict:
+    case KindOfDict: {
+      ArrayData* arr = value.getArrayData();
+      assertx(arr->isDictType());
+      if (arr->empty()) {
+        return UNLIKELY(RuntimeOption::EvalHackArrDVArrs &&
+                        !arr->isLegacyArray())
+          ? s_EmptyArray
+          : empty_hack(arr, s_EmptyDictArray);
+      }
+      break;
+    }
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset: {
+      ArrayData* arr = value.getArrayData();
+      assertx(arr->isKeysetType());
+      if (arr->empty()) return empty_hack(arr, s_EmptyKeysetArray);
+      break;
+    }
+
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray: {
       ArrayData *arr = value.getArrayData();
-      if (arr->empty()) return s_EmptyArray;
-      // fall-through
+      assertx(arr->isPHPArrayType());
+      assertx(!RuntimeOption::EvalHackArrDVArrs || arr->isNotDVArray());
+      if (arr->empty()) {
+        if (UNLIKELY(RuntimeOption::EvalHackArrCompatSerializeNotices &&
+                     phpWarn)) {
+          raise_hack_arr_compat_serialize_notice(arr);
+        }
+        if (keepDVArrays && !forcePHPArrays) {
+          if (arr->isVArray()) return s_EmptyVArray;
+          if (arr->isDArray()) return s_EmptyDArray;
+        }
+        return s_EmptyArray;
+      }
+      break;
     }
     case KindOfDouble:
-    case KindOfObject: {
-      VariableSerializer vs(VariableSerializer::Type::Serialize);
-      return vs.serialize(value, true);
-    }
-    case KindOfRef:
-    case KindOfClass:
+    case KindOfObject:
+    case KindOfClsMeth:
+    case KindOfRecord:
       break;
   }
-  not_reached();
+
+  VariableSerializer vs(VariableSerializer::Type::Serialize);
+  if (keepDVArrays)   vs.keepDVArrays();
+  if (forcePHPArrays) vs.setForcePHPArrays();
+  if (hackWarn)       vs.setHackWarn();
+  if (phpWarn)        vs.setPHPWarn();
+  if (ignoreLateInit) vs.setIgnoreLateInit();
+  // Keep the count so recursive calls to serialize() embed references properly.
+  return vs.serialize(value, true, true);
+}
+
+}
+
+String HHVM_FUNCTION(serialize, const Variant& value) {
+  return serialize_impl(value, false, false, false, false, false);
+}
+
+const StaticString
+  s_forcePHPArrays("forcePHPArrays"),
+  s_keepDVArrays("keepDVArrays"),
+  s_warnOnHackArrays("warnOnHackArrays"),
+  s_warnOnPHPArrays("warnOnPHPArrays"),
+  s_ignoreLateInit("ignoreLateInit");
+
+String HHVM_FUNCTION(HH_serialize_with_options,
+                     const Variant& value, const Array& options) {
+  return serialize_impl(
+    value,
+    options.exists(s_keepDVArrays) &&
+      options[s_keepDVArrays].toBoolean(),
+    options.exists(s_forcePHPArrays) &&
+      options[s_forcePHPArrays].toBoolean(),
+    options.exists(s_warnOnHackArrays) &&
+      options[s_warnOnHackArrays].toBoolean(),
+    options.exists(s_warnOnPHPArrays) &&
+      options[s_warnOnPHPArrays].toBoolean(),
+    options.exists(s_ignoreLateInit) &&
+      options[s_ignoreLateInit].toBoolean()
+  );
+}
+
+String serialize_keep_dvarrays(const Variant& value) {
+  return serialize_impl(
+      value,
+      /* keepDVArrays */ true,
+      false,
+      false,
+      false,
+      false
+  );
+}
+
+String HHVM_FUNCTION(hhvm_intrinsics_serialize_keep_dvarrays,
+                     const Variant& value) {
+  return serialize_impl(value, true, false, false, false, false);
 }
 
 Variant HHVM_FUNCTION(unserialize, const String& str,
-                                   const Array& options /* =[] */) {
-  return unserialize_from_string(str, options);
+                                   const Array& options) {
+  return unserialize_from_string(
+    str,
+    VariableUnserializer::Type::Serialize,
+    options
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // variable table
 
-ALWAYS_INLINE
-static Array get_defined_vars() {
-  VarEnv* v = g_context->getOrCreateVarEnv();
-  return v ? v->getDefinedVariables() : empty_array();
-}
-
-Array HHVM_FUNCTION(get_defined_vars) {
-  raise_disallowed_dynamic_call("get_defined_vars should not be "
-    "called dynamically");
-  return get_defined_vars();
-}
-
-// accessible as __SystemLib\\get_defined_vars
-Array HHVM_FUNCTION(SystemLib_get_defined_vars) {
-  return get_defined_vars();
-}
-
-const StaticString
-  s_GLOBALS("GLOBALS"),
-  s_this("this");
-
-static const Func* arGetContextFunc(const ActRec* ar) {
-  if (ar == nullptr) {
-    return nullptr;
-  }
-  if (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin()) {
-    // Pseudomains inherit the context of their caller
-    auto const context = g_context.getNoCheck();
-    ar = context->getPrevVMState(ar);
-    while (ar != nullptr &&
-             (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin())) {
-      ar = context->getPrevVMState(ar);
-    }
-    if (ar == nullptr) {
-      return nullptr;
-    }
-  }
-  return ar->m_func;
-}
-
-static bool modify_extract_name(VarEnv* v,
-                                String& name,
-                                int64_t extract_type,
-                                const String& prefix) {
-  switch (extract_type) {
-  case EXTR_SKIP:
-    if (v->lookup(name.get()) != nullptr) {
-      return false;
-    }
-    break;
-  case EXTR_IF_EXISTS:
-    if (v->lookup(name.get()) == nullptr) {
-      return false;
-    } else {
-      goto namechecks;
-    }
-    break;
-  case EXTR_PREFIX_SAME:
-    if (v->lookup(name.get()) != nullptr) {
-      name = prefix + "_" + name;
-    } else {
-      goto namechecks;
-    }
-    break;
-  case EXTR_PREFIX_ALL:
-    name = prefix + "_" + name;
-    break;
-  case EXTR_PREFIX_INVALID:
-    if (!is_valid_var_name(name.get()->data(), name.size())) {
-      name = prefix + "_" + name;
-    } else {
-      goto namechecks;
-    }
-    break;
-  case EXTR_PREFIX_IF_EXISTS:
-    if (v->lookup(name.get()) == nullptr) {
-      return false;
-    }
-    name = prefix + "_" + name;
-    break;
-  case EXTR_OVERWRITE:
-    namechecks:
-    if (name == s_GLOBALS) {
-      return false;
-    }
-    if (name == s_this) {
-      // Only disallow $this when inside a non-static method, or a static method
-      // that has defined $this (matches Zend)
-      CallerFrame cf;
-      const Func* func = arGetContextFunc(cf());
-
-      if (func && func->isMethod() && v->lookup(s_this.get()) != nullptr) {
-        return false;
-      }
-    }
-  default:
-    break;
-  }
-
-  // skip invalid variable names, as in PHP
-  return is_valid_var_name(name.get()->data(), name.size());
-}
-
-ALWAYS_INLINE static
-int64_t extract_impl(VRefParam vref_array,
-                     int extract_type /* = EXTR_OVERWRITE */,
-                     const String& prefix /* = "" */) {
-  auto arrByRef = false;
-  auto arr_tv = vref_array.wrapped().asTypedValue();
-  if (arr_tv->m_type == KindOfRef) {
-    arr_tv = arr_tv->m_data.pref->tv();
-    arrByRef = true;
-  }
-  if (arr_tv->m_type != KindOfArray) {
-    raise_warning("extract() expects parameter 1 to be array");
-    return 0;
-  }
-
-  bool reference = extract_type & EXTR_REFS;
-  extract_type &= ~EXTR_REFS;
-
-  VMRegAnchor _;
-  auto const varEnv = g_context->getOrCreateVarEnv();
-  if (!varEnv) return 0;
-
-  auto& arr = tvAsCVarRef(arr_tv).asCArrRef();
-  if (UNLIKELY(reference)) {
-    auto extr_refs = [&](Array& arr) {
-      {
-        // force arr to escalate (if necessary) by getting an
-        // lvalue to the first element.
-        ArrayData* ad = arr.get();
-        auto const& first_key = ad->getKey(ad->iter_begin());
-        arr.lvalAt(first_key);
-      }
-      int count = 0;
-      for (ArrayIter iter(arr); iter; ++iter) {
-        String name = iter.first();
-        if (!modify_extract_name(varEnv, name, extract_type, prefix)) continue;
-        // the const_cast is safe because we escalated the array
-        // we can't use arr.lvalAt(name), because arr may have been modified
-        // as a side effect of an earlier iteration
-        auto& ref = const_cast<Variant&>(iter.secondRef());
-        g_context->bindVar(name.get(), ref.asTypedValue());
-        ++count;
-      }
-      return count;
-    };
-    if (arrByRef) {
-      return extr_refs(const_cast<Array&>(arr));
-    }
-    Array tmp = arr;
-    return extr_refs(tmp);
-  }
-
-  int count = 0;
-  for (ArrayIter iter(arr); iter; ++iter) {
-    String name = iter.first();
-    if (!modify_extract_name(varEnv, name, extract_type, prefix)) continue;
-    g_context->setVar(name.get(), iter.secondRef().asTypedValue());
-    ++count;
-  }
-  return count;
-}
-
-int64_t HHVM_FUNCTION(extract, VRefParam vref_array,
-                      int64_t extract_type /* = EXTR_OVERWRITE */,
-                      const String& prefix /* = "" */) {
-  raise_disallowed_dynamic_call("extract should not be called dynamically");
-  return extract_impl(vref_array, extract_type, prefix);
-}
-
-int64_t HHVM_FUNCTION(SystemLib_extract,
-                      VRefParam vref_array,
-                      int64_t extract_type = EXTR_OVERWRITE,
-                      const String& prefix = "") {
-  return extract_impl(vref_array, extract_type, prefix);
-}
-
-static void parse_str_impl(const String& str, VRefParam arr) {
-  Array result = Array::Create();
-  HttpProtocol::DecodeParameters(result, str.data(), str.size());
-  if (!arr.isReferenced()) {
-    HHVM_FN(SystemLib_extract)(result);
-    return;
-  }
-  arr.assignIfRef(result);
-}
-
 void HHVM_FUNCTION(parse_str,
                    const String& str,
-                   VRefParam arr /* = null */) {
-  raise_disallowed_dynamic_call("parse_str should not be called dynamically");
-  parse_str_impl(str, arr);
-}
-
-void HHVM_FUNCTION(SystemLib_parse_str,
-                   const String& str,
-                   VRefParam arr /* = null */) {
-  parse_str_impl(str, arr);
+                   Array& arr) {
+  arr = Array::Create();
+  HttpProtocol::DecodeParameters(arr, str.data(), str.size());
 }
 
 /////////////////////////////////////////////////////////////////////////////
 
-#define EXTR_CONST(v) Native::registerConstant<KindOfInt64> \
-                                   (makeStaticString("EXTR_" #v), EXTR_##v);
+bool HHVM_FUNCTION(HH_is_late_init_prop_init,
+                   const Object& obj,
+                   const String& name) {
+  auto const ctx = fromCaller(
+    [] (const ActRec* fp, Offset) { return fp->func()->cls(); }
+  );
+  auto const val = obj->getPropIgnoreLateInit(ctx, name.get());
+  if (!val) {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      folly::sformat(
+       "Unknown or inaccessible property '{}' on object of class {}",
+       name.get(),
+       obj->getVMClass()->name()
+      )
+    );
+  }
+  return type(val) != KindOfUninit;
+}
+
+bool HHVM_FUNCTION(HH_is_late_init_sprop_init,
+                   const String& clsName,
+                   const String& name) {
+  auto const cls = Unit::loadClass(clsName.get());
+  if (!cls) {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      folly::sformat("Unknown class {}", clsName)
+    );
+  }
+  auto const ctx = fromCaller(
+    [] (const ActRec* fp, Offset) { return fp->func()->cls(); }
+  );
+  auto const lookup = cls->getSPropIgnoreLateInit(ctx, name.get());
+  if (!lookup.val || !lookup.accessible) {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      folly::sformat(
+       "Unknown or inaccessible static property '{}' on class {}",
+       name.get(),
+       clsName.get()
+      )
+    );
+  }
+  return type(lookup.val) != KindOfUninit;
+}
+
+Array HHVM_FUNCTION(HH_global_keys) {
+  return Array(get_global_variables()->keys());
+}
+
+bool HHVM_FUNCTION(HH_global_key_exists, StringArg key) {
+  return g_context->m_globalVarEnv->lookup(key.get()) != nullptr;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 
 void StandardExtension::initVariable() {
-  EXTR_CONST(IF_EXISTS);
-  EXTR_CONST(OVERWRITE);
-  EXTR_CONST(PREFIX_ALL);
-  EXTR_CONST(PREFIX_IF_EXISTS);
-  EXTR_CONST(PREFIX_INVALID);
-  EXTR_CONST(PREFIX_SAME);
-  EXTR_CONST(REFS);
-  EXTR_CONST(SKIP);
-
   HHVM_FE(is_null);
   HHVM_FE(is_bool);
   HHVM_FE(is_int);
@@ -495,6 +677,15 @@ void StandardExtension::initVariable() {
   HHVM_FE(is_string);
   HHVM_FE(is_scalar);
   HHVM_FE(is_array);
+  HHVM_FALIAS(HH\\is_vec, HH_is_vec);
+  HHVM_FALIAS(HH\\is_dict, HH_is_dict);
+  HHVM_FALIAS(HH\\is_keyset, HH_is_keyset);
+  HHVM_FALIAS(HH\\is_varray, HH_is_varray);
+  HHVM_FALIAS(HH\\is_darray, HH_is_darray);
+  HHVM_FALIAS(HH\\is_any_array, HH_is_any_array);
+  HHVM_FALIAS(HH\\is_php_array, HH_is_php_array);
+  HHVM_FALIAS(HH\\is_list_like, HH_is_list_like);
+  HHVM_FALIAS(HH\\is_meth_caller, HH_is_meth_caller);
   HHVM_FE(is_object);
   HHVM_FE(is_resource);
   HHVM_FE(boolval);
@@ -504,19 +695,28 @@ void StandardExtension::initVariable() {
   HHVM_FE(strval);
   HHVM_FE(gettype);
   HHVM_FE(get_resource_type);
-  HHVM_FE(settype);
   HHVM_FE(print_r);
   HHVM_FE(var_export);
   HHVM_FE(debug_zval_dump);
   HHVM_FE(var_dump);
   HHVM_FE(serialize);
   HHVM_FE(unserialize);
-  HHVM_FE(get_defined_vars);
-  HHVM_FALIAS(__SystemLib\\get_defined_vars, SystemLib_get_defined_vars);
-  HHVM_FE(extract);
   HHVM_FE(parse_str);
-  HHVM_FALIAS(__SystemLib\\extract, SystemLib_extract);
-  HHVM_FALIAS(__SystemLib\\parse_str, SystemLib_parse_str);
+  HHVM_FALIAS(HH\\object_prop_array, HH_object_prop_array);
+  HHVM_FALIAS(HH\\serialize_with_options, HH_serialize_with_options);
+  HHVM_FALIAS(HH\\Lib\\_Private\\Native\\first, HH_first);
+  HHVM_FALIAS(HH\\Lib\\_Private\\Native\\last, HH_last);
+  HHVM_FALIAS(HH\\Lib\\_Private\\Native\\first_key, HH_first_key);
+  HHVM_FALIAS(HH\\Lib\\_Private\\Native\\last_key, HH_last_key);
+  HHVM_FALIAS(HH\\is_late_init_prop_init, HH_is_late_init_prop_init);
+  HHVM_FALIAS(HH\\is_late_init_sprop_init, HH_is_late_init_sprop_init);
+  HHVM_FALIAS(HH\\global_keys, HH_global_keys);
+  HHVM_FALIAS(HH\\global_key_exists, HH_global_key_exists);
+
+  if (RuntimeOption::EnableIntrinsicsExtension) {
+    HHVM_FALIAS(__hhvm_intrinsics\\serialize_keep_dvarrays,
+                hhvm_intrinsics_serialize_keep_dvarrays);
+  }
 
   loadSystemlib("std_variable");
 }

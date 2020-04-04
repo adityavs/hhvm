@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -73,7 +73,7 @@ void CmdFlowControl::onClient(DebuggerClient &client) {
   throw DebuggerConsoleExitException();
 }
 
-bool CmdFlowControl::onServer(DebuggerProxy &proxy) {
+bool CmdFlowControl::onServer(DebuggerProxy& /*proxy*/) {
   // Flow control cmds do their work in onSetup() and onBeginInterrupt(), so
   // there is no real work to do in here.
   return true;
@@ -88,7 +88,7 @@ bool CmdFlowControl::onServer(DebuggerProxy &proxy) {
 void CmdFlowControl::installLocationFilterForLine(InterruptSite *site) {
   // We may be stopped at a place with no source info.
   if (!site || !site->valid()) return;
-  RequestInjectionData &rid = ThreadInfo::s_threadInfo->m_reqInjectionData;
+  RequestInjectionData &rid = RequestInfo::s_requestInfo->m_reqInjectionData;
   rid.m_flowFilter.clear();
   TRACE(3, "Prepare location filter for %s:%d, unit %p:\n",
         site->getFile(), site->getLine0(), site->getUnit());
@@ -124,7 +124,7 @@ void CmdFlowControl::installLocationFilterForLine(InterruptSite *site) {
 }
 
 void CmdFlowControl::removeLocationFilter() {
-  ThreadInfo::s_threadInfo->m_reqInjectionData.m_flowFilter.clear();
+  RequestInfo::s_requestInfo->m_reqInjectionData.m_flowFilter.clear();
 }
 
 bool CmdFlowControl::hasStepOuts() {
@@ -144,22 +144,22 @@ bool CmdFlowControl::atStepOutOffset(Unit* unit, Offset o) {
 // destination(s) of such instructions.
 void CmdFlowControl::setupStepOuts() {
   // Existing step outs should be cleaned up before making new ones.
-  assert(!hasStepOuts());
+  assertx(!hasStepOuts());
   auto fp = vmfp();
   if (!fp) return; // No place to step out to!
-  Offset returnOffset;
+  Offset callOffset;
   bool fromVMEntry;
   while (!hasStepOuts()) {
-    fp = g_context->getPrevVMState(fp, &returnOffset, nullptr, &fromVMEntry);
+    fp = g_context->getPrevVMState(fp, &callOffset, nullptr, &fromVMEntry);
     // If we've run off the top of the stack, just return having setup no
     // step outs. This will cause cmds like Next and Out to just let the program
     // run, which is appropriate.
     if (!fp) break;
     Unit* returnUnit = fp->m_func->unit();
-    PC returnPC = returnUnit->at(returnOffset);
+    PC callPC = returnUnit->at(callOffset);
     TRACE(2, "CmdFlowControl::setupStepOuts: at '%s' offset %d opcode %s\n",
-          fp->m_func->fullName()->data(), returnOffset,
-          opcodeToName(peek_op(returnPC)));
+          fp->m_func->fullName()->data(), callOffset,
+          opcodeToName(peek_op(callPC)));
     // Don't step out to generated or builtin functions, keep looking.
     if (fp->m_func->line1() == 0) continue;
     if (fp->m_func->isBuiltin()) continue;
@@ -167,21 +167,22 @@ void CmdFlowControl::setupStepOuts() {
       TRACE(2, "CmdFlowControl::setupStepOuts: VM entry\n");
       // We only execute this for opcodes which invoke more PHP, and that does
       // not include switches. Thus, we'll have at most two destinations.
-      auto const retOp = peek_op(returnPC);
-      assert(!isSwitch(retOp) && numSuccs(returnPC) <= 2);
+      auto const reentrantOp = peek_op(callPC);
+      assertx(!isSwitch(reentrantOp) && numSuccs(callPC) <= 2);
       // Set an internal breakpoint after the instruction if it can fall thru.
-      if (instrAllowsFallThru(retOp)) {
-        Offset nextOffset = returnOffset + instrLen(returnPC);
+      if (instrAllowsFallThru(reentrantOp)) {
+        Offset nextOffset = callOffset + instrLen(callPC);
         TRACE(2, "CmdFlowControl: step out to '%s' offset %d (fall-thru)\n",
               fp->m_func->fullName()->data(), nextOffset);
         m_stepOut1 = StepDestination(returnUnit, nextOffset);
       }
       // Set an internal breakpoint at the target of a control flow instruction.
       // A good example of a control flow op that invokes PHP is IterNext.
-      if (instrIsControlFlow(retOp)) {
-        Offset target = instrJumpTarget(returnPC, 0);
-        if (target != InvalidAbsoluteOffset) {
-          Offset targetOffset = returnOffset + target;
+      if (instrIsControlFlow(reentrantOp)) {
+        auto const targets = instrJumpTargets(callPC, 0);
+        if (!targets.empty()) {
+          assertx(targets.size() == 1);
+          Offset targetOffset = callOffset + targets[0];
           TRACE(2, "CmdFlowControl: step out to '%s' offset %d (jump target)\n",
                 fp->m_func->fullName()->data(), targetOffset);
           m_stepOut2 = StepDestination(returnUnit, targetOffset);
@@ -191,6 +192,7 @@ void CmdFlowControl::setupStepOuts() {
       // again. The most common case that leads here is Ret*, which does not
       // fall-thru and has no encoded target.
     } else {
+      auto const returnOffset = returnUnit->offsetOf(skipCall(callPC));
       TRACE(2, "CmdFlowControl: step out to '%s' offset %d\n",
             fp->m_func->fullName()->data(), returnOffset);
       m_stepOut1 = StepDestination(returnUnit, returnOffset);
@@ -226,7 +228,7 @@ void CmdFlowControl::cleanupStepOuts() {
 // flow control command.
 
 CmdFlowControl::StepDestination::StepDestination() :
-    m_unit(nullptr), m_offset(InvalidAbsoluteOffset),
+    m_unit(nullptr), m_offset(kInvalidOffset),
     m_ownsInternalBreakpoint(false)
 {
 }
@@ -251,7 +253,7 @@ CmdFlowControl::StepDestination::operator=(StepDestination&& other) {
     m_offset = other.m_offset;
     m_ownsInternalBreakpoint = other.m_ownsInternalBreakpoint;
     other.m_unit = nullptr;
-    other.m_offset = InvalidAbsoluteOffset;
+    other.m_offset = kInvalidOffset;
     other.m_ownsInternalBreakpoint = false;
   }
   return *this;

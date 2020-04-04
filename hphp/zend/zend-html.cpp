@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -21,6 +21,7 @@
 
 #include "hphp/util/lock.h"
 #include "hphp/util/functional.h"
+#include "hphp/util/hash-map.h"
 
 namespace HPHP {
 
@@ -428,7 +429,7 @@ static int utf32_to_utf8(unsigned char *buf, int k) {
   return retval;
 }
 
-using HtmlEntityMap = hphp_hash_map<const char*,std::string,cstr_hash,eqstr>;
+using HtmlEntityMap = hphp_const_char_map<std::string>;
 
 static volatile bool EntityMapInited = false;
 static Mutex EntityMapMutex;

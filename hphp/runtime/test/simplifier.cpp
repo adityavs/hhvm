@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,14 +38,14 @@ namespace HPHP { namespace jit {
 //////////////////////////////////////////////////////////////////////
 
 TEST(Simplifier, JumpConstFold) {
-  BCMarker dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
   IRUnit unit(test_context);
 
   // Folding JmpZero and JmpNZero.
   {
     auto tester = [&] (SSATmp* val, Opcode op) {
       auto jmp = unit.gen(op, dummy, unit.defBlock(), val);
-      return simplify(unit, jmp, false);
+      return simplify(unit, jmp);
     };
 
     auto resultFalseZero  = tester(unit.cns(false),  JmpZero);
@@ -63,15 +63,15 @@ TEST(Simplifier, JumpConstFold) {
 
 TEST(Simplifier, CondJmp) {
   IRUnit unit{test_context};
-  BCMarker marker = BCMarker::Dummy();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
 
   // Folding Conv*ToBool
   {
-    auto val = unit.gen(Conjure, marker, TInt);
-    auto cnv = unit.gen(ConvIntToBool, marker, val->dst());
-    auto jcc = unit.gen(JmpZero, marker, unit.defBlock(), cnv->dst());
+    auto val = unit.gen(Conjure, bcctx, TInt);
+    auto cnv = unit.gen(ConvIntToBool, bcctx, val->dst());
+    auto jcc = unit.gen(JmpZero, bcctx, unit.defBlock(), cnv->dst());
 
-    auto result = simplify(unit, jcc, false);
+    auto result = simplify(unit, jcc);
 
     EXPECT_EQ(nullptr, result.dst);
     ASSERT_EQ(1, result.instrs.size());
@@ -80,11 +80,11 @@ TEST(Simplifier, CondJmp) {
 
   // Folding in negation
   {
-    auto val = unit.gen(Conjure, marker, TBool);
-    auto neg = unit.gen(XorBool, marker, val->dst(), unit.cns(true));
-    auto jcc = unit.gen(JmpZero, marker, unit.defBlock(), neg->dst());
+    auto val = unit.gen(Conjure, bcctx, TBool);
+    auto neg = unit.gen(XorBool, bcctx, val->dst(), unit.cns(true));
+    auto jcc = unit.gen(JmpZero, bcctx, unit.defBlock(), neg->dst());
 
-    auto result = simplify(unit, jcc, false);
+    auto result = simplify(unit, jcc);
 
     EXPECT_EQ(nullptr, result.dst);
     ASSERT_EQ(1, result.instrs.size());
@@ -94,13 +94,13 @@ TEST(Simplifier, CondJmp) {
 
 TEST(Simplifier, Count) {
   IRUnit unit{test_context};
-  BCMarker dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
 
   // Count($null) --> 0
   {
-    auto null = unit.gen(Conjure, dummy, TNull);
-    auto count = unit.gen(Count, dummy, null->dst());
-    auto result = simplify(unit, count, false);
+    auto const null = unit.gen(Conjure, dummy, TNull);
+    auto const count = unit.gen(Count, dummy, null->dst());
+    auto const result = simplify(unit, count);
 
     EXPECT_NE(nullptr, result.dst);
     EXPECT_EQ(0, result.instrs.size());
@@ -109,21 +109,21 @@ TEST(Simplifier, Count) {
 
   // Count($bool_int_dbl_str) --> 1
   {
-    auto ty = TBool | TInt | TDbl | TStr | TRes;
-    auto val = unit.gen(Conjure, dummy, ty);
-    auto count = unit.gen(Count, dummy, val->dst());
-    auto result = simplify(unit, count, false);
+    auto const ty = TBool | TInt | TDbl | TStr | TRes;
+    auto const val = unit.gen(Conjure, dummy, ty);
+    auto const count = unit.gen(Count, dummy, val->dst());
+    auto const result = simplify(unit, count);
 
     EXPECT_NE(nullptr, result.dst);
     EXPECT_EQ(0, result.instrs.size());
     EXPECT_EQ(1, result.dst->intVal());
   }
 
-  // Count($array_no_kind) --> CountArray($array_no_kind)
+  // Count($vanilla_array) --> CountArray($vanilla_array)
   {
-    auto arr = unit.gen(Conjure, dummy, TArr);
-    auto count = unit.gen(Count, dummy, arr->dst());
-    auto result = simplify(unit, count, false);
+    auto const arr = unit.gen(Conjure, dummy, TVanillaArr);
+    auto const count = unit.gen(Count, dummy, arr->dst());
+    auto const result = simplify(unit, count);
 
     EXPECT_NE(nullptr, result.dst);
     EXPECT_EQ(1, result.instrs.size());
@@ -132,10 +132,9 @@ TEST(Simplifier, Count) {
 
   // Count($array_packed) --> CountArrayFast($array_packed)
   {
-    auto ty = Type::Array(ArrayData::kPackedKind);
-    auto arr = unit.gen(Conjure, dummy, ty);
-    auto count = unit.gen(Count, dummy, arr->dst());
-    auto result = simplify(unit, count, false);
+    auto const arr = unit.gen(Conjure, dummy, TPackedArr);
+    auto const count = unit.gen(Count, dummy, arr->dst());
+    auto const result = simplify(unit, count);
 
     EXPECT_NE(nullptr, result.dst);
     EXPECT_EQ(1, result.instrs.size());
@@ -144,9 +143,9 @@ TEST(Simplifier, Count) {
 
   // Count($some_obj) --> Count($some_obj)
   {
-    auto obj = unit.gen(Conjure, dummy, TObj);
-    auto count = unit.gen(Count, dummy, obj->dst());
-    auto result = simplify(unit, count, false);
+    auto const obj = unit.gen(Conjure, dummy, TObj);
+    auto const count = unit.gen(Count, dummy, obj->dst());
+    auto const result = simplify(unit, count);
     EXPECT_NO_CHANGE(result);
   }
 
@@ -154,15 +153,15 @@ TEST(Simplifier, Count) {
 
 TEST(Simplifier, LdObjClass) {
   IRUnit unit{test_context};
-  auto const dummy = BCMarker::Dummy();
-  auto const cls = SystemLib::s_IteratorClass;
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
+  auto const cls = SystemLib::s_HH_IteratorClass;
 
   // LdObjClass t1:Obj<=C doesn't simplify
   {
     auto sub = Type::SubObj(cls);
     auto obj = unit.gen(Conjure, dummy, sub);
     auto load = unit.gen(LdObjClass, dummy, obj->dst());
-    auto result = simplify(unit, load, false);
+    auto result = simplify(unit, load);
     EXPECT_NO_CHANGE(result);
   }
 
@@ -171,7 +170,7 @@ TEST(Simplifier, LdObjClass) {
     auto exact = Type::ExactObj(cls);
     auto obj = unit.gen(Conjure, dummy, exact);
     auto load = unit.gen(LdObjClass, dummy, obj->dst());
-    auto result = simplify(unit, load, false);
+    auto result = simplify(unit, load);
     EXPECT_EQ(result.dst->clsVal(), cls);
     EXPECT_EQ(result.instrs.size(), 0);
   }
@@ -179,7 +178,7 @@ TEST(Simplifier, LdObjClass) {
 
 TEST(Simplifier, LdObjInvoke) {
   IRUnit unit{test_context};
-  auto const dummy = BCMarker::Dummy();
+  auto const dummy = BCContext { BCMarker::Dummy(), 0 };
   auto const taken = unit.defBlock();
 
   // LdObjInvoke t1:Cls doesn't simplify
@@ -187,17 +186,17 @@ TEST(Simplifier, LdObjInvoke) {
     auto type = TCls;
     auto cls = unit.gen(Conjure, dummy, type);
     auto load = unit.gen(LdObjInvoke, dummy, taken, cls->dst());
-    auto result = simplify(unit, load, false);
+    auto result = simplify(unit, load);
     EXPECT_NO_CHANGE(result);
   }
 
   // LdObjInvoke t1:Cls(C), where C is persistent but has no __invoke
   // doesn't simplify.
   {
-    auto type = Type::cns(SystemLib::s_IteratorClass);
+    auto type = Type::cns(SystemLib::s_HH_IteratorClass);
     auto cls = unit.gen(Conjure, dummy, type);
     auto load = unit.gen(LdObjInvoke, dummy, taken, cls->dst());
-    auto result = simplify(unit, load, false);
+    auto result = simplify(unit, load);
     EXPECT_NO_CHANGE(result);
   }
 }

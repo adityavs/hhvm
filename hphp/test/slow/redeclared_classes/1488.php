@@ -1,29 +1,17 @@
-<?php
+<?hh
 
 if (isset($g)) {
-  class X {
- function foo() {
- var_dump(__METHOD__);
- }
- }
-  class Y extends X {
+  include '1488-1.inc';
 }
-}
- else {
-  class X {
- function foo() {
- var_dump(__METHOD__);
- }
- }
-  class Y {
-}
+else {
+  include '1488-2.inc';
 }
 class Z extends Y {
-  function foo() {
- var_dump(__METHOD__);
- }
-  function bar() {
- X::foo();
- }
+  static function foo() {
+    var_dump(__METHOD__);
+  }
+  static function bar() {
+    X::foo();
+  }
 }
 Z::bar();

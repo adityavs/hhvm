@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,14 +16,12 @@
 */
 #include "hphp/runtime/ext/mysql/ext_mysql.h"
 
-#include <netinet/in.h>
-#include <netdb.h>
-#include <poll.h>
-
 #include <folly/ScopeGuard.h>
 #include <folly/String.h>
+#include <folly/portability/Sockets.h>
 
-#include "hphp/runtime/base/actrec-args.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/ext/mysql/mysql_common.h"
@@ -37,45 +35,63 @@ using std::string;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static Variant HHVM_FUNCTION(mysql_connect,
-  const String& server,
-  const String& username,
-  const String& password,
-  bool new_link,
-  int client_flags,
-  int connect_timeout_ms,
-  int query_timeout_ms) {
+static Variant
+HHVM_FUNCTION(mysql_connect, const String& server, const String& username,
+              const String& password, bool /*new_link*/, int client_flags,
+              int connect_timeout_ms, int query_timeout_ms,
+              const Array& conn_attrs) {
   return Variant(php_mysql_do_connect(
-                   server,
-                   username,
-                   password,
-                   "",
-                   client_flags,
-                   false, false,
-                   connect_timeout_ms,
-                   query_timeout_ms
-                 ));
+      server,
+      username,
+      password,
+      "",
+      client_flags,
+      false,
+      false,
+      connect_timeout_ms,
+      query_timeout_ms,
+      &conn_attrs));
 }
 
-static Variant HHVM_FUNCTION(mysql_connect_with_db,
-  const String& server,
-  const String& username,
-  const String& password,
-  const String& database,
-  bool new_link,
-  int client_flags,
-  int connect_timeout_ms,
-  int query_timeout_ms) {
+static Variant HHVM_FUNCTION(
+    mysql_connect_with_ssl,
+    const String& server,
+    const String& username,
+    const String& password,
+    const String& database,
+    int client_flags,
+    int connect_timeout_ms,
+    int query_timeout_ms,
+    const Variant& sslContextProvider, /* = null */
+    const Array& conn_attrs) {
+  return Variant(php_mysql_do_connect_with_ssl(
+      server,
+      username,
+      password,
+      database,
+      client_flags,
+      connect_timeout_ms,
+      query_timeout_ms,
+      &conn_attrs,
+      sslContextProvider));
+}
+
+static Variant HHVM_FUNCTION(mysql_connect_with_db, const String& server,
+                             const String& username, const String& password,
+                             const String& database, bool /*new_link*/,
+                             int client_flags, int connect_timeout_ms,
+                             int query_timeout_ms, const Array& conn_attrs) {
   return Variant(php_mysql_do_connect(
-                   server,
-                   username,
-                   password,
-                   database,
-                   client_flags,
-                   false, false,
-                   connect_timeout_ms,
-                   query_timeout_ms
-                 ));
+      server,
+      username,
+      password,
+      database,
+      client_flags,
+      false,
+      false,
+      connect_timeout_ms,
+      query_timeout_ms,
+      &conn_attrs));
 }
 
 static Variant HHVM_FUNCTION(mysql_pconnect,
@@ -84,7 +100,8 @@ static Variant HHVM_FUNCTION(mysql_pconnect,
   const String& password,
   int client_flags,
   int connect_timeout_ms,
-  int query_timeout_ms) {
+  int query_timeout_ms,
+  const Array& conn_attrs) {
   return php_mysql_do_connect(
     server,
     username,
@@ -93,7 +110,8 @@ static Variant HHVM_FUNCTION(mysql_pconnect,
     client_flags,
     true, false,
     connect_timeout_ms,
-    query_timeout_ms
+    query_timeout_ms,
+    &conn_attrs
   );
 }
 
@@ -104,7 +122,8 @@ static Variant HHVM_FUNCTION(mysql_pconnect_with_db,
   const String& database,
   int client_flags,
   int connect_timeout_ms,
-  int query_timeout_ms) {
+  int query_timeout_ms,
+  const Array& conn_attrs) {
   return php_mysql_do_connect(
     server,
     username,
@@ -113,12 +132,13 @@ static Variant HHVM_FUNCTION(mysql_pconnect_with_db,
     client_flags,
     true, false,
     connect_timeout_ms,
-    query_timeout_ms
+    query_timeout_ms,
+    &conn_attrs
   );
 }
 
 static bool HHVM_FUNCTION(mysql_set_timeout, int query_timeout_ms /* = -1 */,
-                   const Variant& link_identifier /* = null */) {
+                          const Variant& /*link_identifier*/ /* = null */) {
   MySQL::SetDefaultReadTimeout(query_timeout_ms);
   return true;
 }
@@ -310,10 +330,8 @@ static Variant HHVM_FUNCTION(mysql_multi_query, const String& query,
 
   if (mysql_real_query(conn, query.data(), query.size())) {
 #ifdef HHVM_MYSQL_TRACE_MODE
-    if (RuntimeOption::EnableHipHopSyntax) {
-      raise_notice("runtime/ext_mysql: failed executing [%s] [%s]",
-                   query.data(), mysql_error(conn));
-    }
+    raise_notice("runtime/ext_mysql: failed executing [%s] [%s]",
+                 query.data(), mysql_error(conn));
 #endif
     // turning this off clears the errors
     if (!mysql_set_server_option(conn, MYSQL_OPTION_MULTI_STATEMENTS_OFF)) {
@@ -431,7 +449,7 @@ static Variant HHVM_FUNCTION(mysql_async_connect_start,
                       const String& password /* = null_string */,
                       const String& database /* = null_string */) {
   return php_mysql_do_connect(server, username, password, database,
-                              0, false, true, 0, 0);
+                              0, false, true, 0, 0, nullptr);
 }
 
 static bool HHVM_FUNCTION(mysql_async_connect_completed,
@@ -470,7 +488,7 @@ static bool HHVM_FUNCTION(mysql_async_query_start,
   }
   Variant ret = php_mysql_do_query_and_get_result(query, link_identifier,
                                                   true, true);
-  if (ret.getRawType() != KindOfBoolean) {
+  if (ret.getType() != KindOfBoolean) {
     raise_warning("runtime/ext_mysql: unexpected return from "
                   "php_mysql_do_query_and_get_result");
     return false;
@@ -521,7 +539,7 @@ static bool HHVM_FUNCTION(mysql_async_query_completed, const Resource& result) {
 static Variant HHVM_FUNCTION(mysql_async_fetch_array, const Resource& result,
                                                int result_type /* = 1 */) {
   if ((result_type & PHP_MYSQL_BOTH) == 0) {
-    throw_invalid_argument("result_type: %d", result_type);
+    raise_invalid_argument_warning("result_type: %d", result_type);
     return false;
   }
 
@@ -612,7 +630,7 @@ static Variant HHVM_FUNCTION(mysql_async_wait_actionable, const Array& items,
       return empty_array();
     }
 
-    auto conn = cast<MySQLResource>(entry.rvalAt(0))->mysql()->get();
+    auto conn = cast<MySQLResource>(entry[0])->mysql()->get();
 
     if (conn->async_op_status == ASYNC_OP_UNSET) {
       raise_warning("runtime/ext_mysql: no pending async operation in "
@@ -652,7 +670,7 @@ static Variant HHVM_FUNCTION(mysql_async_wait_actionable, const Array& items,
       return empty_array();
     }
 
-    auto conn = cast<MySQLResource>(entry.rvalAt(0))->mysql()->get();
+    auto conn = cast<MySQLResource>(entry[0])->mysql()->get();
 
     pollfd* fd = &fds[nfds++];
     if (fd->fd != mysql_get_file_descriptor(conn)) {
@@ -892,21 +910,21 @@ static Variant HHVM_FUNCTION(mysql_fetch_field, const Resource& result,
   MySQLFieldInfo *info;
   if (!(info = res->fetchFieldInfo())) return false;
 
-  auto obj = SystemLib::AllocStdClassObject();
-  obj->o_set("name",         info->name);
-  obj->o_set("table",        info->table);
-  obj->o_set("def",          info->def);
-  obj->o_set("max_length",   (int)info->max_length);
-  obj->o_set("not_null",     IS_NOT_NULL(info->flags)? 1 : 0);
-  obj->o_set("primary_key",  IS_PRI_KEY(info->flags)? 1 : 0);
-  obj->o_set("multiple_key", info->flags & MULTIPLE_KEY_FLAG? 1 : 0);
-  obj->o_set("unique_key",   info->flags & UNIQUE_KEY_FLAG? 1 : 0);
-  obj->o_set("numeric",      IS_NUM(info->type)? 1 : 0);
-  obj->o_set("blob",         IS_BLOB(info->flags)? 1 : 0);
-  obj->o_set("type",         php_mysql_get_field_name(info->type));
-  obj->o_set("unsigned",     info->flags & UNSIGNED_FLAG? 1 : 0);
-  obj->o_set("zerofill",     info->flags & ZEROFILL_FLAG? 1 : 0);
-  return obj;
+  ArrayInit props(13, ArrayInit::Map{});
+  props.set("name",         info->name);
+  props.set("table",        info->table);
+  props.set("def",          info->def);
+  props.set("max_length",   (int)info->max_length);
+  props.set("not_null",     IS_NOT_NULL(info->flags)? 1 : 0);
+  props.set("primary_key",  IS_PRI_KEY(info->flags)? 1 : 0);
+  props.set("multiple_key", info->flags & MULTIPLE_KEY_FLAG? 1 : 0);
+  props.set("unique_key",   info->flags & UNIQUE_KEY_FLAG? 1 : 0);
+  props.set("numeric",      IS_NUM(info->type)? 1 : 0);
+  props.set("blob",         IS_BLOB(info->flags)? 1 : 0);
+  props.set("type",         php_mysql_get_field_name(info->type));
+  props.set("unsigned",     info->flags & UNSIGNED_FLAG? 1 : 0);
+  props.set("zerofill",     info->flags & ZEROFILL_FLAG? 1 : 0);
+  return ObjectData::FromArray(props.create());
 }
 
 static bool HHVM_FUNCTION(mysql_field_seek, const Resource& result, int field) {
@@ -938,21 +956,10 @@ static Variant HHVM_FUNCTION(mysql_field_flags, const Resource& result,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-const StaticString s_MYSQL_ASSOC("MYSQL_ASSOC");
-const StaticString s_MYSQL_BOTH("MYSQL_BOTH");
-const StaticString s_MYSQL_CLIENT_COMPRESS("MYSQL_CLIENT_COMPRESS");
-const StaticString s_MYSQL_CLIENT_IGNORE_SPACE("MYSQL_CLIENT_IGNORE_SPACE");
-const StaticString s_MYSQL_CLIENT_INTERACTIVE("MYSQL_CLIENT_INTERACTIVE");
-const StaticString s_MYSQL_CLIENT_SSL("MYSQL_CLIENT_SSL");
-const StaticString s_MYSQL_NUM("MYSQL_NUM");
-const StaticString s_ASYNC_OP_INVALID("ASYNC_OP_INVALID");
-const StaticString s_ASYNC_OP_UNSET("ASYNC_OP_UNSET");
-const StaticString s_ASYNC_OP_CONNECT("ASYNC_OP_CONNECT");
-const StaticString s_ASYNC_OP_QUERY("ASYNC_OP_QUERY");
-
 void mysqlExtension::moduleInit() {
   HHVM_FE(mysql_connect);
   HHVM_FE(mysql_connect_with_db);
+  HHVM_FE(mysql_connect_with_ssl);
   HHVM_FE(mysql_pconnect);
   HHVM_FE(mysql_pconnect_with_db);
   HHVM_FE(mysql_set_timeout);
@@ -1000,39 +1007,17 @@ void mysqlExtension::moduleInit() {
   HHVM_FE(mysql_field_type);
   HHVM_FE(mysql_field_flags);
 
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_ASSOC.get(), PHP_MYSQL_ASSOC
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_BOTH.get(), PHP_MYSQL_BOTH
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_NUM.get(), PHP_MYSQL_NUM
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_CLIENT_COMPRESS.get(), 32
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_CLIENT_IGNORE_SPACE.get(), 256
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_CLIENT_INTERACTIVE.get(), 1024
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_MYSQL_CLIENT_SSL.get(), 2048
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_ASYNC_OP_INVALID.get(), k_ASYNC_OP_INVALID
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_ASYNC_OP_UNSET.get(), k_ASYNC_OP_UNSET
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_ASYNC_OP_CONNECT.get(), k_ASYNC_OP_CONNECT
-  );
-  Native::registerConstant<KindOfInt64>(
-    s_ASYNC_OP_QUERY.get(), k_ASYNC_OP_QUERY
-  );
+  HHVM_RC_INT(MYSQL_ASSOC, PHP_MYSQL_ASSOC);
+  HHVM_RC_INT(MYSQL_BOTH, PHP_MYSQL_BOTH);
+  HHVM_RC_INT(MYSQL_NUM, PHP_MYSQL_NUM);
+  HHVM_RC_INT(MYSQL_CLIENT_COMPRESS, 32);
+  HHVM_RC_INT(MYSQL_CLIENT_IGNORE_SPACE, 256);
+  HHVM_RC_INT(MYSQL_CLIENT_INTERACTIVE, 1024);
+  HHVM_RC_INT(MYSQL_CLIENT_SSL, 2048);
+  HHVM_RC_INT(ASYNC_OP_INVALID, k_ASYNC_OP_INVALID);
+  HHVM_RC_INT(ASYNC_OP_UNSET, k_ASYNC_OP_UNSET);
+  HHVM_RC_INT(ASYNC_OP_CONNECT, k_ASYNC_OP_CONNECT);
+  HHVM_RC_INT(ASYNC_OP_QUERY, k_ASYNC_OP_QUERY);
 
   loadSystemlib("mysql");
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,24 +17,25 @@
 #ifndef incl_HPHP_FILE_H_
 #define incl_HPHP_FILE_H_
 
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/req-list.h"
 #include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/runtime/base/request-local.h"
-#include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/type-resource.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/type-variant.h"
 
+#include "hphp/util/rds-local.h"
+
 struct stat;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class StreamContext;
-class StreamFilter;
+struct StreamContext;
 
-extern int __thread s_pcloseRet;
+extern RDS_LOCAL(int, s_pcloseRet);
 
 // This structure holds the request allocated data members of File.  The
 // purpose of the class is to allow File (and subclasses) to be managed by
@@ -48,7 +49,7 @@ extern int __thread s_pcloseRet;
 // FileData to add any persistent data members, e.g. see Socket.
 // Classes in the FileData hierarchy may not contain request-allocated data.
 struct FileData {
-  static const int CHUNK_SIZE;
+  static const int DEFAULT_CHUNK_SIZE;
 
   FileData() { }
   explicit FileData(bool nonblocking);
@@ -63,7 +64,8 @@ struct FileData {
   int getFd() { return m_fd; }
 
  private:
-  friend class File;
+  friend struct File;
+  friend struct PhpStreamWrapper;
   int m_fd{-1};      // file descriptor
   bool m_isLocal{false}; // is this on the local disk?
   bool m_closed{false}; // whether close() was called
@@ -81,7 +83,8 @@ struct FileData {
   std::string m_mode;
 
   char *m_buffer{nullptr};
-  int64_t m_bufferSize{CHUNK_SIZE};
+  int64_t m_bufferSize{0};
+  int64_t m_chunkSize{DEFAULT_CHUNK_SIZE};
 };
 
 /**
@@ -91,8 +94,6 @@ struct FileData {
  * so they can share some minimal functionalities.
  */
 struct File : SweepableResourceData {
-  static const int CHUNK_SIZE;
-
   static String TranslatePath(const String& filename);
   // Same as TranslatePath except doesn't make paths absolute
   static String TranslatePathKeepRelative(const char* fn, uint32_t len);
@@ -120,7 +121,7 @@ struct File : SweepableResourceData {
   explicit File(bool nonblocking = true,
                 const String& wrapper_type = null_string,
                 const String& stream_type = empty_string_ref);
-  virtual ~File();
+  ~File() override;
 
   static StaticString& classnameof() {
     static StaticString result("File");
@@ -137,18 +138,14 @@ struct File : SweepableResourceData {
   bool valid() const { return m_data && m_data->m_fd >= 0; }
   std::string getName() const { return m_data->m_name;}
 
+  virtual bool setBlocking(bool mode);
+  virtual bool setTimeout(uint64_t usecs);
+
   /**
    * How to open this type of file.
    */
   virtual bool open(const String& filename, const String& mode) = 0;
 
-  /**
-   * How to close this type of file.
-   *
-   * Your implementaitn should call invokeFiltersOnClose() before anything else
-   * to make sure that any user-provided php_user_filter instances get to flush
-   * and clean up.
-   */
   virtual bool close() = 0;
   virtual bool isClosed() const { return !m_data || m_data->m_closed; }
 
@@ -156,13 +153,7 @@ struct File : SweepableResourceData {
    * - read() when fetching data to return to PHP
    * - readImpl() when you want raw unbuffered data; for example, if you use
    *   the Socket class to implement a network-based extension, use readImpl
-   *   to avoid the internal buffer, stream filters, and so on
-   * - filteredRead() (wrapper around readImpl()) to call user-supplied stream
-   *   filters if you reimplement read()
-   *
-   * Stream filters are only supported for read() - the fgetc() and seek()
-   * behavior in Zend is undocumented, surprising, and not supported
-   * in HHVM.
+   *   to avoid the internal buffer, and so on
    */
 
   /**
@@ -178,12 +169,6 @@ struct File : SweepableResourceData {
    *   stream
    * - writeImpl() if you want C-like behavior, instead of PHP-like behavior;
    *   for example, if you write a network-based extension using Socket
-   * - filteredWrite() if you re-implement write() to provide support for PHP
-   *   user filters
-   *
-   * Stream filters are only supported for write() - the fputc() and seek()
-   * behavior in Zend is undocumented, surprising, and not supported
-   * in HHVM.
    */
 
   /**
@@ -217,12 +202,6 @@ struct File : SweepableResourceData {
   void setStreamContext(const req::ptr<StreamContext>& context) {
     m_streamContext = context;
   }
-  void appendReadFilter(const req::ptr<StreamFilter>& filter);
-  void appendWriteFilter(const req::ptr<StreamFilter>& filter);
-  void prependReadFilter(const req::ptr<StreamFilter>& filter);
-  void prependWriteFilter(const req::ptr<StreamFilter>& filter);
-  bool removeFilter(const req::ptr<StreamFilter>& filter);
-
   int64_t bufferedLen() { return m_data->m_writepos - m_data->m_readpos; }
 
   std::string getMode() { return m_data->m_mode; }
@@ -248,10 +227,20 @@ struct File : SweepableResourceData {
   int64_t printf(const String& format, const Array& args);
 
   /**
+   * Get the Chunk Size.
+   */
+  int64_t getChunkSize() const;
+
+  /**
+   * Set the Chunk Size.
+   */
+  void setChunkSize(int64_t chunk_size);
+
+  /**
    * Write one line of csv record.
    */
   int64_t writeCSV(const Array& fields, char delimiter = ',',
-                   char enclosure = '"');
+                   char enclosure = '"', char escape_char = '\\');
 
   /**
    * Read one line of csv record.
@@ -269,9 +258,8 @@ struct File : SweepableResourceData {
   std::shared_ptr<FileData> getData() const { return m_data; }
 
 protected:
-  void invokeFiltersOnClose();
   bool closeImpl();
-  virtual void sweep() override;
+  void sweep() override;
 
   void setIsLocal(bool isLocal) { m_data->m_isLocal = isLocal; }
   void setIsClosed(bool closed) { m_data->m_closed = closed; }
@@ -297,16 +285,6 @@ protected:
     m_streamType = streamType.get();
   }
 
-  /**
-   * call readImpl(m_buffer, CHUNK_SIZE), passing through stream filters if any.
-   */
-  int64_t filteredReadToBuffer();
-
-  /**
-   * call writeImpl, passing through stream filters if any.
-   */
-  int64_t filteredWrite(const char* buffer, int64_t length);
-
   FileData* getFileData() { return m_data.get(); }
   const FileData* getFileData() const { return m_data.get(); }
 
@@ -316,17 +294,10 @@ protected:
                 const String& stream_type = empty_string_ref);
 
 private:
-  template<class ResourceList>
-  String applyFilters(const String& buffer,
-                      ResourceList& filters,
-                      bool closing);
-
   std::shared_ptr<FileData> m_data;
   StringData* m_wrapperType;
   StringData* m_streamType;
   req::ptr<StreamContext> m_streamContext;
-  req::list<req::ptr<StreamFilter>> m_readFilters;
-  req::list<req::ptr<StreamFilter>> m_writeFilters;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

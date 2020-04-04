@@ -49,7 +49,7 @@ class MacroAssembler : public Assembler {
  public:
   explicit MacroAssembler(HPHP::CodeBlock& cb)
       : Assembler(cb),
-#ifdef DEBUG
+#ifndef NDEBUG
         allow_macro_instructions_(true),
 #endif
         sp_(sp), tmp0_(ip0), tmp1_(ip1), fptmp0_(d31) {}
@@ -288,6 +288,11 @@ class MacroAssembler : public Assembler {
     assert(!rd.IsZero());
     adr(rd, label);
   }
+  void Adrp(const Register& rd, Label* label) {
+    assert(allow_macro_instructions_);
+    assert(!rd.IsZero());
+    adrp(rd, label);
+  }
   void Asr(const Register& rd, const Register& rn, unsigned shift) {
     assert(allow_macro_instructions_);
     assert(!rd.IsZero());
@@ -396,7 +401,6 @@ class MacroAssembler : public Assembler {
     assert(allow_macro_instructions_);
     assert(!rd.IsZero());
     assert(!rn.IsZero());
-    assert(!rm.IsZero());
     assert((cond != al) && (cond != nv));
     csel(rd, rn, rm, cond);
   }
@@ -416,8 +420,6 @@ class MacroAssembler : public Assembler {
              Condition cond) {
     assert(allow_macro_instructions_);
     assert(!rd.IsZero());
-    assert(!rn.IsZero());
-    assert(!rm.IsZero());
     assert((cond != al) && (cond != nv));
     csinc(rd, rn, rm, cond);
   }
@@ -951,7 +953,7 @@ class MacroAssembler : public Assembler {
   // one instruction. Refer to the implementation for details.
   void BumpSystemStackPointer(const Operand& space);
 
-#if DEBUG
+#ifndef NDEBUG
   void SetAllowMacroInstructions(bool value) {
     allow_macro_instructions_ = value;
   }
@@ -1122,7 +1124,7 @@ class MacroAssembler : public Assembler {
   void PrepareForPush(int count, int size);
   void PrepareForPop(int count, int size);
 
-#if DEBUG
+#ifndef NDEBUG
   // Tell whether any of the macro instruction can be used. When false the
   // MacroAssembler will assert if a method which can emit a variable number
   // of instructions is called.
@@ -1148,7 +1150,7 @@ class InstructionAccurateScope {
   explicit InstructionAccurateScope(MacroAssembler* masm)
       : masm_(masm) {
     masm_->BlockLiteralPool();
-#ifdef DEBUG
+#ifndef NDEBUG
     old_allow_macro_instructions_ = masm_->AllowMacroInstructions();
     masm_->SetAllowMacroInstructions(false);
 #endif
@@ -1157,7 +1159,7 @@ class InstructionAccurateScope {
   InstructionAccurateScope(MacroAssembler* masm, int count)
       : masm_(masm) {
     masm_->BlockLiteralPool();
-#ifdef DEBUG
+#ifndef NDEBUG
     size_ = count * kInstructionSize;
     masm_->bind(&start_);
     old_allow_macro_instructions_ = masm_->AllowMacroInstructions();
@@ -1167,7 +1169,7 @@ class InstructionAccurateScope {
 
   ~InstructionAccurateScope() {
     masm_->ReleaseLiteralPool();
-#ifdef DEBUG
+#ifndef NDEBUG
     if (start_.IsBound()) {
       assert(masm_->SizeOfCodeGeneratedSince(&start_) == size_);
     }
@@ -1177,7 +1179,7 @@ class InstructionAccurateScope {
 
  private:
   MacroAssembler* masm_;
-#ifdef DEBUG
+#ifndef NDEBUG
   uint64_t size_{0};
   Label start_;
   bool old_allow_macro_instructions_;

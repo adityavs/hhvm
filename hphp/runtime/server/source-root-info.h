@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,10 +24,9 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Transport;
+struct Transport;
 
-class SourceRootInfo {
-public:
+struct SourceRootInfo {
   explicit SourceRootInfo(Transport* transport);
   SourceRootInfo(const std::string &user, const std::string &sandbox);
   void createFromUserConfig();
@@ -70,11 +69,6 @@ public:
   Eval::DSandboxInfo getSandboxInfo() const;
 
 private:
-  static const std::string& GetCurrentPhpRoot() {
-    return s_phproot.isNull() ? initPhpRoot() : *s_phproot;
-  }
-
-private:
   String m_user;
   String m_sandbox;
   String m_path;
@@ -84,10 +78,8 @@ private:
     Off
   } m_sandboxCond;
   Array m_serverVars;
-  static DECLARE_THREAD_LOCAL_NO_CHECK(std::string, s_path);
-  static DECLARE_THREAD_LOCAL_NO_CHECK(std::string, s_phproot);
+  static THREAD_LOCAL_NO_CHECK(std::string, s_path);
 
-  static std::string& initPhpRoot();
   std::string parseSandboxServerVariable(const std::string &format) const;
 };
 

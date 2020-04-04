@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 /**
  * Encrypts/decrypts data in CBC mode
@@ -297,7 +297,7 @@ function mcrypt_generic(resource $td,
  */
 <<__Native>>
 function mcrypt_get_block_size(string $cipher,
-                               ?string $mode = null): mixed;
+                               string $mode): mixed;
 
 /**
  * Gets the name of the specified cipher

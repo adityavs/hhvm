@@ -1,9 +1,8 @@
+#!/usr/bin/env python3
+
 """
 Wow okay, let's frob repos from inside gdb.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
@@ -14,8 +13,8 @@ from gdbutils import *
 
 #------------------------------------------------------------------------------
 
-_paths = [ None, None ]
-_conns = [ None, None ]
+_paths = [None, None]
+_conns = [None, None]
 
 
 def get(repo_id):
@@ -41,7 +40,7 @@ def set(repo_id, path):
 
 
 def table(prefix):
-    return '%s_%s' % (prefix, K('HPHP::kRepoSchemaId').string())
+    return '%s_%s' % (prefix, K('HPHP::(anonymous namespace)::repoSchema').string())
 
 
 #------------------------------------------------------------------------------
@@ -103,7 +102,7 @@ class RepoShowCommand(gdb.Command):
     def invoke(self, args, from_tty):
         global _paths
         print('Central repo: %s' % '<none>' if _paths[0] is None else _paths[0])
-        print('Local repo: %s'   % '<none>' if _paths[1] is None else _paths[1])
+        print('Local repo: %s' % '<none>' if _paths[1] is None else _paths[1])
 
 
 class RepoSetCentralCommand(gdb.Command):

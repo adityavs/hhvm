@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,31 +31,22 @@
 namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
-struct Vunit;
-struct Vinstr;
-struct Vblock;
-struct Vreg;
 struct Abi;
+struct Vblock;
+struct Vinstr;
+struct Vreg;
+struct Vunit;
+struct Vtext;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-/*
- * If Trace::moduleEnabled(Trace::llvm) || RuntimeOption::EvalJitLLVMCounters,
- * these two RDS values are used to count the number of bytecodes executed by
- * code emitted from their respective backends.
- */
-extern rds::Link<uint64_t> g_bytecodesLLVM;
-extern rds::Link<uint64_t> g_bytecodesVasm;
-
-///////////////////////////////////////////////////////////////////////////////
-
-#define DECLARE_VNUM(Vnum, check, prefix)                 \
+#define DECLARE_VNUM(Vnum, type, check, prefix)           \
 struct Vnum {                                             \
   Vnum() {}                                               \
-  explicit Vnum(size_t n) : n(safe_cast<uint32_t>(n)) {}  \
+  explicit Vnum(size_t n) : n(safe_cast<type>(n)) {}      \
                                                           \
   /* implicit */ operator size_t() const {                \
-    if (check) assertx(n != kInvalidId);                   \
+    if (check) assertx(n != kInvalidId);                  \
     return n;                                             \
   }                                                       \
                                                           \
@@ -69,33 +60,53 @@ struct Vnum {                                             \
   }                                                       \
                                                           \
 private:                                                  \
-  static constexpr uint32_t kInvalidId = 0xffffffff;      \
-  uint32_t n{kInvalidId};                                 \
+  static constexpr type kInvalidId =                      \
+    static_cast<type>(0xffffffff);                        \
+  type n{kInvalidId};                                     \
 }
 
 /*
  * Vlabel wraps a block number.
  */
-DECLARE_VNUM(Vlabel, true, "B");
+DECLARE_VNUM(Vlabel, uint32_t, true, "B");
+
+/*
+ * Vaddr is a reference to an address in the instruction stream.
+ */
+DECLARE_VNUM(Vaddr, uint32_t, false, "A");
 
 /*
  * Vtuple is an index to a tuple in Vunit::tuples.
  */
-DECLARE_VNUM(Vtuple, true, "T");
+DECLARE_VNUM(Vtuple, uint32_t, true, "T");
 
 /*
  * VcallArgsId is an index to a VcallArgs in Vunit::vcallArgs.
  */
-DECLARE_VNUM(VcallArgsId, true, "V");
+DECLARE_VNUM(VcallArgsId, uint32_t, true, "V");
 
 #undef DECLARE_VNUM
+
+///////////////////////////////////////////////////////////////////////////////
+
+using VinstrId = unsigned int;
+using MaybeVinstrId = folly::Optional<VinstrId>;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
  * Assert invariants on a Vunit.
  */
-bool check(Vunit&);
+bool check(Vunit& unit);
+
+/*
+ * Assert that Vreg widths match between defs and uses.
+ *
+ * This should only be run before any zero-extending or truncating copies get
+ * reduced to regular copies---so, before simplify() or the various lowering
+ * passes.
+ */
+bool checkWidths(Vunit& unit);
 
 /*
  * Check that each block has exactly one terminal instruction at the end.
@@ -105,16 +116,21 @@ bool checkBlockEnd(const Vunit& v, Vlabel b);
 /*
  * Passes.
  */
-void allocateRegisters(Vunit&, const Abi&);
+void allocateRegistersWithXLS(Vunit&, const Abi&);
+void allocateRegistersWithGraphColor(Vunit&, const Abi&);
+void annotateSFUses(Vunit&);
 void fuseBranches(Vunit&);
-void optimizeExits(Vunit&);
-void optimizeJmps(Vunit&);
 void optimizeCopies(Vunit&, const Abi&);
+void optimizeExits(Vunit&, MaybeVinstrId = {});
+void optimizeJmps(Vunit&, MaybeVinstrId = {});
 void optimizePhis(Vunit&);
-void removeDeadCode(Vunit&);
+void removeDeadCode(Vunit&, MaybeVinstrId = {});
 void removeTrivialNops(Vunit&);
+void reuseImmq(Vunit&);
 template<typename Folder> void foldImms(Vunit&);
 void simplify(Vunit&);
+void postRASimplify(Vunit&);
+void sfPeepholes(Vunit&, const Abi&);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -133,10 +149,18 @@ folly::Range<const Vlabel*> succs(const Vblock& block);
 jit::vector<Vlabel> sortBlocks(const Vunit& unit);
 
 /*
- * Group blocks into main, cold, and frozen while preserving relative order
- * with each section.
+ * Make block weights more consistent by enforcing that the weight of each block
+ * doesn't exceed the sums of the weights of its predecessors or its successors.
  */
-jit::vector<Vlabel> layoutBlocks(const Vunit& unit);
+void fixBlockWeights(Vunit& unit);
+
+/*
+ * Order blocks for lowering to machine code.  May use different layout
+ * algorithms depending on the TransKind of `unit'.
+ *
+ * The output is guaranteed to be partitioned by code area.
+ */
+jit::vector<Vlabel> layoutBlocks(Vunit& unit);
 
 /*
  * Return a bitset, keyed by Vlabel, indicating which blocks are targets of
@@ -147,5 +171,13 @@ boost::dynamic_bitset<> backedgeTargets(const Vunit& unit,
 
 ///////////////////////////////////////////////////////////////////////////////
 }}
+
+namespace std {
+template<> struct hash<HPHP::jit::Vlabel> {
+  size_t operator()(HPHP::jit::Vlabel l) const { return (size_t)l; }
+};
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 #endif

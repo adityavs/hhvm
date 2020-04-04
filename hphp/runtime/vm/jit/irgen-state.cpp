@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,31 +18,50 @@
 #include <sstream>
 
 #include "hphp/runtime/vm/jit/irgen-internal.h"
+#include "hphp/runtime/vm/resumable.h"
 
-namespace HPHP { namespace jit {
+namespace HPHP { namespace jit { namespace irgen {
 
 //////////////////////////////////////////////////////////////////////
 
 namespace {
 
 BCMarker initial_marker(TransContext ctx) {
-  return BCMarker { ctx.srcKey(), ctx.initSpOffset, ctx.transID, nullptr };
+  return BCMarker { ctx.initSrcKey, ctx.initSpOffset, ctx.transID, nullptr };
 }
 
 }
 
 //////////////////////////////////////////////////////////////////////
 
-IRGS::IRGS(TransContext context, TransFlags flags)
-  : context(context)
-  , transFlags(flags)
-  , unit(context)
+IRGS::IRGS(IRUnit& unit, const RegionDesc* region, int32_t budgetBCInstrs,
+           TranslateRetryContext* retryContext, bool prologueSetup)
+  : context(unit.context())
+  , transFlags(unit.context().flags)
+  , region(region)
+  , unit(unit)
   , irb(new IRBuilder(unit, initial_marker(context)))
-  , bcStateStack { context.srcKey() }
+  , bcState(context.initSrcKey)
+  , budgetBCInstrs(budgetBCInstrs)
+  , retryContext(retryContext)
 {
-  irgen::updateMarker(*this);
-  auto const frame = irgen::gen(*this, DefFP);
-  irgen::gen(*this, DefSP, FPInvOffsetData { context.initSpOffset }, frame);
+  updateMarker(*this);
+  auto const frame = gen(*this, DefFP);
+
+  // Now that we've defined the FP, update the BC marker appropriately.
+  updateMarker(*this);
+
+  // Define SP.
+  if (resumeMode(*this) == ResumeMode::None && !prologueSetup) {
+    gen(*this, DefFrameRelSP, FPInvOffsetData { context.initSpOffset }, frame);
+  } else {
+    gen(*this, DefRegSP, FPInvOffsetData { context.initSpOffset });
+  }
+
+  if (RuntimeOption::EvalHHIRGenerateAsserts && !prologueSetup) {
+    // Assert that we're in the correct function.
+    gen(*this, DbgAssertFunc, frame, cns(*this, bcState.func()));
+  }
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -53,10 +72,10 @@ std::string show(const IRGS& irgs) {
     out << folly::format("+{:-^102}+\n", str);
   };
 
-  const int32_t frameCells = irgen::resumed(irgs)
+  const int32_t frameCells = resumeMode(irgs) != ResumeMode::None
     ? 0
-    : irgen::curFunc(irgs)->numSlotsInFrame();
-  auto const stackDepth = irgs.irb->syncedSpLevel().offset - frameCells;
+    : curFunc(irgs)->numSlotsInFrame();
+  auto const stackDepth = irgs.irb->fs().bcSPOff().offset - frameCells;
   assertx(stackDepth >= 0);
   auto spOffset = stackDepth;
   auto elem = [&](const std::string& str) {
@@ -67,52 +86,17 @@ std::string show(const IRGS& irgs) {
     --spOffset;
   };
 
-  auto fpi = irgen::curFunc(irgs)->findFPI(irgen::bcOff(irgs));
-  auto checkFpi = [&]() {
-    if (fpi && spOffset + frameCells == fpi->m_fpOff) {
-      auto fpushOff = fpi->m_fpushOff;
-      auto after = fpushOff + instrLen(irgen::curUnit(irgs)->at(fpushOff));
-      std::ostringstream msg;
-      msg << "ActRec from ";
-      irgen::curUnit(irgs)->prettyPrint(
-        msg,
-        Unit::PrintOpts().range(fpushOff, after)
-                         .noLineNumbers()
-                         .indent(0)
-                         .noFuncs()
-      );
-      auto msgStr = msg.str();
-      assertx(msgStr.back() == '\n');
-      msgStr.erase(msgStr.size() - 1);
-      for (unsigned i = 0; i < kNumActRecCells; ++i) elem(msgStr);
-      fpi = fpi->m_parentIndex != -1
-        ? &irgen::curFunc(irgs)->fpitab()[fpi->m_parentIndex]
-        : nullptr;
-      return true;
-    }
-    return false;
-  };
-
   header(folly::format(" {} stack element(s): ",
                        stackDepth).str());
-  for (auto i = 0; spOffset > 0; ) {
-    assertx(i < irgen::curFunc(irgs)->maxStackCells());
-    if (checkFpi()) {
-      i += kNumActRecCells;
-      continue;
-    }
+  assertx(spOffset <= curFunc(irgs)->maxStackCells());
 
-    auto const stkTy = irgs.irb->stackType(
-      irgen::offsetFromIRSP(irgs, BCSPOffset{i}),
-      DataTypeGeneric
-    );
-    auto const stkVal = irgs.irb->stackValue(
-      irgen::offsetFromIRSP(irgs, BCSPOffset{i}),
-      DataTypeGeneric
-    );
+  for (auto i = 0; i < stackDepth; ) {
+    auto const spRel = offsetFromIRSP(irgs, BCSPRelOffset{i});
+    auto const stkTy  = irgs.irb->stack(spRel, DataTypeGeneric).type;
+    auto const stkVal = irgs.irb->stack(spRel, DataTypeGeneric).value;
 
     std::string elemStr;
-    if (stkTy == TStkElem) {
+    if (stkTy == TCell) {
       elemStr = "unknown";
     } else if (stkVal) {
       elemStr = stkVal->inst()->toString();
@@ -120,11 +104,13 @@ std::string show(const IRGS& irgs) {
       elemStr = stkTy.toString();
     }
 
-    auto const predicted = irgen::predictedTypeFromStack(irgs, BCSPOffset{i});
+    auto const irSPRel = BCSPRelOffset{i}
+      .to<FPInvOffset>(irgs.irb->fs().bcSPOff());
+    auto const predicted = predictedType(irgs, Location::Stack { irSPRel });
+
     if (predicted < stkTy) {
       elemStr += folly::sformat(" (predict: {})", predicted);
     }
-
     elem(elemStr);
     ++i;
   }
@@ -132,22 +118,15 @@ std::string show(const IRGS& irgs) {
   out << "\n";
 
   header(folly::format(" {} local(s) ",
-                       irgen::curFunc(irgs)->numLocals()).str());
-  for (unsigned i = 0; i < irgen::curFunc(irgs)->numLocals(); ++i) {
-    auto const localValue = irgs.irb->localValue(i, DataTypeGeneric);
+                       curFunc(irgs)->numLocals()).str());
+  for (unsigned i = 0; i < curFunc(irgs)->numLocals(); ++i) {
+    auto const localValue = irgs.irb->local(i, DataTypeGeneric).value;
     auto const localTy = localValue ? localValue->type()
-                                    : irgs.irb->localType(i, DataTypeGeneric);
+                                    : irgs.irb->local(i, DataTypeGeneric).type;
     auto str = localValue ? localValue->inst()->toString()
                           : localTy.toString();
-    auto const predicted = irgs.irb->predictedLocalType(i);
+    auto const predicted = irgs.irb->fs().local(i).predictedType;
     if (predicted < localTy) str += folly::sformat(" (predict: {})", predicted);
-
-    if (localTy <= TBoxedCell) {
-      auto const pred = irgs.irb->predictedInnerType(i);
-      if (pred != TBottom) {
-        str += folly::sformat(" (predict inner: {})", pred.toString());
-      }
-    }
 
     out << folly::format("| {:<100} |\n",
                          folly::format("{:>2}: {}", i, str));
@@ -158,4 +137,4 @@ std::string show(const IRGS& irgs) {
 
 //////////////////////////////////////////////////////////////////////
 
-}}
+}}}

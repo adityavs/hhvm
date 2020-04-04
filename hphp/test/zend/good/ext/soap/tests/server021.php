@@ -1,4 +1,4 @@
-<?php
+<?hh
 class Foo {
   function __call($name, $args) {
     if ($name == "test") {
@@ -8,8 +8,8 @@ class Foo {
     }
   }
 }
-
-$server = new soapserver(null,array('uri'=>"http://testuri.org"));
+<<__EntryPoint>> function main(): void {
+$server = new soapserver(null,darray['uri'=>"http://testuri.org"]);
 $server->setclass("Foo");
 
 $HTTP_RAW_POST_DATA = <<<EOF
@@ -28,4 +28,4 @@ EOF;
 
 $server->handle($HTTP_RAW_POST_DATA);
 echo "ok\n";
-?>
+}

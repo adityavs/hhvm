@@ -1,0 +1,10 @@
+.hh_file 1;
+.main {
+  Int 1
+  RetC
+}
+
+.function [rx conditional_rx_local] foo() {
+  Null
+  RetC
+}

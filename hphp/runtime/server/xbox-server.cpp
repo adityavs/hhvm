@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,7 +34,8 @@ namespace HPHP {
 
 using std::string;
 
-XboxTransport::XboxTransport(const String& message, const String& reqInitDoc /* = "" */)
+XboxTransport::XboxTransport(const folly::StringPiece message,
+                             const folly::StringPiece reqInitDoc /* = "" */)
     : m_refCount(0), m_done(false), m_code(0), m_event(nullptr) {
   Timer::GetMonotonicTime(m_queueTime);
 
@@ -56,8 +57,8 @@ std::string XboxTransport::getHeader(const char *name) {
   return "";
 }
 
-void XboxTransport::sendImpl(const void *data, int size, int code,
-                             bool chunked, bool eom) {
+void XboxTransport::sendImpl(const void* data, int size, int code,
+                             bool /*chunked*/, bool eom) {
   m_response.append((const char*)data, size);
   if (code) {
     m_code = code;
@@ -104,12 +105,10 @@ String XboxTransport::getResults(int &code, int timeout_ms /* = 0 */) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static IMPLEMENT_THREAD_LOCAL(std::shared_ptr<XboxServerInfo>,
-  s_xbox_server_info);
-static IMPLEMENT_THREAD_LOCAL(std::string, s_xbox_prev_req_init_doc);
+static THREAD_LOCAL(std::shared_ptr<XboxServerInfo>, s_xbox_server_info);
+static THREAD_LOCAL(std::string, s_xbox_prev_req_init_doc);
 
-class XboxRequestHandler: public RPCRequestHandler {
-public:
+struct XboxRequestHandler : RPCRequestHandler {
   XboxRequestHandler() : RPCRequestHandler(
     (*s_xbox_server_info)->getTimeoutSeconds().count(), Info) {}
   static bool Info;
@@ -117,14 +116,14 @@ public:
 
 bool XboxRequestHandler::Info = false;
 
-static IMPLEMENT_THREAD_LOCAL(XboxRequestHandler, s_xbox_request_handler);
+static THREAD_LOCAL(XboxRequestHandler, s_xbox_request_handler);
 
 ///////////////////////////////////////////////////////////////////////////////
 
 struct XboxWorker
   : JobQueueWorker<XboxTransport*,Server*,true,false,JobQueueDropVMStack>
 {
-  virtual void doJob(XboxTransport *job) {
+  void doJob(XboxTransport *job) override {
     try {
       // If this job or the previous job that ran on this thread have
       // a custom initial document, make sure we do a reset
@@ -157,7 +156,7 @@ private:
     }
   }
 
-  virtual void onThreadExit() {
+  void onThreadExit() override {
     if (!s_xbox_request_handler.isNull()) {
       s_xbox_request_handler.destroy();
     }
@@ -177,7 +176,7 @@ void XboxServer::Restart() {
       Lock l(s_dispatchMutex);
       s_dispatcher = new JobQueueDispatcher<XboxWorker>
         (RuntimeOption::XboxServerThreadCount,
-         RuntimeOption::ServerThreadRoundRobin,
+         RuntimeOption::XboxServerThreadCount,
          RuntimeOption::ServerThreadDropCacheTimeoutSeconds,
          RuntimeOption::ServerThreadDropStack,
          nullptr);
@@ -190,13 +189,14 @@ void XboxServer::Restart() {
 }
 
 void XboxServer::Stop() {
-  if (s_dispatcher) {
-    s_dispatcher->stop();
+  if (!s_dispatcher) return;
 
-    Lock l(s_dispatchMutex);
-    delete s_dispatcher;
-    s_dispatcher = nullptr;
-  }
+  Lock l(s_dispatchMutex);
+  if (!s_dispatcher) return;
+
+  s_dispatcher->stop();
+  delete s_dispatcher;
+  s_dispatcher = nullptr;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -224,10 +224,10 @@ bool XboxServer::SendMessage(const String& message,
         return false;
       }
 
-      job = new XboxTransport(message);
+      job = new XboxTransport(message.toCppString());
       job->incRefCount(); // paired with worker's decRefCount()
       job->incRefCount(); // paired with decRefCount() at below
-      assert(s_dispatcher);
+      assertx(s_dispatcher);
       s_dispatcher->enqueue(job);
     }
 
@@ -242,7 +242,13 @@ bool XboxServer::SendMessage(const String& message,
     if (code > 0) {
       ret.set(s_code, code);
       if (code == 200) {
-        ret.set(s_response, unserialize_from_string(response));
+        ret.set(
+          s_response,
+          unserialize_from_string(
+            response,
+            VariableUnserializer::Type::Internal
+          )
+        );
       } else {
         ret.set(s_error, response);
       }
@@ -274,7 +280,13 @@ bool XboxServer::SendMessage(const String& message,
         String sresponse(response, len, AttachString);
         ret.set(s_code, code);
         if (code == 200) {
-          ret.set(s_response, unserialize_from_string(sresponse));
+          ret.set(
+            s_response,
+            unserialize_from_string(
+              sresponse,
+              VariableUnserializer::Type::Internal
+            )
+          );
         } else {
           ret.set(s_error, sresponse);
         }
@@ -297,9 +309,9 @@ bool XboxServer::PostMessage(const String& message,
       return false;
     }
 
-    XboxTransport *job = new XboxTransport(message);
+    XboxTransport *job = new XboxTransport(message.toCppString());
     job->incRefCount(); // paired with worker's decRefCount()
-    assert(s_dispatcher);
+    assertx(s_dispatcher);
     s_dispatcher->enqueue(job);
     return true;
 
@@ -319,7 +331,15 @@ bool XboxServer::PostMessage(const String& message,
         int len = 0;
         char *response = http->recv(len);
         String sresponse(response, len, AttachString);
-        if (code == 200 && same(unserialize_from_string(sresponse), true)) {
+        if (code == 200 &&
+            same(
+              unserialize_from_string(
+                sresponse,
+                VariableUnserializer::Type::Internal
+              ),
+              true
+            )
+           ) {
           return true;
         }
       }
@@ -331,16 +351,18 @@ bool XboxServer::PostMessage(const String& message,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class XboxTask : public SweepableResourceData {
-public:
+struct XboxTask : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(XboxTask)
 
   XboxTask(const String& message, const String& reqInitDoc = "") {
-    m_job = new XboxTransport(message, reqInitDoc);
+    m_job = new XboxTransport(message.toCppString(), reqInitDoc.toCppString());
     m_job->incRefCount();
   }
 
-  ~XboxTask() {
+  XboxTask(const XboxTask&) = delete;
+  XboxTask& operator=(const XboxTask&) = delete;
+
+  ~XboxTask() override {
     m_job->decRefCount();
   }
 
@@ -351,13 +373,14 @@ public:
   const String& o_getClassNameHook() const override { return classnameof(); }
 
 private:
-  XboxTransport *m_job;
+  XboxTransport *m_job{nullptr};
 };
 IMPLEMENT_RESOURCE_ALLOCATION(XboxTask)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Resource XboxServer::TaskStart(const String& msg, const String& reqInitDoc /* = "" */,
+Resource XboxServer::TaskStart(const String& msg,
+                               const String& reqInitDoc /* = "" */,
   ServerTaskEvent<XboxServer, XboxTransport> *event /* = nullptr */) {
   {
     Lock l(s_dispatchMutex);
@@ -380,7 +403,7 @@ Resource XboxServer::TaskStart(const String& msg, const String& reqInitDoc /* = 
         event->setJob(job);
       }
 
-      assert(s_dispatcher);
+      assertx(s_dispatcher);
       s_dispatcher->enqueue(job);
 
       return Resource(std::move(task));
@@ -396,6 +419,34 @@ Resource XboxServer::TaskStart(const String& msg, const String& reqInitDoc /* = 
   return Resource();
 }
 
+void XboxServer::TaskStartFromNonRequest(
+  const folly::StringPiece msg,
+  const folly::StringPiece reqInitDoc /* ="" */
+) {
+    {
+      Lock l(s_dispatchMutex);
+      if (s_dispatcher &&
+          (s_dispatcher->getActiveWorker() <
+           RuntimeOption::XboxServerThreadCount ||
+           s_dispatcher->getQueuedJobs() <
+           RuntimeOption::XboxServerMaxQueueLength)) {
+        XboxTransport *job = new XboxTransport(msg, reqInitDoc);
+        job->incRefCount(); // paired with worker's decRefCount()
+
+        assertx(s_dispatcher);
+        s_dispatcher->enqueue(job);
+        return;
+      }
+  }
+  const char* errMsg =
+    (RuntimeOption::XboxServerThreadCount > 0 ?
+     "Cannot create new Xbox task because the Xbox queue has "
+     "reached maximum capacity" :
+     "Cannot create new Xbox task because the Xbox is not enabled");
+
+  throw std::runtime_error(errMsg);
+}
+
 bool XboxServer::TaskStatus(const Resource& task) {
   return cast<XboxTask>(task)->getJob()->isDone();
 }
@@ -409,7 +460,8 @@ int XboxServer::TaskResult(XboxTransport *job, int timeout_ms, Variant *ret) {
   String response = job->getResults(code, timeout_ms);
   if (ret) {
     if (code == 200) {
-      *ret = unserialize_from_string(response);
+      *ret =
+        unserialize_from_string(response, VariableUnserializer::Type::Internal);
     } else {
       *ret = response;
     }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,13 +18,12 @@
 #ifndef incl_HPHP_PHP_SDL_H
 #define incl_HPHP_PHP_SDL_H
 
-#include <unordered_map>
+#include "hphp/runtime/ext/soap/encoding.h"
+#include "hphp/runtime/base/http-client.h"
+#include "hphp/util/hash-map.h"
+
 #include <vector>
 #include <memory>
-
-#include "hphp/runtime/ext/soap/encoding.h"
-#include "hphp/util/hash-map-typedefs.h"
-#include "hphp/runtime/base/http-client.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 // defines
@@ -82,13 +81,12 @@ struct sdlRestrictionInt;
 
 using sdlTypePtr = std::shared_ptr<sdlType>;
 using sdlTypePtrVec = std::vector<std::shared_ptr<sdlType>>;
-typedef hphp_string_hash_map<std::shared_ptr<sdlType>,sdlType> sdlTypeMap;
+using sdlTypeMap = hphp_string_map<std::shared_ptr<sdlType>>;
 using sdlAttributePtr = std::shared_ptr<sdlAttribute>;
-typedef hphp_string_hash_map<std::shared_ptr<sdlAttribute>,sdlAttribute>
-        sdlAttributeMap;
-typedef hphp_string_hash_map<std::shared_ptr<sdlExtraAttribute>,
-                             sdlExtraAttribute>
-        sdlExtraAttributeMap;
+using sdlAttributeMap = hphp_vector_map<std::string, std::shared_ptr<sdlAttribute>>;
+using sdlExtraAttributeMap = hphp_vector_map<
+  std::string, std::shared_ptr<sdlExtraAttribute>
+>;
 
 struct sdlBinding;
 struct sdlContentModel;
@@ -232,17 +230,13 @@ struct sdlParam;
 struct sdlFault;
 struct sdlFunction;
 
-typedef hphp_string_hash_map<std::shared_ptr<sdlBinding>,sdlBinding>
-        sdlBindingMap;
-typedef hphp_string_hash_map<std::shared_ptr<sdlSoapBindingFunctionHeader>,
-                             sdlSoapBindingFunctionHeader>
-  sdlSoapBindingFunctionHeaderMap;
+using sdlBindingMap = hphp_string_map<std::shared_ptr<sdlBinding>>;
+using sdlSoapBindingFunctionHeaderMap =
+      hphp_string_map<std::shared_ptr<sdlSoapBindingFunctionHeader>>;
 using sdlParamPtr = std::shared_ptr<sdlParam>;
 using sdlParamVec = std::vector<std::shared_ptr<sdlParam>>;
-typedef hphp_string_hash_map<std::shared_ptr<sdlFault>,sdlFault>
-        sdlFaultMap;
-typedef hphp_string_hash_map<std::shared_ptr<sdlFunction>,sdlFunction>
-        sdlFunctionMap;
+using sdlFaultMap = hphp_string_map<std::shared_ptr<sdlFault>>;
+using sdlFunctionMap = hphp_string_map<std::shared_ptr<sdlFunction>>;
 
 struct sdlSoapBinding {
   sdlEncodingStyle  style;
@@ -339,7 +333,7 @@ struct sdlCtx {
   xmlNodeMap      portTypes;
   xmlNodeMap      bindings;
   xmlNodeMap      services;
-  
+
   ~sdlCtx();
 };
 
@@ -354,7 +348,7 @@ encodePtr get_encoder_ex(sdl *sdl, const std::string &nscat);
 sdlBindingPtr get_binding_from_type(sdl *sdl, int type);
 sdlBindingPtr get_binding_from_name(sdl *sdl, char *name, char *ns);
 
-sdlPtr load_wsdl(char *struri, HttpClient *http = NULL);
+sdlPtr load_wsdl(char *struri, HttpClient *http = nullptr);
 bool load_schema(sdlCtx *ctx, xmlNodePtr schema);
 void schema_pass2(sdlCtx *ctx);
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,7 @@
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/text-util.h"
@@ -31,7 +32,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-bool VirtualHost::IsDefault(const IniSetting::Map &ini, const Hdf &vh,
+bool VirtualHost::IsDefault(const IniSetting::Map& /*ini*/, const Hdf& vh,
                             const std::string& ini_key /* = "" */) {
   if (vh.exists() && !vh.isEmpty()) {
     return (vh.getName() == "default");
@@ -60,18 +61,41 @@ const VirtualHost *VirtualHost::GetCurrent() {
   return ret;
 }
 
-int64_t VirtualHost::GetMaxPostSize() {
-  const VirtualHost *vh = GetCurrent();
-  assert(vh);
-  if (vh->m_runtimeOption.maxPostSize != -1) {
-    return vh->m_runtimeOption.maxPostSize;
+VirtualHost* VirtualHost::Resolve(const std::string& host) {
+  auto const hostString = String(host.c_str(), host.size(), CopyString);
+  for (auto vhost : RuntimeOption::VirtualHosts) {
+    if (vhost->match(hostString)) {
+      return vhost.get();
+    }
+  }
+  return nullptr;
+}
+
+int64_t VirtualHost::getMaxPostSize() const {
+  if (m_runtimeOption.maxPostSize != -1) {
+    return m_runtimeOption.maxPostSize;
   }
   return RuntimeOption::MaxPostSize;
 }
 
+int64_t VirtualHost::GetLowestMaxPostSize() {
+  auto lowest = RuntimeOption::MaxPostSize;
+  for (auto vhost : RuntimeOption::VirtualHosts) {
+    auto max = vhost->getMaxPostSize();
+    lowest = std::min(lowest, max);
+  }
+  return lowest;
+}
+
+int64_t VirtualHost::GetMaxPostSize() {
+  const VirtualHost *vh = GetCurrent();
+  assertx(vh);
+  return vh->getMaxPostSize();
+}
+
 int64_t VirtualHost::GetUploadMaxFileSize() {
   const VirtualHost *vh = GetCurrent();
-  assert(vh);
+  assertx(vh);
   if (vh->m_runtimeOption.uploadMaxFileSize != -1) {
     return vh->m_runtimeOption.uploadMaxFileSize;
   }
@@ -80,9 +104,9 @@ int64_t VirtualHost::GetUploadMaxFileSize() {
 
 void VirtualHost::UpdateSerializationSizeLimit() {
   const VirtualHost *vh = GetCurrent();
-  assert(vh);
+  assertx(vh);
   if (vh->m_runtimeOption.serializationSizeLimit != StringData::MaxSize) {
-    VariableSerializer::serializationSizeLimit =
+    VariableSerializer::serializationSizeLimit->value =
       vh->m_runtimeOption.serializationSizeLimit;
   }
 }
@@ -95,7 +119,7 @@ bool VirtualHost::alwaysDecodePostData(const String& origPath) const {
 
 const std::vector<std::string> &VirtualHost::GetAllowedDirectories() {
   const VirtualHost *vh = GetCurrent();
-  assert(vh);
+  assertx(vh);
   if (!vh->m_runtimeOption.allowedDirectories.empty()) {
     return vh->m_runtimeOption.allowedDirectories;
   }
@@ -152,7 +176,7 @@ void VirtualHost::initRuntimeOption(const IniSetting::Map& ini, const Hdf& vh) {
       ini,
       vh, "overwrite.ResourceLimit.SerializationSizeLimit",
       StringData::MaxSize, false);
-  m_runtimeOption.allowedDirectories = Config::GetVector(
+  m_runtimeOption.allowedDirectories = Config::GetStrVector(
     ini,
     vh, "overwrite.Server.AllowedDirectories",
     m_runtimeOption.allowedDirectories, false);
@@ -162,9 +186,12 @@ void VirtualHost::initRuntimeOption(const IniSetting::Map& ini, const Hdf& vh) {
   m_runtimeOption.serializationSizeLimit = serializationSizeLimit;
 
   m_documentRoot = RuntimeOption::SourceRoot + m_pathTranslation;
-  if (!m_documentRoot.empty() &&
-      m_documentRoot[m_documentRoot.length() - 1] == '/') {
-    m_documentRoot = m_documentRoot.substr(0, m_documentRoot.length() - 1);
+  if (m_documentRoot.length() > 1 &&
+      m_documentRoot.back() == '/') {
+    m_documentRoot.pop_back();
+    // Make sure we've not converted "/" to "" (which is why we're checking
+    // length() > 1 instead of !empty() above)
+    assertx(!m_documentRoot.empty());
   }
 }
 
@@ -201,12 +228,13 @@ void VirtualHost::init(const IniSetting::Map& ini, const Hdf& vh,
   m_name = vh.exists() && !vh.isEmpty() ? vh.getName() : ini_key;
 
   m_prefix = Config::GetString(ini, vh, "Prefix", "", false);
-  m_pattern = format_pattern(Config::GetString(ini, vh, "Pattern", "", false),
-                             false);
+  auto pattern = format_pattern(Config::GetString(ini, vh, "Pattern", "",
+                                                  false), false);
   m_pathTranslation = Config::GetString(ini, vh, "PathTranslation", "",
                                         false);
-  if (!m_pattern.empty()) {
-    m_pattern += "i"; // case-insensitive
+  if (!pattern.empty()) {
+    pattern += "i"; // case-insensitive
+    m_pattern = makeStaticString(pattern);
   }
 
   if (!m_pathTranslation.empty() &&
@@ -221,41 +249,42 @@ void VirtualHost::init(const IniSetting::Map& ini, const Hdf& vh,
   m_checkExistenceBeforeRewrite =
     Config::GetBool(ini, vh, "CheckExistenceBeforeRewrite", true, false);
 
-  m_alwaysDecodePostData =
-    Config::GetBool(ini, vh, "AlwaysDecodePostData", true, false);
+  m_alwaysDecodePostData = Config::GetBool(
+    ini,
+    vh,
+    "AlwaysDecodePostData",
+    RuntimeOption::AlwaysDecodePostDataDefault,
+    false);
 
   m_decodePostDataBlackList =
     Config::GetSetC(ini, vh, "DecodePostDataBlackList");
 
-  auto rr_callback = [&] (const IniSetting::Map &ini_rr,
-                          const Hdf &hdf_rr,
-                          const std::string &ini_rr_key) {
+  auto rr_callback = [&](const IniSetting::Map& ini_rr, const Hdf& hdf_rr,
+                         const std::string& /*ini_rr_key*/) {
     RewriteRule dummy;
     m_rewriteRules.push_back(dummy);
     RewriteRule &rule = m_rewriteRules.back();
-    rule.pattern = format_pattern(Config::GetString(ini_rr, hdf_rr, "pattern",
-                                                    "", false),
-                                  true);
+    rule.pattern = makeStaticString(format_pattern(
+          Config::GetString(ini_rr, hdf_rr, "pattern", "", false),
+          true));
     rule.to = Config::GetString(ini_rr, hdf_rr, "to", "", false);
     rule.qsa = Config::GetBool(ini_rr, hdf_rr, "qsa", false, false);
     rule.redirect = Config::GetInt16(ini_rr, hdf_rr, "redirect", 0, false);
     rule.encode_backrefs = Config::GetBool(ini_rr, hdf_rr, "encode_backrefs",
                                            false, false);
 
-    if (rule.pattern.empty() || rule.to.empty()) {
+    if (rule.pattern->empty() || rule.to.empty()) {
       throw std::runtime_error("Invalid rewrite rule: (empty pattern or to)");
     }
 
-    auto rc_callback = [&] (const IniSetting::Map &ini_rc,
-                            const Hdf &hdf_rc,
-                            const std::string &ini_rc_key) {
+    auto rc_callback = [&](const IniSetting::Map& ini_rc, const Hdf& hdf_rc,
+                           const std::string& /*ini_rc_key*/) {
       RewriteCond dummy;
       rule.rewriteConds.push_back(dummy);
       RewriteCond &cond = rule.rewriteConds.back();
-      cond.pattern = format_pattern(Config::GetString(ini_rc, hdf_rc, "pattern",
-                                                      "", false),
-                                    true);
-      if (cond.pattern.empty()) {
+      cond.pattern = makeStaticString(format_pattern(
+            Config::GetString(ini_rc, hdf_rc, "pattern", "", false), true));
+      if (cond.pattern->empty()) {
         throw std::runtime_error("Invalid rewrite rule: (empty cond pattern)");
       }
       std::string type = Config::GetString(ini_rc, hdf_rc, "type", "", false);
@@ -279,9 +308,8 @@ void VirtualHost::init(const IniSetting::Map& ini, const Hdf& vh,
 
   m_ipBlocks = std::make_shared<IpBlockMap>(ini, vh);
 
-  auto lf_callback = [&] (const IniSetting::Map &ini_lf,
-                          const Hdf &hdf_lf,
-                          const std::string &ini_lf_key) {
+  auto lf_callback = [&](const IniSetting::Map& ini_lf, const Hdf& hdf_lf,
+                         const std::string& /*ini_lf_key*/) {
     QueryStringFilter filter;
     filter.urlPattern = format_pattern(Config::GetString(ini_lf, hdf_lf, "url",
                                                          "", false),
@@ -289,30 +317,30 @@ void VirtualHost::init(const IniSetting::Map& ini, const Hdf& vh,
     filter.replaceWith = Config::GetString(ini_lf, hdf_lf, "value", "", false);
     filter.replaceWith = "\\1=" + filter.replaceWith;
 
-    std::string pattern = Config::GetString(ini_lf, hdf_lf, "pattern", "",
+    std::string namePattern = Config::GetString(ini_lf, hdf_lf, "pattern", "",
                                             false);
     std::vector<std::string> names;
-    names = Config::GetVector(ini_lf, hdf_lf, "params", names, false);
+    names = Config::GetStrVector(ini_lf, hdf_lf, "params", names, false);
 
-    if (pattern.empty()) {
+    if (namePattern.empty()) {
       for (unsigned int i = 0; i < names.size(); i++) {
-        if (pattern.empty()) {
-          pattern = "(?<=[&\?])(";
+        if (namePattern.empty()) {
+          namePattern = "(?<=[&\?])(";
         } else {
-          pattern += "|";
+          namePattern += "|";
         }
-        pattern += names[i];
+        namePattern += names[i];
       }
-      if (!pattern.empty()) {
-        pattern += ")=.*?(?=(&|$))";
-        pattern = format_pattern(pattern, false);
+      if (!namePattern.empty()) {
+        namePattern += ")=.*?(?=(&|$))";
+        namePattern = format_pattern(namePattern, false);
       }
     } else if (!names.empty()) {
       throw std::runtime_error("Invalid log filter: (cannot specify "
         "both params and pattern)");
     }
 
-    filter.namePattern = pattern;
+    filter.namePattern = namePattern;
     m_queryStringFilters.push_back(filter);
   };
   Config::Iterate(lf_callback, ini, vh, "LogFilters", false);
@@ -327,12 +355,10 @@ void VirtualHost::init(const IniSetting::Map& ini, const Hdf& vh,
   }
 }
 
-bool VirtualHost::match(const std::string &host) const {
-  if (!m_pattern.empty()) {
-    Variant ret = preg_match(String(m_pattern.c_str(), m_pattern.size(),
-                                    CopyString),
-                             String(host.c_str(), host.size(),
-                                    CopyString));
+bool VirtualHost::match(const String &host) const {
+  if (m_pattern) {
+    ARRPROV_USE_RUNTIME_LOCATION();
+    Variant ret = preg_match(m_pattern, host.get());
     return ret.toInt64() > 0;
   } else if (!m_prefix.empty()) {
     return strncasecmp(host.c_str(), m_prefix.c_str(), m_prefix.size()) == 0;
@@ -341,7 +367,7 @@ bool VirtualHost::match(const std::string &host) const {
 }
 
 static int get_backref(const char **s) {
-  assert('0' <= **s && **s <= '9');
+  assertx('0' <= **s && **s <= '9');
   int val = **s - '0';
   *s += 1;
   if ('0' <= **s && **s <= '9') {
@@ -373,20 +399,19 @@ bool VirtualHost::rewriteURL(const String& host, String &url, bool &qsa,
       } else {
         subject = host;
       }
-      Variant ret = preg_match(String(it->pattern.c_str(), it->pattern.size(),
-                                      CopyString), subject);
-      if (!same(ret, it->negate ? 0 : 1)) {
+      Variant ret = preg_match(it->pattern, subject.get());
+      if (!same(ret, static_cast<int64_t>(it->negate ? 0 : 1))) {
         passed = false;
         break;
       }
     }
     if (!passed) continue;
     Variant matches;
-    int count = preg_match(rule.pattern.c_str(),
-                           normalized,
+    int count = preg_match(rule.pattern,
+                           normalized.get(),
                            &matches).toInt64();
     if (count > 0) {
-      Logger::Verbose("Matched pattern %s", rule.pattern.c_str());
+      Logger::Verbose("Matched pattern %s", rule.pattern->data());
 
       const char *s = rule.to.c_str();
       StringBuffer ret;
@@ -432,7 +457,7 @@ bool VirtualHost::rewriteURL(const String& host, String &url, bool &qsa,
       redirect = rule.redirect;
       return true;
     } else {
-      Logger::Verbose("Did not match pattern %s", rule.pattern.c_str());
+      Logger::Verbose("Did not match pattern %s", rule.pattern->data());
     }
   }
   return false;
@@ -452,12 +477,11 @@ std::string VirtualHost::serverName(const std::string &host) const {
   }
 
   if (!RuntimeOption::DefaultServerNameSuffix.empty()) {
-    if (!m_pattern.empty()) {
+    if (m_pattern) {
       Variant matches;
-      Variant ret = preg_match(String(m_pattern.c_str(), m_pattern.size(),
-                                      CopyString),
+      Variant ret = preg_match(m_pattern,
                                String(host.c_str(), host.size(),
-                                      CopyString),
+                                      CopyString).get(),
                                &matches);
       if (ret.toInt64() > 0) {
         String prefix = matches.toArray()[1].toString();
@@ -481,7 +505,7 @@ std::string VirtualHost::serverName(const std::string &host) const {
 // query string filter
 
 std::string VirtualHost::filterUrl(const std::string &url) const {
-  assert(!m_queryStringFilters.empty());
+  assertx(!m_queryStringFilters.empty());
 
   for (unsigned int i = 0; i < m_queryStringFilters.size(); i++) {
     const QueryStringFilter &filter = m_queryStringFilters[i];

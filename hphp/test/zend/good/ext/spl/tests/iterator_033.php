@@ -1,6 +1,6 @@
-<?php
-
-$it = new ParentIterator(new RecursiveArrayIterator(array(1,array(21,22, array(231)),3)));
+<?hh
+<<__EntryPoint>> function main(): void {
+$it = new ParentIterator(new RecursiveArrayIterator(varray[1,varray[21,22, varray[231]],3]));
 
 foreach(new RecursiveIteratorIterator($it) as $k=>$v)
 {
@@ -16,6 +16,5 @@ foreach(new RecursiveIteratorIterator($it, 1) as $k=>$v)
 	var_dump($v);
 }
 
-?>
-===DONE===
-<?php exit(0); ?>
+echo "===DONE===\n";
+}

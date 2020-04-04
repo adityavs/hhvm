@@ -1,7 +1,7 @@
 <?hh
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function awaitva(...$args) {
@@ -29,4 +29,8 @@ async function foo() {
   return $res1 + $res2 * $res3;
 }
 
+
+<<__EntryPoint>>
+function main_immed_lambda2() {
 var_dump(HH\Asio\join(foo()));
+}

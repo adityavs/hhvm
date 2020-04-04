@@ -1,6 +1,4 @@
-<?php
-
-var_dump(is_dir(false));
-var_dump(is_dir(true));
+<?hh
+<<__EntryPoint>> function main(): void {
 var_dump(is_dir(""));
-var_dump(is_dir(null));
+}

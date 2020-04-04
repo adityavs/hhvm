@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,7 @@
 #include "hphp/util/process.h"
 
 namespace HPHP {
-#ifdef DEBUG
+#ifndef NDEBUG
 static const int kMaxLockDepth=256;
 static __thread Rank tl_rankStack[kMaxLockDepth];
 static __thread int tl_curRankDepth;

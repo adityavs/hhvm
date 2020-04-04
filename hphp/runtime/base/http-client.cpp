@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,7 +20,6 @@
 #include "hphp/runtime/base/curl-tls-workarounds.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/util/timer.h"
-#include <curl/curl.h>
 #include <curl/easy.h>
 #include <vector>
 #include "hphp/util/logger.h"
@@ -30,8 +29,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 //so that curl_global_init() is called ahead of time, avoiding crash
-class StaticInitializer {
-public:
+struct StaticInitializer {
   StaticInitializer() {
     curl_global_init(CURL_GLOBAL_ALL);
     SSLInit::Init();
@@ -45,7 +43,7 @@ HttpClient::HttpClient(int timeout /* = 5 */, int maxRedirect /* = 1 */,
     m_decompress(decompress), m_response(nullptr), m_responseHeaders(nullptr),
     m_proxyPort(0) {
   if (m_timeout <= 0) {
-    m_timeout = ThreadInfo::s_threadInfo.getNoCheck()->
+    m_timeout = RequestInfo::s_requestInfo.getNoCheck()->
       m_reqInjectionData.getSocketDefaultTimeout();
   }
 }
@@ -75,8 +73,8 @@ size_t HttpClient::header(char *data, size_t size, size_t nmemb) {
   return length;
 }
 
-void HttpClient::auth(const std::string &username,
-                      const std::string &password, bool basic /* = true */) {
+void HttpClient::auth(const std::string& username, const std::string& password,
+                      bool /*basic*/ /* = true */) {
   m_basic = true;
   m_username = username;
   m_password = password;
@@ -93,31 +91,35 @@ void HttpClient::proxy(const std::string &host, int port,
 
 int HttpClient::get(const char *url, StringBuffer &response,
                     const HeaderMap *requestHeaders /* = NULL */,
-                    std::vector<String> *responseHeaders /* = NULL */) {
+                    req::vector<String> *responseHeaders /* = NULL */) {
   return request(nullptr,
                  url, nullptr, 0, response, requestHeaders, responseHeaders);
 }
 
-int HttpClient::post(const char *url, const char *data, int size,
+int HttpClient::post(const char *url, const char *data, size_t size,
                      StringBuffer &response,
                      const HeaderMap *requestHeaders /* = NULL */,
-                     std::vector<String> *responseHeaders /* = NULL */) {
+                     req::vector<String> *responseHeaders /* = NULL */) {
   return request(nullptr,
                  url, data, size, response, requestHeaders, responseHeaders);
 }
 
 const StaticString
   s_ssl("ssl"),
+  s_tls("tls"),
   s_verify_peer("verify_peer"),
+  s_verify_peer_name("verify_peer_name"),
   s_capath("capath"),
   s_cafile("cafile"),
   s_local_cert("local_cert"),
-  s_passphrase("passphrase");
+  s_passphrase("passphrase"),
+  s_http("http"),
+  s_header("header");
 
 int HttpClient::request(const char* verb,
-                     const char *url, const char *data, int size,
+                     const char *url, const char *data, size_t size,
                      StringBuffer &response, const HeaderMap *requestHeaders,
-                     std::vector<String> *responseHeaders) {
+                     req::vector<String> *responseHeaders) {
   SlowTimer timer(RuntimeOption::HttpSlowQueryThreshold, "curl", url);
 
   m_response = &response;
@@ -137,7 +139,12 @@ int HttpClient::request(const char* verb,
   curl_easy_setopt(cp, CURLOPT_DNS_CACHE_TIMEOUT, 120);
   curl_easy_setopt(cp, CURLOPT_NOSIGNAL, 1); // for multithreading mode
   curl_easy_setopt(cp, CURLOPT_SSL_VERIFYPEER,    1);
+  // For libcurl the VERIFYHOST "true"/enabled value is '2', NOT '1'!
+  // If libcurl is built with NSS, VERIFYPEER =0 forces VERIFYHOST to =0
+  curl_easy_setopt(cp, CURLOPT_SSL_VERIFYHOST,    2);
   curl_easy_setopt(cp, CURLOPT_SSL_CTX_FUNCTION, curl_tls_workarounds_cb);
+  curl_easy_setopt(cp, CURLOPT_USE_SSL, m_use_ssl);
+  curl_easy_setopt(cp, CURLOPT_SSLVERSION, m_sslversion);
 
   /*
    * cipher list varies according to SSL library, and "ALL" is for OpenSSL
@@ -187,7 +194,14 @@ int HttpClient::request(const char* verb,
         slist = curl_slist_append(slist, header.data());
       }
     }
-    if (slist) {
+  if (m_stream_context_options[s_http].isArray()) {
+    const Array http = m_stream_context_options[s_http].toArray();
+    if (http.exists(s_header)) {
+      slist = curl_slist_append(slist,
+                                http[s_header].toString().data());
+    }
+  }
+  if (slist) {
       curl_easy_setopt(cp, CURLOPT_HTTPHEADER, slist);
     }
   }
@@ -195,7 +209,11 @@ int HttpClient::request(const char* verb,
   if (data && size) {
     curl_easy_setopt(cp, CURLOPT_POST,          1);
     curl_easy_setopt(cp, CURLOPT_POSTFIELDS,    data);
-    curl_easy_setopt(cp, CURLOPT_POSTFIELDSIZE, size);
+    if (size <= 0x7fffffffLL) {
+      curl_easy_setopt(cp, CURLOPT_POSTFIELDSIZE, size);
+    } else {
+      curl_easy_setopt(cp, CURLOPT_POSTFIELDSIZE_LARGE, size);
+    }
   }
 
   if (verb != nullptr) {
@@ -212,11 +230,20 @@ int HttpClient::request(const char* verb,
     curl_easy_setopt(cp, CURLOPT_WRITEHEADER, (void*)this);
   }
 
-  if (m_stream_context_options[s_ssl].isArray()) {
-    const Array ssl = m_stream_context_options[s_ssl].toArray();
+  if (m_stream_context_options[s_ssl].isArray() ||
+      m_stream_context_options[s_tls].isArray()) {
+    const Array ssl = m_stream_context_options[s_ssl].isArray() ? \
+                      m_stream_context_options[s_ssl].toArray() : \
+                      m_stream_context_options[s_tls].toArray();
     if (ssl.exists(s_verify_peer)) {
       curl_easy_setopt(cp, CURLOPT_SSL_VERIFYPEER,
                        ssl[s_verify_peer].toBoolean());
+    }
+    if (ssl.exists(s_verify_peer_name)) {
+      // For libcurl VERIFYHOST the enable/"true" value is '2', NOT '1'!
+      curl_easy_setopt(cp, CURLOPT_SSL_VERIFYHOST,
+                       ssl[s_verify_peer_name].toBoolean() ? \
+                       2 : 0);
     }
     if (ssl.exists(s_capath)) {
       curl_easy_setopt(cp, CURLOPT_CAPATH,

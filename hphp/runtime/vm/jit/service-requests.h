@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,6 +34,8 @@ struct ActRec;
 
 namespace jit {
 
+struct CGMeta;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
@@ -61,21 +63,6 @@ namespace jit {
   REQ(BIND_JMP)           \
                           \
   /*
-   * bind_jcc_first(TCA jcc, SrcKey taken, SrcKey next, bool did_take)
-   *
-   * A branch between two potentially untranslated targets.
-   *
-   * A bind_jcc_1st is emitted as a jcc followed by a jmp, both to the same
-   * stub.  When invoked, a translation of the appropriate side of the branch
-   * (indicated by `did_take') is obtained, and the jcc is rewritten so that it
-   * will translate the other side of the branch when the inverse condition is
-   * met.
-   *
-   * @see: MCGenerator::bindJccFirst()
-   */                     \
-  REQ(BIND_JCC_FIRST)     \
-                          \
-  /*
    * bind_addr(TCA* addr, SrcKey target, TransFlags trflags)
    *
    * A code pointer to the potentially untranslated `target'; used for
@@ -100,28 +87,23 @@ namespace jit {
   REQ(RETRANSLATE)        \
                           \
   /*
-   * retranslate_opt(SrcKey target, TransID transID)
+   * retranslate_opt(SrcKey sk)
    *
-   * A request to retranslate a function entry `target', leveraging profiling
-   * data to produce a larger, more optimized translation.  Only used when PGO
-   * is enabled.
+   * A request to retranslate the function from `sk', leveraging profiling data
+   * to produce a set of larger, more optimized translations.  Only used when
+   * PGO is enabled. Execution will resume at `sk' whether or not retranslation
+   * is successful.
    */                     \
   REQ(RETRANSLATE_OPT)    \
                           \
   /*
    * post_interp_ret(ActRec* arg, ActRec* caller)
-   * post_debugger_ret()
    *
    * post_interp_ret is invoked in the case that translated code in the TC
    * executes the return for a frame that was pushed by the interpreter---since
    * there is no TCA to return to.
-   *
-   * post_debugger_ret is a similar request that is used when translated code
-   * returns from a frame that had its saved return address smashed by the
-   * debugger.
    */                     \
-  REQ(POST_INTERP_RET)    \
-  REQ(POST_DEBUGGER_RET)
+  REQ(POST_INTERP_RET)
 
 /*
  * Service request types.
@@ -193,20 +175,42 @@ using ArgVec = jit::vector<Arg>;
  * address) is that ephemeral requests are padded to stub_size().
  *
  * Since making a service request leaves the TC, we need to sync the current
- * `spOff' to vmsp.  In the cases where vmsp also needs to be synced between
- * translations (namely, in resumed contexts), we do this sync inline at the
- * site of the jump to the stub, so that it still occurs once the jump gets
- * smashed.  Otherwise (namely, in non-resumed contexts), the client must pass
- * a non-none `spOff', and we do the sync in the stub to save work once the
- * service request is completed and the jump is smashed.
+ * bytecode eval stack pointer, given via `spOff', to vmsp.  In the cases where
+ * vmsp also needs to be synced between translations (namely, in resumed
+ * contexts), we do this sync inline at the site of the jump to the stub, so
+ * that it still occurs once the jump gets smashed.  Otherwise (namely, in
+ * non-resumed contexts), the client must pass a non-none `spOff', and we do
+ * the sync in the stub to save work once the service request is completed and
+ * the jump is smashed.
  */
 template<typename... Args>
 TCA emit_persistent(CodeBlock& cb,
+                    DataBlock& data,
+                    CGMeta& meta,
                     folly::Optional<FPInvOffset> spOff,
                     ServiceRequest sr,
                     Args... args);
 template<typename... Args>
 TCA emit_ephemeral(CodeBlock& cb,
+                   DataBlock& data,
+                   CGMeta& meta,
+                   TCA start,
+                   folly::Optional<FPInvOffset> spOff,
+                   ServiceRequest sr,
+                   Args... args);
+/*
+ * These emit service request stubs that may not be relocated.  This distinction
+ * is important, because these discard metadata that allows relocation.
+ */
+template<typename... Args>
+TCA emit_persistent(CodeBlock& cb,
+                    DataBlock& data,
+                    folly::Optional<FPInvOffset> spOff,
+                    ServiceRequest sr,
+                    Args... args);
+template<typename... Args>
+TCA emit_ephemeral(CodeBlock& cb,
+                   DataBlock& data,
                    TCA start,
                    folly::Optional<FPInvOffset> spOff,
                    ServiceRequest sr,
@@ -215,16 +219,50 @@ TCA emit_ephemeral(CodeBlock& cb,
 /*
  * Helpers for emitting specific service requests.
  */
-TCA emit_bindjmp_stub(CodeBlock& cb, FPInvOffset spOff,
+TCA emit_bindjmp_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
+                      FPInvOffset spOff,
                       TCA jmp, SrcKey target, TransFlags trflags);
-TCA emit_bindjcc1st_stub(CodeBlock& cb, FPInvOffset spOff,
-                         TCA jcc, SrcKey taken, SrcKey next, ConditionCode cc);
-TCA emit_bindaddr_stub(CodeBlock& cb, FPInvOffset spOff,
-                       TCA* addr, SrcKey target, TransFlags trflags);
-TCA emit_retranslate_stub(CodeBlock& cb, FPInvOffset spOff,
-                          SrcKey target, TransFlags trflags);
-TCA emit_retranslate_opt_stub(CodeBlock& cb, FPInvOffset spOff,
-                              SrcKey target, TransID transID);
+TCA emit_bindaddr_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
+                       FPInvOffset spOff, TCA* addr, SrcKey target,
+                       TransFlags trflags);
+TCA emit_retranslate_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
+                          FPInvOffset spOff, SrcKey target, TransFlags trflags);
+TCA emit_retranslate_opt_stub(CodeBlock& cb, DataBlock& data, CGMeta& fixups,
+                              FPInvOffset spOff, SrcKey sk);
+
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Maximum number of arguments a service request can accept.
+ */
+constexpr int kMaxArgs = 4;
+
+namespace x64 {
+  constexpr int kMovLen = 10;
+  constexpr int kLeaVmSpLen = 7;
+}
+
+namespace arm {
+  // vasm lea is emitted in 4 bytes.
+  //   ADD imm
+  constexpr int kLeaVmSpLen = 4;
+  // The largest of vasm setcc, copy, or leap is emitted in 16 bytes.
+  //   AND imm, MOV, LDR + B + dc32, or ADRP + ADD imm
+  constexpr int kMovLen = 12;
+  // The largest of vasm copy or leap is emitted in 16 bytes.
+  //   MOV, LDR + B + dc32, or ADRP + ADD imm
+  constexpr int kPersist = 12;
+  // vasm copy and jmpi is emitted in 16 bytes.
+  //   MOV + LDR + B + dc32
+  constexpr int kSvcReqExit = 16;
+}
+
+namespace ppc64 {
+  // Standard ppc64 instructions are 4 bytes long
+  constexpr int kStdIns = 4;
+  // Leap for ppc64, in worst case, have 5 standard ppc64 instructions.
+  constexpr int kLeaVMSpLen = kStdIns * 5;
+}
 
 /*
  * Space used by an ephemeral stub.
@@ -233,7 +271,34 @@ TCA emit_retranslate_opt_stub(CodeBlock& cb, FPInvOffset spOff,
  * dependent size, which is guaranteed to fit all service request types along
  * with a terminal padding instruction.
  */
-size_t stub_size();
+constexpr size_t stub_size() {
+  // The extra args are the request type and the stub address.
+  constexpr auto kTotalArgs = kMaxArgs + 2;
+
+  switch (arch()) {
+    case Arch::X64:
+      return kTotalArgs * x64::kMovLen + x64::kLeaVmSpLen;
+    case Arch::ARM:
+      return arm::kLeaVmSpLen +
+        kTotalArgs * arm::kMovLen +
+        arm::kPersist + arm::kSvcReqExit;
+    case Arch::PPC64:
+      // This calculus was based on the amount of emitted instructions in
+      // emit_svcreq.
+      return (ppc64::kStdIns + ppc64::kLeaVMSpLen) * kTotalArgs +
+          ppc64::kLeaVMSpLen + 3 * ppc64::kStdIns;
+    default:
+      // GCC has a bug with throwing in a constexpr function.
+      // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=67371
+      // throw std::logic_error("Stub size not defined on architecture.");
+      break;
+  }
+  // Because of GCC's issue, we have this assert, and a return value.
+  static_assert(arch() == Arch::X64 || arch() == Arch::ARM ||
+                arch() == Arch::PPC64, "Stub size not defined on architecture");
+  return 0;
+}
+
 
 /*
  * Extract the VM stack offset associated with a service request stub.
@@ -248,16 +313,11 @@ FPInvOffset extract_spoff(TCA stub);
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
- * Maximum number of arguments a service request can accept.
- */
-constexpr int kMaxArgs = 4;
-
-/*
  * Service request metadata.
  *
  * This structure is created on the stack by handleSRHelper() from the SR
  * arguments passed in registers.  Any changes to its size or layout of must be
- * reflected in handleSRHelper() in translator-asm-helpers.S.
+ * reflected in the handleSRHelper unique stub.
  */
 struct ReqInfo {
   /*
@@ -292,21 +352,7 @@ static_assert(sizeof(ReqInfo) == 0x30,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-} // svcreq
-
-///////////////////////////////////////////////////////////////////////////////
-
-/*
- * Service request assembly stub.
- *
- * Called by translated code before a service request to pack argument
- * registers into a ReqInfo and perform some other bookkeeping tasks.
- */
-extern "C" void handleSRHelper();
-
-///////////////////////////////////////////////////////////////////////////////
-
-}}
+}}}
 
 #include "hphp/runtime/vm/jit/service-requests-inl.h"
 

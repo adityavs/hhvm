@@ -1,23 +1,12 @@
-<?php
+<?hh
 
 if (isset($g)) {
-  class X {
+  include '1489-1.inc';
 }
-}
- else {
-  class X {
-    function __destruct() {
- var_dump(__METHOD__);
- }
-    protected $prot_over_prot = 1;
-    public $pub_over_pub = 2;
-    protected $pub_over_prot = 3;
-  }
+else {
+  include '1489-2.inc';
 }
 class Y extends X {
-  function __destruct() {
- var_dump(__METHOD__,$this);
- }
   protected $prot_over_prot = 4;
   public $pub_over_pub = 5;
   public $pub_over_prot = 6;
@@ -25,9 +14,6 @@ class Y extends X {
   public $pub_base = 8;
 }
 class Z extends Y {
-  function __destruct() {
- var_dump(__METHOD__);
- }
   public $prot_over_prot = 9;
   public $pub_over_pub = 10;
   public $pub_over_prot = 11;
@@ -42,9 +28,9 @@ function foo($x) {
   var_dump((array)$y);
   if (function_exists('apc_store')) {
     apc_store('foo', $y);
-    $z = apc_fetch('foo');
+    $z = __hhvm_intrinsics\apc_fetch_no_check('foo');
   }
- else {
+  else {
     $z = clone $y;
   }
   var_dump($z);

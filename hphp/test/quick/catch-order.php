@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // NB: The names need to be all-lowercase to ensure that "someexception" has a
 // lower litstr id than "other" (both original and lowercase versions of the
@@ -8,7 +8,7 @@
 class someexception extends Exception {}
 class other extends someexception {}
 
-function main() {
+<<__EntryPoint>> function main(): void {
   try {
     throw new other;
   } catch (other $e) {
@@ -17,4 +17,3 @@ function main() {
     echo "fail\n";
   }
 }
-main();

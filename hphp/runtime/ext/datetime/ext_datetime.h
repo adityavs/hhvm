@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -23,47 +23,38 @@
 #include "hphp/runtime/base/datetime.h"
 #include "hphp/runtime/base/timezone.h"
 #include "hphp/runtime/base/dateinterval.h"
-#include "hphp/system/constants.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // class DateTime
 
-extern const StaticString q_DateTime$$ATOM;
-extern const StaticString q_DateTime$$COOKIE;
-extern const StaticString q_DateTime$$ISO8601;
-extern const StaticString q_DateTime$$RFC822;
-extern const StaticString q_DateTime$$RFC850;
-extern const StaticString q_DateTime$$RFC1036;
-extern const StaticString q_DateTime$$RFC1123;
-extern const StaticString q_DateTime$$RFC2822;
-extern const StaticString q_DateTime$$RFC3339;
-extern const StaticString q_DateTime$$RSS;
-extern const StaticString q_DateTime$$W3C;
-
-class DateTimeData {
-public:
+struct DateTimeData {
   DateTimeData() {}
   DateTimeData(const DateTimeData&) = delete;
   DateTimeData& operator=(const DateTimeData& other) {
-    m_dt = other.m_dt->cloneDateTime();
+    m_dt = other.m_dt ? other.m_dt->cloneDateTime() : req::ptr<DateTime>{};
     return *this;
   }
   Variant sleep() const {
     return init_null();
   }
-  void wakeup(const Variant& content, ObjectData* obj) {}
+  void wakeup(const Variant& /*content*/, ObjectData* /*obj*/) {}
   int64_t getTimestamp() const {
+    assertx(m_dt);
     bool err = false;
     return m_dt->toTimeStamp(err);
   }
   String format(const String& format) const {
+    assertx(m_dt);
     return m_dt->toString(format, false);
   }
   Array getDebugInfo() const;
 
   static int64_t getTimestamp(const Object& obj);
   static int64_t getTimestamp(const ObjectData* od);
+  static int compare(const Object& left, const Object& right);
+  static int compare(const ObjectData* left, const ObjectData* right);
   static Object wrap(req::ptr<DateTime> dt);
   static req::ptr<DateTime> unwrap(const Object& datetime);
   static Class* getClass();
@@ -73,25 +64,23 @@ public:
   static const StaticString s_className;
 };
 
-Object HHVM_METHOD(DateTime, add,
-                   const Object& interval);
 void HHVM_METHOD(DateTime, __construct,
                  const String& time = "now",
-                 const Variant& timezone = null_variant);
+                 const Variant& timezone = uninit_variant);
 Variant HHVM_STATIC_METHOD(DateTime, createFromFormat,
                            const String& format,
                            const String& time,
-                           const Variant& timezone /*= null_variant */);
-Object HHVM_METHOD(DateTime, diff,
-                   const Variant& datetime2,
-                   const Variant& absolute);
+                           const Variant& timezone /*= uninit_variant */);
+Variant HHVM_METHOD(DateTime, diff,
+                    const Variant& datetime2,
+                    const Variant& absolute);
 String HHVM_METHOD(DateTime, format,
                    const Variant& format);
 Array HHVM_STATIC_METHOD(DateTime, getLastErrors);
 int64_t HHVM_METHOD(DateTime, getOffset);
 int64_t HHVM_METHOD(DateTime, gettimestamp);
 Variant HHVM_METHOD(DateTime, getTimezone);
-Object HHVM_METHOD(DateTime, modify,
+Variant HHVM_METHOD(DateTime, modify,
                    const String& modify);
 Object HHVM_METHOD(DateTime, setDate,
                    int64_t year,
@@ -107,10 +96,12 @@ Object HHVM_METHOD(DateTime, setTime,
                    int64_t second /*= 0*/);
 Object HHVM_METHOD(DateTime, setTimestamp,
                    int64_t unixtimestamp);
-Object HHVM_METHOD(DateTime, setTimezone,
-                   const Object& timezone);
-Object HHVM_METHOD(DateTime, sub,
-                   const Object& interval);
+Variant HHVM_METHOD(DateTime, setTimezone,
+                    const Object& timezone);
+Variant HHVM_METHOD(DateTime, add,
+                    const Object& interval);
+Variant HHVM_METHOD(DateTime, sub,
+                    const Object& interval);
 Array HHVM_METHOD(DateTime, __sleep);
 void HHVM_METHOD(DateTime, __wakeup);
 Array HHVM_METHOD(DateTime, __debuginfo);
@@ -118,32 +109,20 @@ Array HHVM_METHOD(DateTime, __debuginfo);
 ///////////////////////////////////////////////////////////////////////////////
 // class DateTimeZone
 
-extern const int64_t q_DateTimeZone$$AFRICA;
-extern const int64_t q_DateTimeZone$$AMERICA;
-extern const int64_t q_DateTimeZone$$ANTARCTICA;
-extern const int64_t q_DateTimeZone$$ARCTIC;
-extern const int64_t q_DateTimeZone$$ASIA;
-extern const int64_t q_DateTimeZone$$ATLANTIC;
-extern const int64_t q_DateTimeZone$$AUSTRALIA;
-extern const int64_t q_DateTimeZone$$EUROPE;
-extern const int64_t q_DateTimeZone$$INDIAN;
-extern const int64_t q_DateTimeZone$$PACIFIC;
-extern const int64_t q_DateTimeZone$$UTC;
-extern const int64_t q_DateTimeZone$$ALL;
-extern const int64_t q_DateTimeZone$$ALL_WITH_BC;
-extern const int64_t q_DateTimeZone$$PER_COUNTRY;
-
-class DateTimeZoneData {
-public:
+struct DateTimeZoneData {
   DateTimeZoneData() {}
   DateTimeZoneData(const DateTimeZoneData&) = delete;
   DateTimeZoneData& operator=(const DateTimeZoneData& other) {
-    m_tz = other.m_tz->cloneTimeZone();
+    m_tz = other.m_tz ? other.m_tz->cloneTimeZone() : req::ptr<TimeZone>{};
     return *this;
   }
+
   String getName() const {
+    assertx(m_tz);
     return m_tz->name();
   }
+
+  Array getDebugInfo() const;
 
   static Object wrap(req::ptr<TimeZone> tz);
   static req::ptr<TimeZone> unwrap(const Object& timezone);
@@ -152,17 +131,33 @@ public:
   req::ptr<TimeZone> m_tz;
   static Class* s_class;
   static const StaticString s_className;
+
+  static const int64_t AFRICA = 1;
+  static const int64_t AMERICA = 2;
+  static const int64_t ANTARCTICA = 4;
+  static const int64_t ARCTIC = 8;
+  static const int64_t ASIA = 16;
+  static const int64_t ATLANTIC = 32;
+  static const int64_t AUSTRALIA = 64;
+  static const int64_t EUROPE = 128;
+  static const int64_t INDIAN = 256;
+  static const int64_t PACIFIC = 512;
+  static const int64_t UTC = 1024;
+  static const int64_t ALL = 2047;
+  static const int64_t ALL_WITH_BC = 4095;
+  static const int64_t PER_COUNTRY = 4096;
 };
 
 void HHVM_METHOD(DateTimeZone, __construct,
                  const String& timezone);
 Array HHVM_METHOD(DateTimeZone, getLocation);
 String HHVM_METHOD(DateTimeZone, getName);
-int64_t HHVM_METHOD(DateTimeZone, getOffset,
+Array HHVM_METHOD(DateTimeZone, __debuginfo);
+Variant HHVM_METHOD(DateTimeZone, getOffset,
                     const Object& datetime);
-Array HHVM_METHOD(DateTimeZone, getTransitions,
-                  int64_t timestamp_begin = k_PHP_INT_MIN,
-                  int64_t timestamp_end = k_PHP_INT_MAX);
+TypedValue HHVM_METHOD(DateTimeZone, getTransitions,
+                       int64_t timestamp_begin = k_PHP_INT_MIN,
+                       int64_t timestamp_end = k_PHP_INT_MAX);
 Array HHVM_STATIC_METHOD(DateTimeZone, listAbbreviations);
 Variant HHVM_STATIC_METHOD(DateTimeZone, listIdentifiers,
                            int64_t what,
@@ -171,12 +166,12 @@ Variant HHVM_STATIC_METHOD(DateTimeZone, listIdentifiers,
 ///////////////////////////////////////////////////////////////////////////////
 // class DateInterval
 
-class DateIntervalData {
-public:
+struct DateIntervalData {
   DateIntervalData() {}
   DateIntervalData(const DateIntervalData&) = delete;
   DateIntervalData& operator=(const DateIntervalData& other) {
-    m_di = other.m_di->cloneDateInterval();
+    m_di =
+      other.m_di ? other.m_di->cloneDateInterval() : req::ptr<DateInterval>{};
     return *this;
   }
 
@@ -247,16 +242,13 @@ bool HHVM_FUNCTION(checkdate,
                    int day,
                    int year);
 Variant HHVM_FUNCTION(date_create,
-                      const Variant& time = null_variant,
-                      const Variant& timezone = null_variant);
-String HHVM_FUNCTION(date_format,
-                     const Object& datetime,
-                     const String& format);
+                      const Variant& time = uninit_variant,
+                      const Variant& timezone = uninit_variant);
+Variant HHVM_FUNCTION(date_format,
+                      const Object& datetime,
+                      const String& format);
 Variant HHVM_FUNCTION(date_parse,
                       const String& date);
-Object HHVM_FUNCTION(date_sub,
-                     const Object& datetime,
-                     const Object& interval);
 
 ///////////////////////////////////////////////////////////////////////////////
 // sun

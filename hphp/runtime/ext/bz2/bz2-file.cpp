@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -32,38 +32,34 @@ BZ2File::BZ2File(req::ptr<PlainFile>&& innerFile)
 }
 
 BZ2File::~BZ2File() {
-  if (m_bzFile)
-    closeImpl();
+  closeImpl();
 }
 
 void BZ2File::sweep() {
-  if (m_bzFile) {
-    closeImpl();
-  }
+  closeImpl();
   File::sweep();
 }
 
 bool BZ2File::open(const String& filename, const String& mode) {
-  assert(m_bzFile == nullptr);
+  assertx(m_bzFile == nullptr);
 
   return m_innerFile->open(filename, mode) &&
     (m_bzFile = BZ2_bzdopen(dup(m_innerFile->fd()), mode.data()));
 }
 
 bool BZ2File::close() {
-  invokeFiltersOnClose();
   return closeImpl();
 }
 
 int64_t BZ2File::errnu() {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   int errnum = 0;
   BZ2_bzerror(m_bzFile, &errnum);
   return errnum;
 }
 
 String BZ2File::errstr() {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   int errnum;
   return BZ2_bzerror(m_bzFile, &errnum);
 }
@@ -73,15 +69,15 @@ const StaticString
   s_errstr("errstr");
 
 Array BZ2File::error() {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   int errnum;
   const char * errstr;
   errstr = BZ2_bzerror(m_bzFile, &errnum);
-  return make_map_array(s_errno, errnum, s_errstr, String(errstr));
+  return make_darray(s_errno, errnum, s_errstr, String(errstr));
 }
 
 bool BZ2File::flush() {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   return BZ2_bzflush(m_bzFile);
 }
 
@@ -89,37 +85,43 @@ int64_t BZ2File::readImpl(char * buf, int64_t length) {
   if (length == 0) {
     return 0;
   }
-  assert(m_bzFile);
+  assertx(m_bzFile);
   int len = BZ2_bzread(m_bzFile, buf, length);
   /* Sometimes libbz2 will return fewer bytes than requested, and set bzerror
    * to BZ_STREAM_END, but it's not actually EOF, and you can keep reading from
    * the file - so, only set EOF after a failed read. This matches PHP5.
    */
-  if (len == 0) {
+  if (len <= 0) {
     setEof(true);
+    if (len < 0) {
+      return 0;
+    }
   }
   return len;
 }
 
 int64_t BZ2File::writeImpl(const char * buf, int64_t length) {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   return BZ2_bzwrite(m_bzFile, (char *)buf, length);
 }
 
 bool BZ2File::closeImpl() {
-  assert(m_bzFile);
-  bool ret = true;
-  BZ2_bzclose(m_bzFile);
-  m_bzFile = nullptr;
-  setIsClosed(true);
-  m_innerFile->close();
+  if (!isClosed()) {
+    if (m_bzFile) {
+      BZ2_bzclose(m_bzFile);
+      m_bzFile = nullptr;
+    }
+    setIsClosed(true);
+    if (m_innerFile) {
+      m_innerFile->close();
+    }
+  }
   File::closeImpl();
-  setEof(false);
-  return ret;
+  return true;
 }
 
 bool BZ2File::eof() {
-  assert(m_bzFile);
+  assertx(m_bzFile);
   return getEof();
 }
 

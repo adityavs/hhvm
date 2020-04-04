@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -272,9 +272,6 @@
 
 /* Whether to build tokenizer as dynamic module */
 /* #undef COMPILE_DL_TOKENIZER */
-
-/* Whether to build wddx as dynamic module */
-/* #undef COMPILE_DL_WDDX */
 
 /* Whether to build xml as dynamic module */
 /* #undef COMPILE_DL_XML */
@@ -909,6 +906,12 @@
 
 /* Define to 1 if you have the <ieeefp.h> header file. */
 /* #undef HAVE_IEEEFP_H */
+
+/* Define to 1 if you have the `if_indextoname' function. */
+#define HAVE_IF_INDEXTONAME 1
+
+/* Define to 1 if you have the `if_nametoindex' function. */
+#define HAVE_IF_NAMETOINDEX 1
 
 /* */
 /* #undef HAVE_IMAP */
@@ -1959,9 +1962,6 @@
 
 /* Define to 1 if you have the <wchar.h> header file. */
 #define HAVE_WCHAR_H 1
-
-/* */
-/* #undef HAVE_WDDX */
 
 /* */
 #define HAVE_XML 1

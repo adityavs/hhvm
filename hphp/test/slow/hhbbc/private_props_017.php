@@ -11,10 +11,10 @@
  *
  * The point of this unit test is to detect regressions if/when we fix
  * either of those issues, though.  The associated code is in miProp()
- * for MIA_unset.
+ * for MOpMode::Unset.
  */
 class A {
-  private $x = array(1,2,3);
+  private $x = varray[1,2,3];
   public function __construct() {
     unset($this->x);
     $y = $this;
@@ -30,4 +30,8 @@ function main() {
   $a = new A();
   return $a->getter();
 }
+
+<<__EntryPoint>>
+function main_private_props_017() {
 main();
+}

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Toplevel include for all HHVM GDB Python bindings.
 
@@ -5,9 +7,6 @@ Due to some GDB Python API shenanigans, we have to munge the directory
 containing these scripts into sys.path.  We only do this here, so attempting to
 source the individual modules directly will fail.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from os import sys, path
 
@@ -24,6 +23,11 @@ import nameof
 import pretty
 import repo
 import sizeof
-import stack
+try:
+    import unwind
+    import stack
+except:
+    pass
 import unit
 import util
+import ringbuffer

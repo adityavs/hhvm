@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,6 +20,7 @@
 #include <functional>
 
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/jit/extra-data.h"
 #include "hphp/runtime/vm/jit/types.h"  // TransFlags
 
 #include "hphp/runtime/vm/jit/ir-builder.h"
@@ -28,13 +29,13 @@
 // peekSpillValues.
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 
-namespace HPHP { struct StringData; }
 namespace HPHP { namespace jit {
-struct IRGS;
-struct Block;
-}}
 
-namespace HPHP { namespace jit { namespace irgen {
+struct Block;
+
+namespace irgen {
+
+struct IRGS;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -68,7 +69,7 @@ Block* makePseudoMainExit(IRGS&);
  * Create a block that exits the current region by making a retranslate opt
  * service request.  Must not be used inside of an inlined function.
  */
-Block* makeExitOpt(IRGS&, TransID);
+Block* makeExitOpt(IRGS&);
 
 /*
  * Create a block that side exits the current region, after first calling the
@@ -78,6 +79,12 @@ Block* makeExitOpt(IRGS&, TransID);
  * The block is created with the current state.
  */
 Block* makeExitSlow(IRGS&);
+Block* makeExitSurprise(IRGS&, Offset);
+
+/*
+ * Create a block that should never be reached. Useful for debug assertions.
+ */
+Block* makeUnreachable(IRGS&, AssertReason);
 
 //////////////////////////////////////////////////////////////////////
 

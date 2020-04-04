@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,33 +21,64 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-ArrayInit::ArrayInit(size_t n, Map)
-#ifdef DEBUG
-  : m_addCount(0)
-  , m_expectedCount(n)
-#endif
+DictInit::DictInit(size_t n, CheckAllocation)
+  : ArrayInitBase(n, CheckAllocation{})
 {
-  m_data = MixedArray::MakeReserveMixed(n);
-  assert(m_data->hasExactlyOneRef());
+  if (n > std::numeric_limits<int>::max()) {
+    tl_heap->forceOOM();
+    check_non_safepoint_surprise();
+  }
+  auto const allocsz = MixedArray::computeAllocBytes(
+                         MixedArray::computeScaleFromSize(n)
+                       );
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
+    check_non_safepoint_surprise();
+  }
+  m_arr = MixedArray::MakeReserveDict(n);
+  assertx(m_arr->hasExactlyOneRef());
+  check_non_safepoint_surprise();
 }
 
-ArrayInit::ArrayInit(size_t n, Map, CheckAllocation)
-#ifdef DEBUG
-  : m_addCount(0)
-  , m_expectedCount(n)
+KeysetInit::KeysetInit(size_t n, CheckAllocation)
+  : ArrayInitBase(n, CheckAllocation{})
+{
+  if (n > std::numeric_limits<int>::max()) {
+    tl_heap->forceOOM();
+    check_non_safepoint_surprise();
+  }
+  auto const allocsz = SetArray::computeAllocBytes(
+                         SetArray::computeScaleFromSize(n)
+                       );
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
+    check_non_safepoint_surprise();
+  }
+  m_arr = SetArray::MakeReserveSet(n);
+  assertx(m_arr->hasExactlyOneRef());
+  check_non_safepoint_surprise();
+}
+
+DArrayInit::DArrayInit(size_t n, CheckAllocation)
+    : m_arr{nullptr}
+#ifndef NDEBUG
+    , m_addCount(0)
+    , m_expectedCount(n)
 #endif
 {
   if (n > std::numeric_limits<int>::max()) {
-    MM().forceOOM();
-    check_request_surprise_unlikely();
+    tl_heap->forceOOM();
+    check_non_safepoint_surprise();
   }
-  auto const allocsz = computeAllocBytes(computeScaleFromSize(n));
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
-    check_request_surprise_unlikely();
+  auto const allocsz = MixedArray::computeAllocBytes(
+                         MixedArray::computeScaleFromSize(n)
+                       );
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
+    check_non_safepoint_surprise();
   }
-  m_data = MixedArray::MakeReserveMixed(n);
-  assert(m_data->hasExactlyOneRef());
-  check_request_surprise_unlikely();
+  m_arr = RuntimeOption::EvalHackArrDVArrs
+    ? MixedArray::MakeReserveDict(n)
+    : MixedArray::MakeReserveDArray(n);
+  assertx(m_arr->hasExactlyOneRef());
+  check_non_safepoint_surprise();
 }
 
 //////////////////////////////////////////////////////////////////////

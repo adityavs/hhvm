@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,11 +17,12 @@
 #include <zip.h>
 
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/ext/pcre/ext_pcre.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
+#include "hphp/runtime/server/cli-server.h"
 
 namespace HPHP {
 
@@ -35,14 +36,34 @@ static String to_full_path(const String& filename) {
 // A wrapper for `zip_open` that prepares a full path
 // file name to consider current working directory.
 static zip* _zip_open(const String& filename, int _flags, int* zep) {
+  if (is_cli_server_mode()) {
+    int open_flags =
+      (_flags & ZIP_EXCL ? O_EXCL : 0)
+      | (_flags & ZIP_TRUNCATE ? O_TRUNC : 0)
+      | (_flags & ZIP_CREATE ? O_CREAT : 0)
+      | (_flags & ZIP_RDONLY ? O_RDONLY : O_RDWR);
+    auto fd = cli_openfd_unsafe(
+      filename,
+      open_flags,
+      static_cast<mode_t>(-1),
+      /* use_include_path */ false,
+      /* quiet */ true);
+    if (fd == -1) {
+      *zep = ZIP_ER_OPEN;
+      return nullptr;
+    }
+    if (auto z = zip_fdopen(fd, _flags & ZIP_CHECKCONS, zep)) return z;
+    close(fd);
+    return nullptr;
+  }
   return zip_open(to_full_path(filename).c_str(), _flags, zep);
 }
 
-class ZipStream : public File {
- public:
+struct ZipStream : File {
   DECLARE_RESOURCE_ALLOCATION(ZipStream);
 
-  ZipStream(zip* z, const String& name) : m_zipFile(nullptr) {
+  ZipStream(zip* z, const String& name)
+  : File(false), m_zipFile(nullptr) {
     if (name.empty()) {
       return;
     }
@@ -56,7 +77,7 @@ class ZipStream : public File {
   }
 
 
-  virtual ~ZipStream() { close(); }
+  ~ZipStream() override { close(); }
 
   bool open(const String&, const String&) override { return false; }
 
@@ -83,7 +104,9 @@ class ZipStream : public File {
     return n;
   }
 
-  int64_t writeImpl(const char *buffer, int64_t length) override { return 0; }
+  int64_t writeImpl(const char* /*buffer*/, int64_t /*length*/) override {
+    return 0;
+  }
 
   bool eof() override { return m_zipFile == nullptr; }
 
@@ -96,12 +119,10 @@ void ZipStream::sweep() {
   File::sweep();
 }
 
-class ZipStreamWrapper : public Stream::Wrapper {
- public:
-  virtual req::ptr<File> open(const String& filename,
-                              const String& mode,
-                              int options,
-                              const req::ptr<StreamContext>& context) {
+struct ZipStreamWrapper final : Stream::Wrapper {
+  req::ptr<File>
+  open(const String& filename, const String& /*mode*/, int /*options*/,
+       const req::ptr<StreamContext>& /*context*/) override {
     std::string url(filename.c_str());
     auto pound = url.find('#');
     if (pound == std::string::npos) {
@@ -126,8 +147,7 @@ class ZipStreamWrapper : public Stream::Wrapper {
   }
 };
 
-class ZipEntry : public SweepableResourceData {
- public:
+struct ZipEntry : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(ZipEntry);
 
   CLASSNAME_IS("ZipEntry");
@@ -140,7 +160,7 @@ class ZipEntry : public SweepableResourceData {
     }
   }
 
-  ~ZipEntry() {
+  ~ZipEntry() override {
     close();
   }
 
@@ -214,8 +234,7 @@ class ZipEntry : public SweepableResourceData {
 };
 IMPLEMENT_RESOURCE_ALLOCATION(ZipEntry);
 
-class ZipDirectory: public SweepableResourceData {
- public:
+struct ZipDirectory : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(ZipDirectory);
 
   CLASSNAME_IS("ZipDirectory");
@@ -226,7 +245,7 @@ class ZipDirectory: public SweepableResourceData {
                                   m_numFiles(zip_get_num_files(z)),
                                   m_curIndex(0) {}
 
-  ~ZipDirectory() { close(); }
+  ~ZipDirectory() override { close(); }
 
   bool close() {
     bool noError = true;
@@ -272,116 +291,6 @@ class ZipDirectory: public SweepableResourceData {
 IMPLEMENT_RESOURCE_ALLOCATION(ZipDirectory);
 
 const StaticString s_ZipArchive("ZipArchive");
-const StaticString s_CREATE("CREATE");
-const int64_t k_CREATE = 1;
-const StaticString s_EXCL("EXCL");
-const int64_t k_EXCL = 2;
-const StaticString s_CHECKCONS("CHECKCONS");
-const int64_t k_CHECKCONS = 4;
-const StaticString s_OVERWRITE("OVERWRITE");
-const int64_t k_OVERWRITE = 8;
-const StaticString s_FL_NOCASE("FL_NOCASE");
-const int64_t k_FL_NOCASE = 1;
-const StaticString s_FL_NODIR("FL_NODIR");
-const int64_t k_FL_NODIR = 2;
-const StaticString s_FL_COMPRESSED("FL_COMPRESSED");
-const int64_t k_FL_COMPRESSED = 4;
-const StaticString s_FL_UNCHANGED("FL_UNCHANGED");
-const int64_t k_FL_UNCHANGED = 8;
-const StaticString s_FL_RECOMPRESS("FL_RECOMPRESS");
-const int64_t k_FL_RECOMPRESS = 16;
-const StaticString s_FL_ENCRYPTED("FL_ENCRYPTED");
-const int64_t k_FL_ENCRYPTED = 32;
-const StaticString s_ER_OK("ER_OK");
-const int64_t k_ER_OK = 0;
-const StaticString s_ER_MULTIDISK("ER_MULTIDISK");
-const int64_t k_ER_MULTIDISK = 1;
-const StaticString s_ER_RENAME("ER_RENAME");
-const int64_t k_ER_RENAME = 2;
-const StaticString s_ER_CLOSE("ER_CLOSE");
-const int64_t k_ER_CLOSE = 3;
-const StaticString s_ER_SEEK("ER_SEEK");
-const int64_t k_ER_SEEK = 4;
-const StaticString s_ER_READ("ER_READ");
-const int64_t k_ER_READ = 5;
-const StaticString s_ER_WRITE("ER_WRITE");
-const int64_t k_ER_WRITE = 6;
-const StaticString s_ER_CRC("ER_CRC");
-const int64_t k_ER_CRC = 7;
-const StaticString s_ER_ZIPCLOSED("ER_ZIPCLOSED");
-const int64_t k_ER_ZIPCLOSED = 8;
-const StaticString s_ER_NOENT("ER_NOENT");
-const int64_t k_ER_NOENT = 9;
-const StaticString s_ER_EXISTS("ER_EXISTS");
-const int64_t k_ER_EXISTS = 10;
-const StaticString s_ER_OPEN("ER_OPEN");
-const int64_t k_ER_OPEN = 11;
-const StaticString s_ER_TMPOPEN("ER_TMPOPEN");
-const int64_t k_ER_TMPOPEN = 12;
-const StaticString s_ER_ZLIB("ER_ZLIB");
-const int64_t k_ER_ZLIB = 13;
-const StaticString s_ER_MEMORY("ER_MEMORY");
-const int64_t k_ER_MEMORY = 14;
-const StaticString s_ER_CHANGED("ER_CHANGED");
-const int64_t k_ER_CHANGED = 15;
-const StaticString s_ER_COMPNOTSUPP("ER_COMPNOTSUPP");
-const int64_t k_ER_COMPNOTSUPP = 16;
-const StaticString s_ER_EOF("ER_EOF");
-const int64_t k_ER_EOF = 17;
-const StaticString s_ER_INVAL("ER_INVAL");
-const int64_t k_ER_INVAL = 18;
-const StaticString s_ER_NOZIP("ER_NOZIP");
-const int64_t k_ER_NOZIP = 19;
-const StaticString s_ER_INTERNAL("ER_INTERNAL");
-const int64_t k_ER_INTERNAL = 20;
-const StaticString s_ER_INCONS("ER_INCONS");
-const int64_t k_ER_INCONS = 21;
-const StaticString s_ER_REMOVE("ER_REMOVE");
-const int64_t k_ER_REMOVE = 22;
-const StaticString s_ER_DELETED("ER_DELETED");
-const int64_t k_ER_DELETED = 23;
-const StaticString s_ER_ENCRNOTSUPP("ER_ENCRNOTSUPP");
-const int64_t k_ER_ENCRNOTSUPP = 24;
-const StaticString s_ER_RDONLY("ER_RDONLY");
-const int64_t k_ER_RDONLY = 25;
-const StaticString s_ER_NOPASSWD("ER_NOPASSWD");
-const int64_t k_ER_NOPASSWD = 26;
-const StaticString s_ER_WRONGPASSWD("ER_WRONGPASSWD");
-const int64_t k_ER_WRONGPASSWD = 27;
-const StaticString s_CM_DEFAULT("CM_DEFAULT");
-const int64_t k_CM_DEFAULT = -1;
-const StaticString s_CM_STORE("CM_STORE");
-const int64_t k_CM_STORE = 0;
-const StaticString s_CM_SHRINK("CM_SHRINK");
-const int64_t k_CM_SHRINK = 1;
-const StaticString s_CM_REDUCE_1("CM_REDUCE_1");
-const int64_t k_CM_REDUCE_1 = 2;
-const StaticString s_CM_REDUCE_2("CM_REDUCE_2");
-const int64_t k_CM_REDUCE_2 = 3;
-const StaticString s_CM_REDUCE_3("CM_REDUCE_3");
-const int64_t k_CM_REDUCE_3 = 4;
-const StaticString s_CM_REDUCE_4("CM_REDUCE_4");
-const int64_t k_CM_REDUCE_4= 5;
-const StaticString s_CM_IMPLODE("CM_IMPLODE");
-const int64_t k_CM_IMPLODE = 6;
-const StaticString s_CM_DEFLATE("CM_DEFLATE");
-const int64_t k_CM_DEFLATE = 8;
-const StaticString s_CM_DEFLATE64("CM_DEFLATE64");
-const int64_t k_CM_DEFLATE64 = 9;
-const StaticString s_CM_PKWARE_IMPLODE("CM_PKWARE_IMPLODE");
-const int64_t k_CM_PKWARE_IMPLODE = 10;
-const StaticString s_CM_BZIP2("CM_BZIP2");
-const int64_t k_CM_BZIP2 = 12;
-const StaticString s_CM_LZMA("CM_LZMA");
-const int64_t k_CM_LZMA = 14;
-const StaticString s_CM_TERSE("CM_TERSE");
-const int64_t k_CM_TERSE = 18;
-const StaticString s_CM_LZ77("CM_LZ77");
-const int64_t k_CM_LZ77 = 19;
-const StaticString s_CM_WAVPACK("CM_WAVPACK");
-const int64_t k_CM_WAVPACK = 97;
-const StaticString s_CM_PPMD("CM_PPMD");
-const int64_t k_CM_PPMD = 98;
 
 template<class T>
 ALWAYS_INLINE
@@ -391,11 +300,6 @@ static req::ptr<T> getResource(ObjectData* obj, const char* varName) {
     return nullptr;
   }
   return cast<T>(var);
-}
-
-ALWAYS_INLINE
-static Variant setVariable(const Object& obj, const char* varName, const Variant& varValue) {
-  return obj->o_set(varName, varValue, s_ZipArchive);
 }
 
 #define FAIL_IF_EMPTY_STRING(func, str)                     \
@@ -454,7 +358,6 @@ static Variant HHVM_METHOD(ZipArchive, getProperty, int64_t property) {
       case 2:
         return 0;
       case 3:
-      case 4:
         return empty_string_variant();
       default:
         return init_null();
@@ -477,10 +380,6 @@ static Variant HHVM_METHOD(ZipArchive, getProperty, int64_t property) {
       return zip_get_num_files(zipDir->getZip());
     }
     case 3:
-    {
-      return this_->o_get("filename", true, s_ZipArchive).asCStrRef();
-    }
-    case 4:
     {
       int len;
       auto comment = zip_get_archive_comment(zipDir->getZip(), &len, 0);
@@ -601,25 +500,27 @@ static bool addPattern(zip* zipStruct, const String& pattern, const Array& optio
                        std::string path, int64_t flags, bool glob) {
   std::string removePath;
   if (options->exists(String("remove_path"))) {
-    auto var = options->get(String("remove_path"));
-    if (var.isString()) {
-      removePath.append(var.asCStrRef().c_str());
+    auto const rval = options->get(String("remove_path"));
+    if (isStringType(rval.type())) {
+      auto const sd = rval.val().pstr;
+      removePath.append(sd->data(), sd->size());
     }
   }
 
   bool removeAllPath = false;
   if (options->exists(String("remove_all_path"))) {
-    auto var = options->get(String("remove_all_path"));
-    if (var.isBoolean()) {
-      removeAllPath = var.asBooleanVal();
+    auto const rval = options->get(String("remove_all_path"));
+    if (isBoolType(rval.type())) {
+      removeAllPath = rval.val().num;
     }
   }
 
   std::string addPath;
   if (options->exists(String("add_path"))) {
-    auto var = options->get(String("add_path"));
-    if (var.isString()) {
-      addPath.append(var.asCStrRef().c_str());
+    auto const rval = options->get(String("add_path"));
+    if (isStringType(rval.type())) {
+      auto const sd = rval.val().pstr;
+      addPath.append(sd->data(), sd->size());
     }
   }
 
@@ -627,7 +528,7 @@ static bool addPattern(zip* zipStruct, const String& pattern, const Array& optio
   if (glob) {
     auto match = HHVM_FN(glob)(pattern, flags);
     if (match.isArray()) {
-      files = match.toArrRef();
+      files = match.asArrRef();
     } else {
       return false;
     }
@@ -637,7 +538,7 @@ static bool addPattern(zip* zipStruct, const String& pattern, const Array& optio
     }
     auto allFiles = HHVM_FN(scandir)(path);
     if (allFiles.isArray()) {
-      files = allFiles.toArrRef();
+      files = allFiles.asArrRef();
     } else {
       return false;
     }
@@ -658,7 +559,7 @@ static bool addPattern(zip* zipStruct, const String& pattern, const Array& optio
     }
 
     if (!glob) {
-      auto var = preg_match(pattern, source);
+      auto var = preg_match(pattern.get(), source.get());
       if (var.isInteger()) {
         if (var.asInt64Val() == 0) {
           continue;
@@ -726,7 +627,7 @@ static bool HHVM_METHOD(ZipArchive, close) {
 
   bool ret = zipDir->close();
 
-  setVariable(Object{this_}, "zipDir", null_resource);
+  this_->o_set("zipDir", null_resource, s_ZipArchive);
 
   return ret;
 }
@@ -764,30 +665,113 @@ static bool HHVM_METHOD(ZipArchive, deleteName, const String& name) {
   return true;
 }
 
-static bool extractFileTo(zip* zip, const std::string &file, std::string& to,
-                          char* buf, size_t len) {
-  auto sep = file.rfind('/');
-  if (sep != std::string::npos) {
-    auto path = to + file.substr(0, sep);
-    if (!HHVM_FN(is_dir)(path) && !HHVM_FN(mkdir)(path, 0777, true)) {
-      return false;
-    }
-
-    if (sep == file.length() - 1) {
-      return true;
-    }
+// Make the path relative to "." by flattening.
+// This function is named the same and similar in implementation to that in
+// php-src:php_zip.c
+// One difference is that we canonicalize here whereas php-src is already
+// assumed passed a canonicalized path.
+static std::string make_relative_path(const std::string& path) {
+  if (path.empty()) {
+    return path;
   }
 
-  to.append(file);
+  // First get the path to a state where we don't have .. in the middle of it
+  // etc. canonicalize handles Windows paths too.
+  std::string canonical(FileUtil::canonicalize(path));
+
+  // If we have a slash at the beginning, then just remove it and we are
+  // relative. This check will hold because we have canonicalized the
+  // path above to remove .. from the path, so we know we can be sure
+  // we are at a good place for this check.
+  if (FileUtil::isDirSeparator(canonical[0])) {
+    return canonical.substr(1);
+  }
+
+  // If we get here, canonical looks something like:
+  //   a/b/c
+
+  // Search through the path and if we find a place where we have a slash
+  // and a "." just before that slash, then cut the path off right there
+  // and just take everything after the slash.
+  std::string relative(canonical);
+  int idx = canonical.length() - 1;
+  while (1) {
+    while (idx > 0 && !(FileUtil::isDirSeparator(canonical[idx]))) {
+      idx--;
+    }
+    // If we ever get to idx == 0, then there were no other slashes to deal with
+    if (idx == 0) {
+      return canonical;
+    }
+    if (idx >= 1 && (canonical[idx - 1] == '.' || canonical[idx - 1] == ':')) {
+      relative = canonical.substr(idx + 1);
+      break;
+    }
+    idx--;
+  }
+  return relative;
+}
+
+static bool extractFileTo(zip* zip, const std::string &file, std::string& to,
+                          char* buf, size_t len) {
+
   struct zip_stat zipStat;
+  // Verify the file to be extracted is actually in the zip file
   if (zip_stat(zip, file.c_str(), 0, &zipStat) != 0) {
     return false;
   }
 
+  auto clean_file = file;
+  auto sep = std::string::npos;
+  // Normally would just use std::string::rfind here, but if we want to be
+  // consistent between Windows and Linux, even if techincally Linux won't use
+  // backslash for a separator, we are checking for both types.
+  int idx = file.length() - 1;
+  while (idx >= 0) {
+    if (FileUtil::isDirSeparator(file[idx])) {
+      sep = idx;
+      break;
+    }
+    idx--;
+  }
+  if (sep != std::string::npos) {
+    // make_relative_path so we do not try to put files or dirs in bad
+    // places. This securely "cleans" the file.
+    clean_file = make_relative_path(file);
+    std::string path = to + clean_file;
+    bool is_dir_only = true;
+    if (sep < file.length() - 1) { // not just a directory
+      auto clean_file_dir = HHVM_FN(dirname)(clean_file);
+      path = to + clean_file_dir.toCppString();
+      is_dir_only = false;
+    }
+
+    // Make sure the directory path to extract to exists or can be created
+    if (!HHVM_FN(is_dir)(path) && !HHVM_FN(mkdir)(path, 0777, true)) {
+      return false;
+    }
+
+    // If we have a good directory to extract to above, we now check whether
+    // the "file" parameter passed in is a directory or actually a file.
+    if (is_dir_only) { // directory, like /usr/bin/
+      return true;
+    }
+    // otherwise file is actually a file, so we actually extract.
+  }
+
+  // We have ensured that clean_file will be added to a relative path by the
+  // time we get here.
+  to.append(clean_file);
+
   auto zipFile = zip_fopen_index(zip, zipStat.index, 0);
   FAIL_IF_INVALID_PTR(zipFile);
 
-  auto outFile = fopen(to.c_str(), "wb");
+  auto stream = Stream::getWrapperFromURI(to);
+  if (stream == nullptr) {
+    zip_fclose(zipFile);
+    return false;
+  }
+  auto outFile = stream->open(to, "wb", 0, nullptr);
   if (outFile == nullptr) {
     zip_fclose(zipFile);
     return false;
@@ -795,20 +779,17 @@ static bool extractFileTo(zip* zip, const std::string &file, std::string& to,
 
   for (auto n = zip_fread(zipFile, buf, len); n != 0;
        n = zip_fread(zipFile, buf, len)) {
-    if (n < 0 || fwrite(buf, sizeof(char), n, outFile) != n) {
+    if (n < 0
+        || outFile->write(String(buf, n, CopyStringMode::CopyString)) != n) {
       zip_fclose(zipFile);
-      fclose(outFile);
+      outFile->close();
       remove(to.c_str());
       return false;
     }
   }
 
   zip_fclose(zipFile);
-  if (fclose(outFile) != 0) {
-    return false;
-  }
-
-  return true;
+  return outFile->close();
 }
 
 static bool HHVM_METHOD(ZipArchive, extractTo, const String& destination,
@@ -857,7 +838,8 @@ static bool HHVM_METHOD(ZipArchive, extractTo, const String& destination,
     // extract all files
     for (decltype(fileCount) index = 0; index < fileCount; ++index) {
       auto file = zip_get_name(zipDir->getZip(), index, ZIP_FL_UNCHANGED);
-      if (!extractFileTo(zipDir->getZip(), file, to, buf, sizeof(buf))) {
+      if (file == nullptr ||
+          !extractFileTo(zipDir->getZip(), file, to, buf, sizeof(buf))) {
         return false;
       }
       to.resize(toSize);
@@ -950,6 +932,7 @@ static Variant HHVM_METHOD(ZipArchive, getFromIndex, int64_t index,
   StringBuffer sb(length);
   auto buf = sb.appendCursor(length);
   auto n   = zip_fread(zipFile, buf, length);
+  zip_fclose(zipFile);
   if (n > 0) {
     sb.resize(n);
     return sb.detach();
@@ -987,6 +970,7 @@ static Variant HHVM_METHOD(ZipArchive, getFromName, const String& name,
   StringBuffer sb(length);
   auto buf = sb.appendCursor(length);
   auto n   = zip_fread(zipFile, buf, length);
+  zip_fclose(zipFile);
   if (n > 0) {
     sb.resize(n);
     return sb.detach();
@@ -1059,8 +1043,8 @@ static Variant HHVM_METHOD(ZipArchive, open, const String& filename,
 
   auto zipDir = req::make<ZipDirectory>(z);
 
-  setVariable(Object{this_}, "zipDir", Variant(zipDir));
-  setVariable(Object{this_}, "filename", filename);
+  this_->o_set("zipDir", Variant(zipDir), s_ZipArchive);
+  this_->o_set("filename", filename, s_ZipArchive);
 
   zip_error_clear(zipDir->getZip());
   return true;
@@ -1100,6 +1084,55 @@ static bool HHVM_METHOD(ZipArchive, renameName, const String& name,
 
   zip_error_clear(zipDir->getZip());
   return true;
+}
+
+static bool HHVM_METHOD(ZipArchive, setEncryptionIndex, int64_t index,
+                        int64_t encryption_method, const String& password) {
+#ifdef ZIP_EM_AES_256
+  auto zipDir = getResource<ZipDirectory>(this_, "zipDir");
+
+  FAIL_IF_INVALID_ZIPARCHIVE(setEncryptionIndex, zipDir);
+  FAIL_IF_EMPTY_STRING_ZIPARCHIVE(setEncryptionIndex, password);
+
+  struct zip_stat zipStat;
+  if (zip_stat_index(zipDir->getZip(), index, 0, &zipStat) != 0) {
+    return false;
+  }
+
+  if (zip_file_set_encryption(zipDir->getZip(), index, encryption_method,
+      password.c_str()) != 0 ) {
+    return false;
+  }
+
+  zip_error_clear(zipDir->getZip());
+  return true;
+#else
+  throw new Exception("zip encryption unsupported due to libzip version");
+#endif
+}
+
+static bool HHVM_METHOD(ZipArchive, setEncryptionName, const String& name,
+                        int64_t encryption_method, const String& password) {
+#ifdef ZIP_EM_AES_256
+  auto zipDir = getResource<ZipDirectory>(this_, "zipDir");
+
+  FAIL_IF_INVALID_ZIPARCHIVE(setEncryptionName, zipDir);
+  FAIL_IF_EMPTY_STRING_ZIPARCHIVE(setEncryptionName, name);
+  FAIL_IF_EMPTY_STRING_ZIPARCHIVE(setEncryptionName, password);
+
+  int index = zip_name_locate(zipDir->getZip(), name.c_str(), 0);
+  FAIL_IF_INVALID_INDEX(index);
+
+  if (zip_file_set_encryption(zipDir->getZip(), index, encryption_method,
+      password.c_str()) != 0 ) {
+    return false;
+  }
+
+  zip_error_clear(zipDir->getZip());
+  return true;
+#else
+  throw new Exception("zip encryption unsupported due to libzip version");
+#endif
 }
 
 static bool HHVM_METHOD(ZipArchive, setArchiveComment, const String& comment) {
@@ -1155,6 +1188,45 @@ static bool HHVM_METHOD(ZipArchive, setCommentName, const String& name,
   return true;
 }
 
+static bool HHVM_METHOD(ZipArchive, setCompressionIndex, int64_t index,
+                        int64_t comp_method, int64_t comp_flags) {
+  auto zipDir = getResource<ZipDirectory>(this_, "zipDir");
+
+  FAIL_IF_INVALID_ZIPARCHIVE(setCompressionIndex, zipDir);
+
+  struct zip_stat zipStat;
+  if (zip_stat_index(zipDir->getZip(), index, 0, &zipStat) != 0) {
+    return false;
+  }
+
+  if (zip_set_file_compression(zipDir->getZip(), index, comp_method,
+                           comp_flags) != 0 ) {
+    return false;
+  }
+
+  zip_error_clear(zipDir->getZip());
+  return true;
+}
+
+static bool HHVM_METHOD(ZipArchive, setCompressionName, const String& name,
+                        int64_t comp_method, int64_t comp_flags) {
+  auto zipDir = getResource<ZipDirectory>(this_, "zipDir");
+
+  FAIL_IF_INVALID_ZIPARCHIVE(setCompressionName, zipDir);
+  FAIL_IF_EMPTY_STRING_ZIPARCHIVE(setCompressionName, name);
+
+  int index = zip_name_locate(zipDir->getZip(), name.c_str(), 0);
+  FAIL_IF_INVALID_INDEX(index);
+
+  if (zip_set_file_compression(zipDir->getZip(), index, comp_method,
+                           comp_flags) != 0 ) {
+    return false;
+  }
+
+  zip_error_clear(zipDir->getZip());
+  return true;
+}
+
 const StaticString s_name("name");
 const StaticString s_index("index");
 const StaticString s_crc("crc");
@@ -1169,7 +1241,7 @@ static Array zipStatToArray(struct zip_stat* zipStat) {
     return Array();
   }
 
-  return make_map_array(
+  return make_darray(
     s_name,        String(zipStat->name),
     s_index,       VarNR(zipStat->index),
     s_crc,         VarNR(static_cast<int64_t>(zipStat->crc)),
@@ -1322,8 +1394,8 @@ static Variant HHVM_FUNCTION(zip_entry_name, const Resource& zip_entry) {
   return zipEntry->getName();
 }
 
-static bool HHVM_FUNCTION(zip_entry_open, const Resource& zip, const Resource& zip_entry,
-                          const String& mode) {
+static bool HHVM_FUNCTION(zip_entry_open, const Resource& zip,
+                          const Resource& zip_entry, const String& /*mode*/) {
   auto zipDir   = cast<ZipDirectory>(zip);
   auto zipEntry = cast<ZipEntry>(zip_entry);
 
@@ -1365,8 +1437,7 @@ static Variant HHVM_FUNCTION(zip_read, const Resource& zip) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-class zipExtension final : public Extension {
- public:
+struct zipExtension final : Extension {
   zipExtension() : Extension("zip", "1.12.4-dev") {}
   void moduleInit() override {
     HHVM_ME(ZipArchive, getProperty);
@@ -1394,151 +1465,83 @@ class zipExtension final : public Extension {
     HHVM_ME(ZipArchive, setArchiveComment);
     HHVM_ME(ZipArchive, setCommentIndex);
     HHVM_ME(ZipArchive, setCommentName);
+    HHVM_ME(ZipArchive, setCompressionIndex);
+    HHVM_ME(ZipArchive, setCompressionName);
+    HHVM_ME(ZipArchive, setEncryptionIndex);
+    HHVM_ME(ZipArchive, setEncryptionName);
     HHVM_ME(ZipArchive, statIndex);
     HHVM_ME(ZipArchive, statName);
     HHVM_ME(ZipArchive, unchangeAll);
     HHVM_ME(ZipArchive, unchangeArchive);
     HHVM_ME(ZipArchive, unchangeIndex);
     HHVM_ME(ZipArchive, unchangeName);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CREATE.get(), k_CREATE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_EXCL.get(), k_EXCL);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CHECKCONS.get(), k_CHECKCONS);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_OVERWRITE.get(), k_OVERWRITE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_NOCASE.get(), k_FL_NOCASE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_NODIR.get(), k_FL_NODIR);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_COMPRESSED.get(),
-                                               k_FL_COMPRESSED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_UNCHANGED.get(),
-                                               k_FL_UNCHANGED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_RECOMPRESS.get(),
-                                               k_FL_RECOMPRESS);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_FL_ENCRYPTED.get(),
-                                               k_FL_ENCRYPTED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_OK.get(), k_ER_OK);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_MULTIDISK.get(),
-                                               k_ER_MULTIDISK);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_RENAME.get(), k_ER_RENAME);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_CLOSE.get(), k_ER_CLOSE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_SEEK.get(), k_ER_SEEK);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_READ.get(), k_ER_READ);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_WRITE.get(), k_ER_WRITE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_CRC.get(), k_ER_CRC);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_ZIPCLOSED.get(),
-                                               k_ER_ZIPCLOSED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_NOENT.get(), k_ER_NOENT);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_EXISTS.get(), k_ER_EXISTS);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_OPEN.get(), k_ER_OPEN);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_TMPOPEN.get(),
-                                               k_ER_TMPOPEN);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_ZLIB.get(), k_ER_ZLIB);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_MEMORY.get(), k_ER_MEMORY);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_CHANGED.get(),
-                                               k_ER_CHANGED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_COMPNOTSUPP.get(),
-                                               k_ER_COMPNOTSUPP);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_EOF.get(), k_ER_EOF);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_INVAL.get(), k_ER_INVAL);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_NOZIP.get(), k_ER_NOZIP);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_INTERNAL.get(),
-                                               k_ER_INTERNAL);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_INCONS.get(), k_ER_INCONS);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_REMOVE.get(), k_ER_REMOVE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_DELETED.get(),
-                                               k_ER_DELETED);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_ENCRNOTSUPP.get(),
-                                               k_ER_ENCRNOTSUPP);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_RDONLY.get(), k_ER_RDONLY);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_NOPASSWD.get(),
-                                               k_ER_NOPASSWD);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_ER_WRONGPASSWD.get(),
-                                               k_ER_WRONGPASSWD);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_DEFAULT.get(),
-                                               k_CM_DEFAULT);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_STORE.get(), k_CM_STORE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_SHRINK.get(), k_CM_SHRINK);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_REDUCE_1.get(),
-                                               k_CM_REDUCE_1);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_REDUCE_2.get(),
-                                               k_CM_REDUCE_2);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_REDUCE_3.get(),
-                                               k_CM_REDUCE_3);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_REDUCE_4.get(),
-                                               k_CM_REDUCE_4);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_IMPLODE.get(),
-                                               k_CM_IMPLODE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_DEFLATE.get(),
-                                               k_CM_DEFLATE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_DEFLATE64.get(),
-                                               k_CM_DEFLATE64);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_PKWARE_IMPLODE.get(),
-                                               k_CM_PKWARE_IMPLODE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_BZIP2.get(),
-                                               k_CM_BZIP2);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_LZMA.get(),
-                                               k_CM_LZMA);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_TERSE.get(),
-                                               k_CM_TERSE);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_LZ77.get(),
-                                               k_CM_LZ77);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_WAVPACK.get(),
-                                               k_CM_WAVPACK);
-    Native::registerClassConstant<KindOfInt64>(s_ZipArchive.get(),
-                                               s_CM_PPMD.get(),
-                                               k_CM_PPMD);
+
+    HHVM_RCC_INT(ZipArchive, CREATE, ZIP_CREATE);
+    HHVM_RCC_INT(ZipArchive, EXCL, ZIP_EXCL);
+    HHVM_RCC_INT(ZipArchive, CHECKCONS, ZIP_CHECKCONS);
+    HHVM_RCC_INT(ZipArchive, OVERWRITE, ZIP_TRUNCATE);
+    HHVM_RCC_INT(ZipArchive, FL_NOCASE, ZIP_FL_NOCASE);
+    HHVM_RCC_INT(ZipArchive, FL_NODIR, ZIP_FL_NODIR);
+    HHVM_RCC_INT(ZipArchive, FL_COMPRESSED, ZIP_FL_COMPRESSED);
+    HHVM_RCC_INT(ZipArchive, FL_UNCHANGED, ZIP_FL_UNCHANGED);
+    HHVM_RCC_INT(ZipArchive, FL_RECOMPRESS, ZIP_FL_RECOMPRESS);
+    HHVM_RCC_INT(ZipArchive, FL_ENCRYPTED, ZIP_FL_ENCRYPTED);
+    HHVM_RCC_INT(ZipArchive, ER_OK, ZIP_ER_OK);
+    HHVM_RCC_INT(ZipArchive, ER_MULTIDISK, ZIP_ER_MULTIDISK);
+    HHVM_RCC_INT(ZipArchive, ER_RENAME, ZIP_ER_RENAME);
+    HHVM_RCC_INT(ZipArchive, ER_CLOSE, ZIP_ER_CLOSE);
+    HHVM_RCC_INT(ZipArchive, ER_SEEK, ZIP_ER_SEEK);
+    HHVM_RCC_INT(ZipArchive, ER_READ, ZIP_ER_READ);
+    HHVM_RCC_INT(ZipArchive, ER_WRITE, ZIP_ER_WRITE);
+    HHVM_RCC_INT(ZipArchive, ER_CRC, ZIP_ER_CRC);
+    HHVM_RCC_INT(ZipArchive, ER_ZIPCLOSED, ZIP_ER_ZIPCLOSED);
+    HHVM_RCC_INT(ZipArchive, ER_NOENT, ZIP_ER_NOENT);
+    HHVM_RCC_INT(ZipArchive, ER_EXISTS, ZIP_ER_EXISTS);
+    HHVM_RCC_INT(ZipArchive, ER_OPEN, ZIP_ER_OPEN);
+    HHVM_RCC_INT(ZipArchive, ER_TMPOPEN, ZIP_ER_TMPOPEN);
+    HHVM_RCC_INT(ZipArchive, ER_ZLIB, ZIP_ER_ZLIB);
+    HHVM_RCC_INT(ZipArchive, ER_MEMORY, ZIP_ER_MEMORY);
+    HHVM_RCC_INT(ZipArchive, ER_CHANGED, ZIP_ER_CHANGED);
+    HHVM_RCC_INT(ZipArchive, ER_COMPNOTSUPP, ZIP_ER_COMPNOTSUPP);
+    HHVM_RCC_INT(ZipArchive, ER_EOF, ZIP_ER_EOF);
+    HHVM_RCC_INT(ZipArchive, ER_INVAL, ZIP_ER_INVAL);
+    HHVM_RCC_INT(ZipArchive, ER_NOZIP, ZIP_ER_NOZIP);
+    HHVM_RCC_INT(ZipArchive, ER_INTERNAL, ZIP_ER_INTERNAL);
+    HHVM_RCC_INT(ZipArchive, ER_INCONS, ZIP_ER_INCONS);
+    HHVM_RCC_INT(ZipArchive, ER_REMOVE, ZIP_ER_REMOVE);
+    HHVM_RCC_INT(ZipArchive, ER_DELETED, ZIP_ER_DELETED);
+    HHVM_RCC_INT(ZipArchive, ER_ENCRNOTSUPP, ZIP_ER_ENCRNOTSUPP);
+    HHVM_RCC_INT(ZipArchive, ER_RDONLY, ZIP_ER_RDONLY);
+    HHVM_RCC_INT(ZipArchive, ER_NOPASSWD, ZIP_ER_NOPASSWD);
+    HHVM_RCC_INT(ZipArchive, ER_WRONGPASSWD, ZIP_ER_WRONGPASSWD);
+    HHVM_RCC_INT(ZipArchive, CM_DEFAULT, ZIP_CM_DEFAULT);
+    HHVM_RCC_INT(ZipArchive, CM_STORE, ZIP_CM_STORE);
+    HHVM_RCC_INT(ZipArchive, CM_SHRINK, ZIP_CM_SHRINK);
+    HHVM_RCC_INT(ZipArchive, CM_REDUCE_1, ZIP_CM_REDUCE_1);
+    HHVM_RCC_INT(ZipArchive, CM_REDUCE_2, ZIP_CM_REDUCE_2);
+    HHVM_RCC_INT(ZipArchive, CM_REDUCE_3, ZIP_CM_REDUCE_3);
+    HHVM_RCC_INT(ZipArchive, CM_REDUCE_4, ZIP_CM_REDUCE_4);
+    HHVM_RCC_INT(ZipArchive, CM_IMPLODE, ZIP_CM_IMPLODE);
+    HHVM_RCC_INT(ZipArchive, CM_DEFLATE, ZIP_CM_DEFLATE);
+    HHVM_RCC_INT(ZipArchive, CM_DEFLATE64, ZIP_CM_DEFLATE64);
+    HHVM_RCC_INT(ZipArchive, CM_PKWARE_IMPLODE, ZIP_CM_PKWARE_IMPLODE);
+    HHVM_RCC_INT(ZipArchive, CM_BZIP2, ZIP_CM_BZIP2);
+    HHVM_RCC_INT(ZipArchive, CM_LZMA, ZIP_CM_LZMA);
+    HHVM_RCC_INT(ZipArchive, CM_TERSE, ZIP_CM_TERSE);
+    HHVM_RCC_INT(ZipArchive, CM_LZ77, ZIP_CM_LZ77);
+    HHVM_RCC_INT(ZipArchive, CM_WAVPACK, ZIP_CM_WAVPACK);
+    HHVM_RCC_INT(ZipArchive, CM_PPMD, ZIP_CM_PPMD);
+#ifdef ZIP_EM_AES_256
+    HHVM_RCC_INT(ZipArchive, EM_NONE, ZIP_EM_NONE);
+    HHVM_RCC_INT(ZipArchive, EM_AES_128, ZIP_EM_AES_128);
+    HHVM_RCC_INT(ZipArchive, EM_AES_192, ZIP_EM_AES_192);
+    HHVM_RCC_INT(ZipArchive, EM_AES_256, ZIP_EM_AES_256);
+#else
+    HHVM_RCC_INT(ZipArchive, EM_NONE, 0);
+    HHVM_RCC_INT(ZipArchive, EM_AES_128, 0);
+    HHVM_RCC_INT(ZipArchive, EM_AES_192, 0);
+    HHVM_RCC_INT(ZipArchive, EM_AES_256, 0);
+#endif
 
     HHVM_FE(zip_close);
     HHVM_FE(zip_entry_close);

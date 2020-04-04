@@ -1,55 +1,63 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-val with_expr_hook:
-  (Nast.expr -> Typing_defs.locl Typing_defs.ty -> unit) -> (unit -> 'a) -> 'a
+val with_expr_hook :
+  (Nast.expr -> Typing_defs.locl_ty -> unit) -> (unit -> 'a) -> 'a
 
-val debug_print_last_pos:
-  'a -> unit
+val debug_print_last_pos : 'a -> unit
 
-val fun_decl:
-  Naming.env -> Nast.fun_ -> unit
+val typedef_def : Provider_context.t -> Nast.typedef -> Tast.typedef
 
-val gconst_decl:
-  TypecheckerOptions.t -> Nast.gconst -> unit
+val expr :
+  ?expected:Typing_helpers.ExpectedTy.t ->
+  Typing_env_types.env ->
+  Nast.expr ->
+  Typing_env_types.env * Tast.expr * Typing_defs.locl_ty
 
-val fun_def:
-  Typing_env.env -> Naming.env -> 'a -> Nast.fun_ -> unit
-val class_def:
-  Typing_env.env -> Naming.env -> 'a -> Nast.class_ -> unit
-val typedef_def:
-  Typing_env.env -> Nast.typedef -> unit
+val user_attribute :
+  Typing_env_types.env ->
+  Nast.user_attribute ->
+  Typing_env_types.env * Tast.user_attribute
 
-val expr:
-  Typing_env.env -> Nast.expr ->
-  Typing_env.env * Typing_defs.locl Typing_defs.ty
+val stmt : Typing_env_types.env -> Nast.stmt -> Typing_env_types.env * Tast.stmt
 
-val ret_from_fun_kind: Pos.t -> Ast.fun_kind -> Typing_defs.decl Typing_defs.ty
+val bind_param :
+  Typing_env_types.env ->
+  Typing_defs.locl_ty * Nast.fun_param ->
+  Typing_env_types.env * Tast.fun_param
 
-val make_param_ty:
-  Typing_env.env -> Typing_reason.t -> Nast.fun_param ->
-  Typing_env.env * (string option * Typing_defs.decl Typing_defs.ty)
+val fun_ :
+  ?abstract:bool ->
+  ?disable:bool ->
+  Typing_env_types.env ->
+  Typing_env_return_info.t ->
+  Pos.t ->
+  Nast.func_body ->
+  Ast_defs.fun_kind ->
+  Typing_env_types.env * Tast.stmt list
 
-val make_params:
-  Typing_env.env -> bool -> int -> Nast.fun_param list ->
-  Typing_env.env * int * Typing_defs.decl Typing_defs.fun_params
+val attributes_check_def :
+  Typing_env_types.env ->
+  string ->
+  Nast.user_attribute list ->
+  Typing_env_types.env
 
-val type_param:
-  Typing_env.env -> Nast.tparam ->
-  Typing_env.env * Typing_defs.tparam
+val file_attributes :
+  Typing_env_types.env ->
+  Nast.file_attribute list ->
+  Typing_env_types.env * Tast.file_attribute list
 
-val get_self_from_c:
-  Typing_env.env -> Nast.class_ ->
-  Typing_defs.decl Typing_defs.ty
+val type_param :
+  Typing_env_types.env -> Nast.tparam -> Typing_env_types.env * Tast.tparam
 
-val is_visible:
-  Typing_env.env ->
-  Typing_defs.visibility ->
-  Nast.class_id option -> (string * string) option
+val check_shape_keys_validity :
+  Typing_env_types.env ->
+  Pos.t ->
+  Ast_defs.shape_field_name list ->
+  Typing_env_types.env

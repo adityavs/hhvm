@@ -1,6 +1,6 @@
-<?php
+<?hh
 
-function main() {
+<<__EntryPoint>> function main(): void {
   // Suppress warnings
   error_reporting(0);
 
@@ -51,4 +51,3 @@ function main() {
     printf("Uninitialized null vs. null Same\n");
   }
 }
-main();

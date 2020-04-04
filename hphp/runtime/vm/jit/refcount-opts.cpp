@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -77,11 +77,9 @@ instruction on tmps whose must-alias-sets say they "will_be_used_again" to
 DecRefNZ.
 
 One rule this pass relies on is that it is illegal to DecRef an object in a way
-that takes its refcount to zero, and then IncRef it again after that.  This is
-not illegal for trivial reasons, because object __destruct methods can
-ressurect an object in PHP.  But within one JIT region, right now we declare it
-illegal to generate IR that uses an object after a DecRef that might take it to
-zero.
+that takes its refcount to zero, and then IncRef it again after that.  Within
+one JIT region, right now we declare it illegal to generate IR that uses an
+object after a DecRef that might take it to zero.
 
 Since this pass converts instructions that may (in general) re-enter the
 VM---running arbitrary PHP code for a destructor---it's potentially profitable
@@ -91,62 +89,31 @@ can prevent the rest of this analysis from assuming some DecRefs can re-enter
 that actually can't.
 
 
--- RC Flowgraphs --
-
-Other optimizations in this file are performed on "RC flowgraphs", which are an
-abstract representation of only the effects of the IR program that matter for
-the optimization, on a single must-alias-set at a time.  The RC graphs contain
-explicit control flow nodes ("phi" nodes for joins, "sigma" nodes for splits),
-as well as nodes for things like decref instructions, incref instructions, and
-"req" nodes that indicate that the reference count of an object may be observed
-at that point up to some level.  Nodes in an RC graph each come with a "lower
-bound" on the reference count for the graph's must-alias-set at that program
-point (more about lower bounds below)---these lower bounds are the lower bound
-before that node in the flowgraph.  We build independent graphs for each
-must-alias-set, and they do not need to contain specific nodes relating to
-possible cross-set effects (based on May-Alias relationships)---that
-information is available in these graphs through the "req" nodes and lower
-bound information.
-
-The graphs are constructed after first computing information that allows us to
-process each must-alias-set independently.  Then they are processed one at a
-time with a set of "legal transformation rules".  The rules are applied in a
-single pass over the flowgraph, going forwards, but potentially backtracking
-when certain rules apply, since they may enable more rules to apply to previous
-nodes.  At this point it might help to go look at one or two of the
-transformation rule examples below (e.g. rule_inc_dec_fold), but that
-documentation is not duplicated here.
-
-The intention is that these rules are smaller and easier to understand the
-correctness of than trying to do these transformations without an explicit data
-structure, but a disadvantage is that this pass needs to allocate a lot of
-temporary information in these graphs.  The backtracking also seemed a bit
-convoluted to do directly on the IR.  We may eventually change this to work
-without the extra data structure, but that's how it works right now.
-
-Most of the analysis code in this module is about computing the information we
-need to build these flowgraphs, before we do the actual optimizations on them.
-The rest of this doc-comment talks primarily about that analysis---see the
-comments near the rule_* functions for more about the flowgraph optimizations
-themselves, and the comments near the Node structure for a description of the
-node types in these graphs.
-
-
 -- RC "lower bounds" --
 
 A lower bound on the reference count of a must-alias-set indicates a known
 minimum for the value of its object's count field at that program point.  This
 minimum value can be interpreted as a minimum value of the actual integer in
 memory at each point, if the program were not modified by this pass.  A lower
-bound is therefore always non-negative.
+bound is therefore always non-negative. The lower bound has two components; a
+supported component, which is known to be exclusive to this must-alias-set (in
+the sense that refcount operations on other must-alias-sets will not affect
+this one), and an unsupported component, which might be shared between multiple
+must-alias sets. For example, if we have two must-alias-sets a and b which may
+alias, with lower bound zero, and we see an incref for each, we now know that
+they each have a lower bound of at least 2. But a DecRef of either could reduce
+both lower bounds to 1 (if they happen to refer to the same thing). We can also
+use the unsupported component to account for references held by memory which we
+don't track; eg if an SSATmp is stored into an object property, we no longer
+attempt to track what happens to that property, so we have to give it an
+unsupported_ref; the next time we see an instruction that might affect the
+ref counts of untracked memory locations, we have to drop its unsupported_refs.
 
 The first utility of this information is pretty obvious: if a DecRef
 instruction is encountered when the lower bound of must-alias-set is greater
 than one, that DecRef instruction can be converted to DecRefNZ, since it can't
-possibly free the object.  (See the flowgraph rule_decnz.)  Knowledge of the
-lower bound is also required for folding unobservable incref/decref pairs, and
-generally this information is inspected by most of the things done as RC
-flowgraph transformations.
+possibly free the object.  Knowledge of the lower bound is also required for
+folding unobservable incref/decref pairs, sinking increfs or hoisting decrefs.
 
 The lower bound must be tracked conservatively to ensure that our
 transformations are correct.  This means we can increase a lower bound only
@@ -194,15 +161,17 @@ situation comes up with loads and is discussed further in "About Loads".)
 This exclusivity principle provides the following rule for dealing with
 instructions that may decrease reference counts because of May-Alias
 relationships: when we need to decrease the lower bound of a must-alias-set, if
-its lower bound is currently non-zero, we have no obligation to decrement the
-lower bound in any other must-alias-set, regardless of May-Alias relationships.
-The exclusivity of the lower bound means we know we're just cancelling out
-something that raised the lower bound on this set and no other, so the state on
-other sets can't be affected.
+its lower bound is currently greater than its unsupported_refs, we have no
+obligation to decrement the lower bound in any other must-alias-set, regardless
+of May-Alias relationships. The exclusivity of the supported component of the
+lower bound means we know we're just cancelling out something that raised the
+lower bound on this set and no other, so the state on other sets can't be
+affected.
 
 The pessimistic case still applies, however, if you need to reduce the lower
-bound on a must-alias-set S that currently has a lower bound of zero.  Then all
-the other sets that May-Alias S must have their lower bound reduced as well.
+bound on a must-alias-set S that currently has a lower bound equal to its
+unsupported component.  Then all the other sets that May-Alias S must have
+their lower bound reduced as well.
 
 
 -- Memory Support --
@@ -237,11 +206,11 @@ forever in this situation, which is also conceptually necessary for this to
 work as may-information.
 
 However, if we see an instruction that could DecRef one of these objects
-through a pointer in memory and its lower_bound is currently non-zero, we can
-be sure we've accounted for that may-DecRef by balancing it with a IncRef of
-some sort that we've already observed.  In this situation, we can remove the
-memory support bit to avoid futher reductions in the lower bound of that set
-via that memory location.
+through a pointer in memory and its lower_bound is currently above its
+unsupported component, we can be sure we've accounted for that may-DecRef
+by balancing it with a IncRef of some sort that we've already observed.
+In this situation, we can remove the memory support bit to avoid futher
+reductions in the lower bound of that set via that memory location.
 
 Since this is may-information that makes analysis more conservative, the memory
 support bits should conceptually be or'd at merge points.  It is fine to think
@@ -331,13 +300,12 @@ everything alone.
 -- Effects of Pure Stores on Memory Support --
 
 There are two main kinds of stores from the perspective of this module.  There
-are lowered stores (PureStore and PureSpillFrame) that happen within our IR
-compilation unit, and don't imply reference count manipulation, and there are
-stores that happen with "hhbc semantics" outside of the visibility of this
-compilation unit, which imply decreffing the value that used to live in a
-memory location as it's replaced with a new one.  This module needs some
-understanding of both types, and both of these types of stores affect memory
-support, but in different ways.
+are lowered stores (PureStore) that happen within our IR compilation unit, and
+don't imply reference count manipulation, and there are stores that happen with
+"hhbc semantics" outside of the visibility of this compilation unit, which
+imply decreffing the value that used to live in a memory location as it's
+replaced with a new one.  This module needs some understanding of both types,
+and both of these types of stores affect memory support, but in different ways.
 
 For any instruction that may do non-lowered stores outside of our unit ("stores
 with hhbc semantics"), if the location(s) it may be storing to could be
@@ -424,10 +392,8 @@ With this in mind, we'll discuss all four cases:
 
   Unknown target, Zero LB:
 
-     We flag all must-alias-sets as "pessimized".  This state inserts a Halt
-     node in each of the RC flowgraphs, and stops all optimizations along that
-     control flow path: it prevents us from doing anything else in any
-     successor blocks.
+     We flag all must-alias-sets as "pessimized".  This state removes all
+     support, and sets all lower bounds to zero.
 
   Known target, Zero LB:
 
@@ -472,12 +438,10 @@ our tracked objects.
 The way we maintain correctness here is to never move or eliminate reference
 counting operations unless we know about at least /two/ references to the
 object being counted.  The importance of this is easiest to illustrate with
-delayed increfs (relevant to rules inc_pass_req, inc_pass_phi, and
-inc_pass_sig), although it applies to inc/dec pair removal also: it is fine to
-move an incref forward in the IR instruction stream, as long as nothing could
-observe the difference between the reference count the object "should" have,
-and the one it will have after we delay the incref.  We need to consider how
-reachability from the heap can affect this.
+delayed increfs: it is fine to move an incref forward in the IR instruction
+stream, as long as nothing could observe the difference between the reference
+count the object "should" have, and the one it will have after we delay the
+incref.  We need to consider how reachability from the heap can affect this.
 
 If the lower bound at an incref instruction is two or greater, we know we can
 push the incref down as much as we want (basically until we reach an exit from
@@ -488,10 +452,7 @@ any instruction that could decref /anything/ in any memory location, since
 we're making the assumption that there may be other live pointers to the
 object---if we were to push that incref forward, we could change whether other
 pointers to the object are considered the last reference, and cause a decref to
-free the object when it shouldn't.  (We could try to do this on the rc
-flowgraphs, but at least in a trivial implementation it would lead to a much
-larger number of flowgraph nodes, so instead we leave easy cases to a separate,
-local, "remove_trivial_incdecs" pass and ignore hard cases.)
+free the object when it shouldn't.
 
 The above two cases are relatively straightforward.  The remaining case is when
 the lower bound before an incref is one.  It turns out to be safe to sink in
@@ -512,44 +473,21 @@ alone (whatever was causing our lower bound to be one), and therefore a decref
 through this unknown pointer won't think it is removing the last reference.
 
 Also worth discussing is that there are several runtime objects in the VM with
-operations that have behavioral differences based on whether the reference
-count is greater than one.  For instance, types like KindOfString and
-KindOfArray do in place updates when they have a refcount of one, and KindOfRef
-is treated "observably" as a php reference only if the refcount is greater than
-one.  Making sure we don't change these situations is actually the same
-condition as discussed above: by the above scheme for not changing whether
-pointers we don't know about constitute the last counted reference to an
-object, we are both preventing decrefs from going to zero when they shouldn't,
-and modifications to objects from failing to COW when they should.
+operations that have behavioral differences based on whether the reference count
+is greater than one.  For instance, types like KindOfString and KindOfArray do
+in place updates when they have a refcount of one. Making sure we don't change
+these situations is actually the same condition as discussed above: by the above
+scheme for not changing whether pointers we don't know about constitute the last
+counted reference to an object, we are both preventing decrefs from going to
+zero when they shouldn't, and modifications to objects from failing to COW when
+they should.
 
-A fundamental meta-rule that arises out of all the above considerations for any
-of the RC flowgraph transformation rules is that we cannot move (or remove)
-increfs unless the lower bound on the incref node is at least one (meaning
-after the incref we "know about two references").  Similarly, anything that
-could reduce the lower bound must put a node in the RC flowgraph to update that
-information (a Req{1} node usually) so we don't push increfs too far or remove
+A fundamental meta-rule that arises out of all the above considerations is that
+we cannot move (or remove) increfs unless the lower bound on the incref node is
+at least one (meaning after the incref we "know about two references").
+Similarly, anything that could reduce the lower bound must observe the refcount
+at that point (an NReq{1} usually) so we don't push increfs too far or remove
 them when we shouldn't.
-
-
--- "Trivial" incdec removal pass --
-
-This module also contains a local optimization that removes IncRef/DecRefNZ
-pairs in a block that have no non-"pure" memory-accessing instructions in
-between them.
-
-This optimization can be performed without regard to the lower bound of any
-objects involved, and the DecRef -> DecRefNZ transformations the rest of the
-code makes can create situations where these opportunities are visible.  Some
-of these situations would be removable by the main pass if we had a more
-complicated scheme for dealing with "unknown heap pointers" (i.e. the stuff in
-the "more about memory" section described above).  But other situations may
-also occur because the main pass may create unnecessary Req nodes in the middle
-of code sequences that don't really observe references when we're dealing with
-unrelated PureStores of possibly-aliasing tmps that have lower bounds of zero.
-
-In general it is a simple pass to reason about the correctness of, and it
-cleans up some things we can miss, so it is easier to do some of the work this
-way than to complicate the main pass further.
 
 */
 
@@ -568,13 +506,16 @@ way than to complicate the main pass further.
 #include <folly/Format.h>
 #include <folly/ScopeGuard.h>
 #include <folly/Conv.h>
+#include <folly/portability/Stdlib.h>
 
-#include <boost/dynamic_bitset.hpp>
-
-#include "hphp/util/safe-cast.h"
+#include "hphp/util/bitset-array.h"
+#include "hphp/util/bitset-utils.h"
 #include "hphp/util/dataflow-worklist.h"
 #include "hphp/util/match.h"
+#include "hphp/util/safe-cast.h"
 #include "hphp/util/trace.h"
+
+#include "hphp/runtime/ext/asio/ext_wait-handle.h"
 
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/pass-tracer.h"
@@ -584,6 +525,7 @@ way than to complicate the main pass further.
 #include "hphp/runtime/vm/jit/analysis.h"
 #include "hphp/runtime/vm/jit/block.h"
 #include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/decref-profile.h"
 #include "hphp/runtime/vm/jit/memory-effects.h"
 #include "hphp/runtime/vm/jit/alias-analysis.h"
 #include "hphp/runtime/vm/jit/mutation.h"
@@ -594,6 +536,36 @@ namespace HPHP { namespace jit {
 namespace {
 
 TRACE_SET_MOD(hhir_refcount);
+
+//////////////////////////////////////////////////////////////////////
+
+// Helper for removing instructions in the rest of this file---if a debugging
+// mode is enabled, it will replace it with a debugging instruction if
+// appropriate instead of removing it.
+void remove_helper(IRUnit& unit, IRInstruction* inst) {
+  if (!RuntimeOption::EvalHHIRGenerateAsserts) {
+    inst->convertToNop();
+    return;
+  }
+
+  switch (inst->op()) {
+  case IncRef:
+  case DecRef:
+  case DecRefNZ: {
+    inst->setOpcode(DbgAssertRefCount);
+    inst->clearExtra();
+    auto extra = ASSERT_REASON;
+    inst->setExtra(cloneExtra(DbgAssertRefCount, &extra, unit.arena()));
+    break;
+  }
+  default:
+    always_assert_flog(
+      false,
+      "Unsupported remove_helper instruction: {}\n",
+      *inst
+    );
+  }
+}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -613,7 +585,7 @@ struct MustAliasSet {
    * information.
    *
    * Because of how we build MustAliasSets (essentially canonical(), or groups
-   * of LdCtx instructions), it is guaranteed that this widestType includes all
+   * of LdFrameThis instructions), it is guaranteed that this widestType includes all
    * possible values for the set.  However it is not the case that every tmp in
    * the set necessarily has a subtype of widestType, because of situations
    * that can occur with AssertType and interface types.  This does not affect
@@ -625,7 +597,7 @@ struct MustAliasSet {
    * A representative of the set.  This is only used for debug tracing, and is
    * currently the first instruction (in an rpo traversal) that defined a tmp
    * in the must-alias-set.  (I.e. it'll be the canonical() tmp, or the first
-   * LdCtx we saw.)
+   * LdFrameThis we saw.)
    */
   SSATmp* representative;
 
@@ -667,6 +639,16 @@ struct ASetInfo {
   int32_t lower_bound{0};
 
   /*
+   * Sometimes we know the refcount is higher than we've been able to
+   * prove; eg when we IncRef something with a lower_bound of zero, we
+   * know that the actual lower_bound is 2. When we have
+   * unsupported_refs, we have to account for DecRef or DecRefNZ on
+   * anything that mayalias this one, and anything other than an
+   * irrelevant_inst or an IncRef will kill the unsupported_refs.
+   */
+  int32_t unsupported_refs{0};
+
+  /*
    * Set of memory location ids that are being used to support the lower bound
    * of this object.  The purpose of this set is to reduce lower bounds when we
    * see memory events that might decref a pointer: this means it's never
@@ -684,23 +666,12 @@ struct ASetInfo {
    * for the whole conflict set.
    */
   ALocBits memory_support;
-
-  /*
-   * Sometimes we lose too much track of what's going on to do anything useful.
-   * In this situation, all the sets get flagged as `pessimized', we don't do
-   * anything to them anymore, and a Halt node is added to all graphs.
-   *
-   * Note: right now this state is per-ASetInfo, but we must pessimize
-   * everything at once if we pessimize anything, because of how the analyzer
-   * will lose track of aliasing effects.  (We will probably either change it to
-   * be per-RCState later or fix the alias handling.)
-   */
-  bool pessimized{false};
 };
 
 // State structure for rc_analyze.
 struct RCState {
   bool initialized{false};
+  bool has_unsupported_refs{false};
   jit::vector<ASetInfo> asets;
 
   /*
@@ -717,10 +688,20 @@ struct RCState {
    * The mapped value is -1 if no ASet is currently supported by that location.
    */
   std::array<ASetID,kMaxTrackedALocs> support_map;
+
+  /*
+   * When we decref an unbalanced location, we have to reduce the
+   * lower bounds of all the may-alias sets too; but we can defer
+   * doing so until the next point at which they could be
+   * "observed". This means that one decref won't necessarily
+   * interfere with a subsequent decref (although the side effects of
+   * the first one could still affect it). So we record the unbalanced
+   * decrefs here, and apply them at the next non-trivial instruction.
+   */
+  CompactVector<ASetID> unbalanced_decrefs;
 };
 
-// The analysis result structure for rc_analyze.  This structure gets fed into
-// build_graphs to create our RC graphs.
+// The analysis result structure for rc_analyze.
 struct RCAnalysis {
   struct BlockInfo {
     uint32_t rpoId;
@@ -755,79 +736,207 @@ struct Env {
   jit::vector<MustAliasSet> asets;
 };
 
-//////////////////////////////////////////////////////////////////////
+using IncDecBits = BitsetRef;
 
-/*
- * Nodes in the RC flowgraphs.
- */
-enum class NT : uint8_t { Inc, Dec, Req, Phi, Sig, Halt, Empty };
-struct Node {
-  Node* next{nullptr};
-  Node* prev{nullptr};  // unused for Phi nodes; as they may have >1 preds
-  int32_t lower_bound{0};
-  NT type;
+struct PreBlockInfo {
+  enum Bits {
+    AltLoc,
+    AvlLoc,
+    AntLoc,
+    AvlIn,
+    AvlOut,
+    PavlIn,
+    PavlOut,
+    AntIn,
+    AntOut,
+    PantIn,
+    PantOut,
 
-  // Counter used by optimize pass to wait to visit Phis until after
-  // non-backedge predecessors.
-  int16_t visit_counter{0};
+    NumBitsets
+  };
+  explicit PreBlockInfo(BitsetRef base) :
+      rpoId(0),
+      altLoc{base.next(AltLoc)},
+      avlLoc{base.next(AvlLoc)},
+      antLoc{base.next(AntLoc)},
+      avlIn{base.next(AvlIn)},
+      avlOut{base.next(AvlOut)},
+      pavlIn{base.next(PavlIn)},
+      pavlOut{base.next(PavlOut)},
+      antIn{base.next(AntIn)},
+      antOut{base.next(AntOut)},
+      pantIn{base.next(PantIn)},
+      pantOut{base.next(PantOut)}
+    {}
 
-protected:
-  explicit Node(NT type) : type(type) {}
-  Node(const Node&) = default;
-  Node& operator=(const Node&) = default;
+  PreBlockInfo(const PreBlockInfo& o) = default;
+  PreBlockInfo& operator=(const PreBlockInfo& o) {
+    if (this != &o) {
+      this->~PreBlockInfo();
+      new (this) PreBlockInfo(o);
+    }
+    return *this;
+  }
+
+  uint32_t   rpoId;
+  uint32_t   genId{};
+
+  // On a DefLabel block, this is a bitvector indicating which SSATmps
+  // should be considered equivalent to the corresponding phi inputs
+  // so that we can pair IncRefs and DecRefs across the join.
+  std::bitset<64> phiPropagate{};
+
+  // Bits set here block Incs and Decs of the corresponding ASetID
+  IncDecBits altLoc;
+  // We can either pair Incs followed by Decs, or Decs followed by Incs.
+  // avlLoc indicates that the leader is locally available, and antLoc
+  // indicates that the follower is locally anticipated.
+  IncDecBits avlLoc;
+  IncDecBits antLoc;
+
+  IncDecBits avlIn;
+  IncDecBits avlOut;
+  IncDecBits pavlIn;
+  IncDecBits pavlOut;
+
+  IncDecBits antIn;
+  IncDecBits antOut;
+  IncDecBits pantIn;
+  IncDecBits pantOut;
 };
+
+using BlockState = StateVector<Block, PreBlockInfo>;
+
+struct PreEnv {
+  using IncDecKey = std::tuple<Block*,uint32_t,bool>; /* blk, id, at front */
+  struct IDKeyCmp {
+    bool operator()(const IncDecKey& a, const IncDecKey& b) const {
+      if (std::get<0>(a)->id() != std::get<0>(b)->id()) {
+        return std::get<0>(a)->id() < std::get<0>(b)->id();
+      }
+      if (std::get<1>(a) != std::get<1>(b)) {
+        return std::get<1>(a) < std::get<1>(b);
+      }
+      return std::get<2>(a) < std::get<2>(b);
+    }
+  };
+  using InsertMap = jit::flat_map<IncDecKey, SSATmp*, IDKeyCmp>;
+
+  explicit PreEnv(Env& env, RCAnalysis& rca) :
+      env{env},
+      rca{rca},
+      bits{env.unit.numBlocks() * PreBlockInfo::NumBitsets + 1,
+           env.asets.size()},
+      scratchBits{bits.row(env.unit.numBlocks() * PreBlockInfo::NumBitsets)},
+      state{env.unit,
+            [this] (size_t i) {
+              return bits.row(i * PreBlockInfo::NumBitsets);
+            }
+      },
+      curGen{0},
+      avlQ(env.rpoBlocks.size()),
+      antQ(env.rpoBlocks.size()) {
+    uint32_t id = 0;
+    for (auto const blk : env.rpoBlocks) {
+      auto& s = state[blk];
+      s.rpoId = id;
+      avlQ.push(id);
+      antQ.push(id);
+      ++id;
+    }
+  }
+
+  Env& env;
+  RCAnalysis& rca;
+  BitsetArray bits;
+  BitsetRef scratchBits;
+  BlockState state;
+  uint32_t  curGen;
+  InsertMap insMap;
+  std::vector<std::pair<Block*, SSATmp*>> to_insert;
+
+  std::set<uint32_t> reprocess;
+  dataflow_worklist<uint32_t, std::greater<uint32_t>> avlQ;
+  dataflow_worklist<uint32_t, std::less<uint32_t>> antQ;
+};
+
+struct PreAdderInfo {
+  PreAdderInfo(PreEnv& penv,
+               PreBlockInfo& blkInfo,
+               RCState& state,
+               bool incDec) :
+      penv{penv}, blkInfo{blkInfo}, state{state}, incDec{incDec} {}
+
+  void remove(Block::iterator iter) {
+    auto& inst = *iter;
+    auto const id = penv.env.asetMap[inst.src(0)];
+    auto it = iter;
+    while (true) {
+      auto& i2 = *--it;
+      if (i2.is(IncRef, DecRef, DecRefNZ) &&
+          penv.env.asetMap[i2.src(0)] == id) {
+        assertx(incDec == i2.is(IncRef));
+        FTRACE(3, "    ** trivial pair: {}, {}\n", inst, i2);
+        remove_helper(penv.env.unit, &i2);
+        remove_helper(penv.env.unit, &inst);
+        blkInfo.avlLoc.reset(id);
+        penv.reprocess.insert(blkInfo.rpoId);
+        modified = true;
+        return;
+      }
+      assertx(it != inst.block()->begin());
+    }
+  };
+  void setAvlAnt(Block::iterator iter, bool avl) {
+    auto& inst = *iter;
+    auto const id = penv.env.asetMap[inst.src(0)];
+    if (id < 0) {
+      assertx(inst.src(0)->type() <= TUncounted);
+      FTRACE(3, "    ** kill uncounted inc/dec: {}\n", inst);
+      remove_helper(penv.env.unit, &inst);
+      return;
+    }
+    if (avl) {
+      FTRACE(4, "     avlLoc: {}\n", id);
+      blkInfo.avlLoc.set(id);
+      // also set altLoc, so that this block isn't transparent for ANT
+      blkInfo.altLoc.set(id);
+      return;
+    }
+    if (blkInfo.avlLoc.test(id)) {
+      remove(iter);
+      return;
+    }
+    auto alt = blkInfo.altLoc.test(id);
+    if (!alt) {
+      FTRACE(4, "     antLoc: {}\n", id);
+      blkInfo.antLoc.set(id);
+      // also set altLoc, so that this block isn't transparent for AVL
+      blkInfo.altLoc.set(id);
+    }
+    return;
+  }
+
+  PreEnv& penv;
+  PreBlockInfo& blkInfo;
+  RCState& state;
+  bool modified{false};
+  bool incDec;
+};
+
+//////////////////////////////////////////////////////////////////////
 
 /*
  * IncRef and DecRef{NZ,} nodes.
  */
-struct NInc : Node {
-  explicit NInc(IRInstruction* inst) : Node(NT::Inc), inst(inst) {}
+struct NInc {
+  explicit NInc(IRInstruction* inst) : inst(inst) {}
   IRInstruction* inst;
 };
-struct NDec : Node {
-  explicit NDec(IRInstruction* inst) : Node(NT::Dec), inst(inst) {}
+struct NDec {
+  explicit NDec(IRInstruction* inst) : inst(inst) {}
   IRInstruction* inst;
 };
-
-/*
- * Control flow splits and joins.
- */
-struct NPhi : Node {
-  explicit NPhi(Block* block) : Node(NT::Phi), block(block) {}
-  Block* block;
-  Node** pred_list{0};
-  uint32_t pred_list_cap{0};
-  uint32_t pred_list_sz{0};
-  uint32_t back_edge_preds{0};
-};
-struct NSig : Node {
-  explicit NSig(Block* block) : Node(NT::Sig), block(block) {}
-  Block* block;
-  Node* taken{nullptr};
-};
-
-/*
- * Halt means to stop processing along this control flow path---something
- * during analysis had to pessimize and we can't continue.
- *
- * When we've pessimized a set, we also guarantee that all successors have a
- * lower_bound of zero, which will block all rcfg transformation rules from
- * applying, so it's actually not necessary to halt---it just prevents
- * processing parts of the graph unnecessarily.
- *
- * For the case of join points which were halted on one side, optimize_graph
- * will not process through the join because the visit_counter will never be
- * high enough.  In the case of back edges, it may process through the loop
- * unnecessarily, but it won't make any illegal transformations because the
- * lower_bound will be zero.
- */
-struct NHalt : Node { explicit NHalt() : Node(NT::Halt) {} };
-
-/*
- * Empty nodes are useful for building graphs, since not every node type can
- * have control flow edges, but it has no meaning later.
- */
-struct NEmpty : Node { explicit NEmpty() : Node(NT::Empty) {} };
 
 /*
  * Req nodes mean the reference count of the object may be observed, up to some
@@ -835,29 +944,54 @@ struct NEmpty : Node { explicit NEmpty() : Node(NT::Empty) {} };
  * avoid changing program behavior.  It will be INT32_MAX on exits from the
  * compilation unit.
  */
-struct NReq : Node {
-  explicit NReq(int32_t level) : Node(NT::Req), level(level) {}
+struct NReq {
+  explicit NReq(int32_t level) : level(level) {}
   int32_t level;
 };
 
-#define X(Kind, kind)                               \
-  UNUSED N##Kind* to_##kind(Node* n) {              \
-    assertx(n->type == NT::Kind);                    \
-    return static_cast<N##Kind*>(n);                \
-  }                                                 \
-  UNUSED const N##Kind* to_##kind(const Node* n) {  \
-    return to_##kind(const_cast<Node*>(n));         \
+struct PreAdder {
+  PreAdder() = default;
+  explicit PreAdder(PreAdderInfo* info) : info{info} {}
+
+  void operator()(ASetID asetID, const NInc& n) const {
+    if (!info) return;
+    auto const blk = n.inst->block();
+    auto const iter = blk->iteratorTo(n.inst);
+    if (info->incDec && info->state.asets[asetID].lower_bound < 1) {
+      info->blkInfo.altLoc.set(asetID);
+      return;
+    }
+    info->setAvlAnt(iter, info->incDec);
+  }
+  void operator()(ASetID asetID, const NDec& n) const {
+    if (!info) return;
+    auto const blk = n.inst->block();
+    auto const iter = blk->iteratorTo(n.inst);
+    if (info->state.asets[asetID].lower_bound <= 1) {
+      info->blkInfo.altLoc.set(asetID);
+      return;
+    }
+    info->setAvlAnt(iter, !info->incDec);
+  }
+  void operator()(ASetID asetID, const NReq& n) const {
+    if (!info) return;
+    /*
+     * An NReq requires that the refcount at this point in the code be
+     * at least n.level. If we remove an inc/dec pair, we'll reduce
+     * the refcount here by 1, so unless lb - 1 >= n.level, we can't
+     * remove it. The situation for dec/inc pairs is less clear, and
+     * we might even be able to ignore NReqs unless n.level==INT_MAX
+     * in that case - but that requires some investigation.
+     */
+    auto const lb = info->state.asets[asetID].lower_bound;
+    if (lb - (info->incDec ? 1 : 0) >= n.level) return;
+    FTRACE(4, "     altLoc: {}\n", asetID);
+    info->blkInfo.altLoc.set(asetID);
+    info->blkInfo.avlLoc.reset(asetID);
   }
 
-X(Inc, inc)
-X(Dec, dec)
-X(Req, req)
-X(Phi, phi)
-X(Sig, sig)
-X(Halt, halt)
-X(Empty, empty)
-
-#undef X
+  PreAdderInfo* info = nullptr;
+};
 
 //////////////////////////////////////////////////////////////////////
 
@@ -872,20 +1006,18 @@ void mrinfo_step_impl(Env& env,
      * invariants on a memory location, but only if the value being stored is
      * possibly counted.
      */
-    if (value->type().maybe(TCounted)) {
+    if (!value || value->type().maybe(TCounted)) {
       kill(env.ainfo.may_alias(canonicalize(dst)));
     }
   };
 
   auto const effects = memory_effects(inst);
   match<void>(
-    effects,
-    [&] (IrrelevantEffects) {},
-    [&] (ExitEffects)      {},
-    [&] (ReturnEffects)    {},
-    [&] (GeneralEffects)   {},
-    [&] (UnknownEffects)   { kill(ALocBits{}.set()); },
-    [&] (PureStore x)      { do_store(x.dst, x.value); },
+    effects, [&](IrrelevantEffects) {}, [&](ExitEffects) {},
+    [&](ReturnEffects) {}, [&](GeneralEffects) {},
+    [&](UnknownEffects) { kill(ALocBits{}.set()); },
+    [&](PureStore x) { do_store(x.dst, x.value); },
+    [&] (InlineEnterEffects) {}, [&] (InlineExitEffects) {},
 
     /*
      * Note that loads do not kill a location.  In fact, it's possible that the
@@ -901,16 +1033,9 @@ void mrinfo_step_impl(Env& env,
      * won't be able to remove support from the previous aset, and won't raise
      * the lower bound on the new loaded value.
      */
-    [&] (PureLoad) {},
+    [&](PureLoad) {},
 
-    /*
-     * Since there's no semantically correct way to do PureLoads from the
-     * locations in a PureSpillFrame unless something must have stored over
-     * them again first, we don't need to kill anything here.
-     */
-    [&] (PureSpillFrame x) {},
-
-    [&] (CallEffects x) {
+    [&](CallEffects /*x*/) {
       /*
        * Because PHP callees can side-exit (or for that matter throw from their
        * prologue), the program is ill-formed unless we have balanced reference
@@ -922,8 +1047,7 @@ void mrinfo_step_impl(Env& env,
        * SSA registers.
        */
       gen(ALocBits{}.set());
-    }
-  );
+    });
 }
 
 // Helper for stepping after we've created a MemRefAnalysis.
@@ -1047,10 +1171,14 @@ void populate_mrinfo(Env& env) {
 //////////////////////////////////////////////////////////////////////
 
 using HPHP::jit::show;
-DEBUG_ONLY std::string show(const boost::dynamic_bitset<>& bs) {
-  std::ostringstream out;
-  out << bs;
-  return out.str();
+
+DEBUG_ONLY std::string show(const BitsetRef& bs) {
+  std::string res;
+  res.reserve(bs.size());
+  for (auto i = bs.size(); i--; ) {
+    res.push_back(bs[i] ? '1' : '0');
+  }
+  return res;
 }
 
 /*
@@ -1059,28 +1187,23 @@ DEBUG_ONLY std::string show(const boost::dynamic_bitset<>& bs) {
  * This includes any use of an SSATmp that implies the pointer isn't already
  * freed.
  *
- * For now, it's limited to the reference counting operations on these values,
- * because other types of uses need will to be evaluated on a per-instruction
- * basis: we can't just check instruction srcs blindly to find these types of
- * uses, because in general a use of an SSATmp with a reference-counted pointer
- * type (like Obj, Arr, etc), implies only a use of the SSA-defined pointer
- * value (i.e. the pointer bits sitting in a virtual SSA register), not
- * necessarily of the value pointed to, which is what we care about here and
- * isn't represented in SSA.
+ * PureStores are allowed to store the address of an object which has
+ * been destroyed (this allowes store-elim to sink stores without
+ * worrying about moving them past DecRefs); otherwise a use of an
+ * SSATmp indicates that its refcount has not yet hit zero.
  */
 template<class Gen>
 void weaken_decref_step(const Env& env, const IRInstruction& inst, Gen gen) {
-  switch (inst.op()) {
-  case DecRef:
-  case DecRefNZ:
-  case IncRef:
-    {
-      auto const asetID = env.asetMap[inst.src(0)];
-      if (asetID != -1) gen(asetID);
+  bool checked = false;
+  for (auto i = 0; i < inst.numSrcs(); i++) {
+    auto const asetID = env.asetMap[inst.src(i)];
+    if (asetID == -1) continue;
+    if (!checked) {
+      auto const effects = memory_effects(inst);
+      if (boost::get<PureStore>(&effects)) return;
+      checked = true;
     }
-    break;
-  default:
-    break;
+    gen(asetID);
   }
 }
 
@@ -1101,19 +1224,33 @@ void weaken_decrefs(Env& env) {
    * 0. Initialize block state structures and put all blocks in the worklist.
    */
   auto incompleteQ = dataflow_worklist<uint32_t>(poBlocks.size());
+  BitsetArray bits{env.unit.numBlocks() * 3, env.asets.size()};
   struct BlockInfo {
-    BlockInfo() {}
-    uint32_t poId;
-    boost::dynamic_bitset<> in_used;
-    boost::dynamic_bitset<> out_used;
-    boost::dynamic_bitset<> gen;
+    explicit BlockInfo(BitsetRef base) :
+        in_used{base}, out_used{in_used.next()}, gen{out_used.next()} {
+    }
+    BlockInfo(const BlockInfo&) = default;
+    BlockInfo& operator=(const BlockInfo& o) {
+      if (this != &o) {
+        this->~BlockInfo();
+        new (this) BlockInfo{o};
+      }
+      return *this;
+    }
+    uint32_t poId{};
+    BitsetRef in_used;
+    BitsetRef out_used;
+    BitsetRef gen;
   };
-  StateVector<Block,BlockInfo> blockInfos(env.unit, BlockInfo{});
+  StateVector<Block,BlockInfo> blockInfos{
+    env.unit,
+    [&] (size_t i) {
+      return bits.row(i * 3);
+    }
+  };
+
   for (auto poId = uint32_t{0}; poId < poBlocks.size(); ++poId) {
     auto const blk = poBlocks[poId];
-    blockInfos[blk].out_used.resize(env.asets.size());
-    blockInfos[blk].in_used.resize(env.asets.size());
-    blockInfos[blk].gen.resize(env.asets.size());
     blockInfos[blk].poId = poId;
     incompleteQ.push(poId);
   }
@@ -1152,8 +1289,6 @@ void weaken_decrefs(Env& env) {
    *
    * Note out_used is empty if there are no successors.
    */
-  auto old_in_buf = boost::dynamic_bitset<>{};
-  old_in_buf.resize(env.asets.size());
   do {
     auto const blk = poBlocks[incompleteQ.pop()];
     auto& binfo = blockInfos[blk];
@@ -1168,13 +1303,10 @@ void weaken_decrefs(Env& env) {
     }
 
     // Propagate it to the in set.
-    old_in_buf = binfo.in_used;
-    binfo.in_used = binfo.out_used;
-    binfo.in_used |= binfo.gen;
-    auto const changed = old_in_buf != binfo.in_used;
-
+    auto const in_used = binfo.out_used | binfo.gen;
     // Schedule each predecessor if the input set changed.
-    if (changed) {
+    if (binfo.in_used != in_used) {
+      binfo.in_used.assign(in_used);
       blk->forEachPred([&] (Block* pred) {
         incompleteQ.push(blockInfos[pred].poId);
       });
@@ -1196,12 +1328,13 @@ void weaken_decrefs(Env& env) {
 
   /*
    * 3. Convert DecRefs to DecRefNZ when we've proven the tmp must be used
-   * again.
+   *    again.
+   *
+   * Note that this step clobbers out_used
    */
-  auto will_be_used = boost::dynamic_bitset<>{};
   for (auto& blk : poBlocks) {
     FTRACE(4, "B{}:\n", blk->id());
-    will_be_used = blockInfos[blk].out_used;
+    auto& will_be_used = blockInfos[blk].out_used;
     for (auto it = blk->instrs().rbegin(); it != blk->instrs().rend(); ++it) {
       auto& inst = *it;
       FTRACE(4, "  {}\n", inst);
@@ -1226,93 +1359,44 @@ void weaken_decrefs(Env& env) {
 
 //////////////////////////////////////////////////////////////////////
 
-// Helper for removing instructions in the rest of this file---if a debugging
-// mode is enabled, it will replace it with a debugging instruction if
-// appropriate instead of removing it.
-void remove_helper(IRInstruction* inst) {
-  if (!RuntimeOption::EvalHHIRGenerateAsserts) {
-    inst->convertToNop();
-    return;
-  }
+// Helper to determine whether an inc/dec can be moved across
+// an instruction.
+bool irrelevant_inst(const IRInstruction& inst) {
+  auto const effects = memory_effects(inst);
+  return match<bool>(
+    effects,
+    // Pure loads, stores, and IrrelevantEffects do not read or write any
+    // object reference counts.
+    [&] (PureLoad) { return true; },
+    [&] (PureStore) { return true; },
+    [&] (IrrelevantEffects) { return true; },
+    [&] (InlineEnterEffects) { return true; },
+    [&] (InlineExitEffects) { return true; },
 
-  switch (inst->op()) {
-  case IncRef:
-  case DecRef:
-  case DecRefNZ:
-    inst->setOpcode(DbgAssertRefCount);
-    break;
-  default:
-    always_assert_flog(
-      false,
-      "Unsupported remove_helper instruction: {}\n",
-      *inst
-    );
-  }
-}
-
-//////////////////////////////////////////////////////////////////////
-
-/*
- * Walk through each block, and remove nearby IncRef/DecRef[NZ] pairs that
- * operate on the same must-alias-set, if there are obviously no instructions
- * in between them that could read the reference count of that object.
- */
-void remove_trivial_incdecs(Env& env) {
-  FTRACE(2, "remove_trivial_incdecs ---------------------------------\n");
-  auto incs = jit::vector<IRInstruction*>{};
-  for (auto& blk : env.rpoBlocks) {
-    incs.clear();
-
-    for (auto& inst : *blk) {
-      if (inst.is(IncRef)) {
-        incs.push_back(&inst);
-        continue;
+    // Inlining related instructions can manipulate the frame but don't
+    // observe reference counts.
+    [&] (GeneralEffects g) {
+      if (inst.is(BeginInlining,
+                  InlineReturnNoFrame,
+                  SyncReturnBC
+                 )) {
+        return true;
       }
+      if (inst.consumesReferences()) return false;
 
-      if (inst.is(DecRef, DecRefNZ)) {
-        if (incs.empty()) continue;
-        auto const setID = env.asetMap[inst.src(0)];
-        auto const to_rm = [&] () -> IRInstruction* {
-          for (auto it = begin(incs); it != end(incs); ++it) {
-            auto const candidate = *it;
-            if (env.asetMap[candidate->src(0)] == setID) {
-              incs.erase(it);
-              return candidate;
-            }
-          }
-          // This DecRef may rely on one of the IncRefs, since we aren't
-          // handling may-alias stuff here.
-          incs.clear();
-          return nullptr;
-        }();
-        if (to_rm == nullptr) continue;
-
-        FTRACE(3, "    ** trivial pair: {}, {}\n", *to_rm, inst);
-        remove_helper(to_rm);
-        remove_helper(&inst);
-        continue;
+      if (g.loads <= AEmpty &&
+          g.stores <= AEmpty) {
+        return true;
       }
+      return false;
+    },
 
-
-      auto const effects = memory_effects(inst);
-      match<void>(
-        effects,
-        // Pure loads, stores, and IrrelevantEffects do not read or write any
-        // object reference counts.
-        [&] (PureLoad) {},
-        [&] (PureStore) {},
-        [&] (PureSpillFrame) {},
-        [&] (IrrelevantEffects) {},
-
-        // Everything else may.
-        [&] (GeneralEffects)    { incs.clear(); },
-        [&] (CallEffects)       { incs.clear(); },
-        [&] (ReturnEffects)     { incs.clear(); },
-        [&] (ExitEffects)       { incs.clear(); },
-        [&] (UnknownEffects)    { incs.clear(); }
-      );
-    }
-  }
+    // Everything else may.
+    [&] (CallEffects)       { return false; },
+    [&] (ReturnEffects)     { return false; },
+    [&] (ExitEffects)       { return false; },
+    [&] (UnknownEffects)    { return false; }
+  );
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1320,45 +1404,42 @@ void remove_trivial_incdecs(Env& env) {
 void find_alias_sets(Env& env) {
   FTRACE(2, "find_alias_sets --------------------------------------\n");
 
-  auto frame_to_ctx = sparse_idptr_map<SSATmp,ASetID>(env.unit.numTmps());
-
   auto add = [&] (SSATmp* tmp) {
     if (!tmp->type().maybe(TCounted)) return;
 
     auto& id = env.asetMap[tmp];
     if (id != -1) return;
 
-    /*
-     * There's one MustAliasSet for each frame's context, no matter how many
-     * times we see loads of it.  We take advantage of this in pure_load to
-     * bump the lower bound to at least one (if they weren't all in one set,
-     * we'd not be able to do that without violating exclusivity of lower
-     * bounds).
-     */
-    if (tmp->inst()->is(LdCtx)) {
-      assertx(tmp == canonical(tmp));
-
-      auto const fp = tmp->inst()->src(0);
-      if (frame_to_ctx.contains(fp)) {
-        id = frame_to_ctx[fp];
-      } else {
-        id = env.asets.size();
-        frame_to_ctx[fp] = id;
-        assertx(canonical(tmp) == tmp);
-        env.asets.push_back(MustAliasSet { tmp->type(), tmp });
-      }
-
-      FTRACE(2,  "  t{} -> {} ({})\n", tmp->id(), id, tmp->toString());
-      return;
-    }
-
-    auto const canon = canonical(tmp);
+    auto canon = canonical(tmp);
     if (env.asetMap[canon] != -1) {
       id = env.asetMap[canon];
     } else {
-      id = env.asets.size();
-      env.asetMap[canon] = id;
-      env.asets.push_back(MustAliasSet { canon->type(), canon });
+      auto const cinst = canon->inst();
+      if (cinst->is(DefLabel) && cinst->numDsts() == 1) {
+        int pid = -2;
+        cinst->block()->forEachSrc(0, [&](IRInstruction*, SSATmp* src) {
+          if (pid == -1) return;
+          src = canonical(src);
+          if (src == cinst->dst(0)) return;
+          auto const srcId = env.asetMap[src];
+          if (srcId == -1) {
+            pid = -1;
+            return;
+          }
+          if (pid == -2) {
+            pid = srcId;
+          } else if (pid != srcId) {
+            pid = -1;
+            return;
+          }
+        });
+        if (pid >= 0) id = pid;
+      }
+      if (id == -1) {
+        id = env.asets.size();
+        env.asetMap[canon] = id;
+        env.asets.push_back(MustAliasSet { canon->type(), canon });
+      }
     }
 
     FTRACE(2,  "  t{} -> {} ({})\n", tmp->id(), id, canon->toString());
@@ -1410,21 +1491,15 @@ DEBUG_ONLY bool check_state(const RCState& state) {
     auto& set = state.asets[asetID];
 
     // All reference count bounds are non-negative.
-    always_assert(set.lower_bound >= 0);
+    always_assert(set.unsupported_refs >= 0);
+    always_assert(set.lower_bound >= set.unsupported_refs);
 
     // If this set has support bits, then the reverse map in the state is
     // consistent with it.
-    if (set.memory_support.any()) {
-      for (auto id = uint32_t{0}; id < set.memory_support.size(); ++id) {
-        if (!set.memory_support[id]) continue;
-        always_assert(state.support_map[id] == asetID);
-      }
-    }
-
-    if (set.pessimized) {
-      always_assert(set.lower_bound == 0);
-      always_assert(set.memory_support.none());
-    }
+    bitset_for_each_set(
+      set.memory_support,
+      [&](size_t id) { always_assert(state.support_map[id] == asetID); }
+    );
   }
 
   // Check other direction on the support_map.
@@ -1454,94 +1529,53 @@ RCState entry_rc_state(Env& env) {
   return ret;
 }
 
-bool pessimize_for_merge(ASetInfo& aset) {
-  if (aset.pessimized) return false;
-  aset.pessimized = true;
-  aset.lower_bound = 0;
-  aset.memory_support.reset();
-  return true;
-}
-
 bool merge_into(ASetInfo& dst, const ASetInfo& src) {
   auto changed = false;
 
-  // Catch any issues with this early, instead of waiting for the full check
-  // function.
-  assertx(src.lower_bound >= 0);
-  assertx(dst.lower_bound >= 0);
+  auto const lower_bound = std::min(dst.lower_bound, src.lower_bound);
 
-  auto const new_lower_bound = std::min(dst.lower_bound, src.lower_bound);
-  if (dst.lower_bound != new_lower_bound) {
-    dst.lower_bound = new_lower_bound;
+  /*
+   * We're going to reduce the memory support to the intersection of
+   * src and dst's memory support. to avoid worrying about a single
+   * location supporting multiple alias sets.
+   *
+   * When we do that, we have to (logically) increase both src and
+   * dst's unsupported_refs by the numberof support locations removed.
+   */
+  auto const new_memory_support = dst.memory_support & src.memory_support;
+  auto const dst_count = dst.memory_support.count();
+  auto const src_count = src.memory_support.count();
+  auto const new_count = new_memory_support.count();
+  auto const dst_delta = dst_count - new_count;
+  auto const src_delta = src_count - new_count;
+
+  const int dst_unsupported_refs = dst.unsupported_refs + dst_delta;
+  const int src_unsupported_refs = src.unsupported_refs + src_delta;
+
+  auto const unsupported_refs =
+    std::min(std::max(dst_unsupported_refs, src_unsupported_refs),
+             lower_bound);
+
+  if (dst.lower_bound != lower_bound) {
+    dst.lower_bound = lower_bound;
     changed = true;
   }
 
-  auto const new_pessimized = dst.pessimized || src.pessimized;
-  if (dst.pessimized != new_pessimized) {
-    assertx(new_pessimized);
-    DEBUG_ONLY auto pess_changed = pessimize_for_merge(dst);
-    assertx(pess_changed);
+  if (dst.unsupported_refs != unsupported_refs) {
+    dst.unsupported_refs = unsupported_refs;
+    changed = true;
+  }
+
+  if (dst_delta) {
+    assertx(dst.memory_support != new_memory_support);
+    dst.memory_support = new_memory_support;
     changed = true;
   }
 
   return changed;
 }
 
-bool merge_memory_support(RCState& dstState, const RCState& srcState) {
-  auto changed = false;
-  for (auto asetID = uint32_t{0}; asetID < dstState.asets.size(); ++asetID) {
-    auto& dst = dstState.asets[asetID];
-    auto& src = srcState.asets[asetID];
-    /*
-     * If both the src and dst sets have enough memory support for their lower
-     * bound, merge memory support by keeping the intersection of support
-     * locations, and dropping the lower bound to compensate for the other ones
-     * (i.e. we're acting like it might have been decref'd right here through
-     * any memory locations that aren't in the intersection).  Since they both
-     * have enough lower bound for their support, we know we can account for
-     * everything here.
-     *
-     * On the other hand, if one or both of them has more memory support bits
-     * than lower bound, we just pessimize everything.
-     *
-     * We do all of this conservative merging to simplify things during each
-     * block's analysis.  If we weren't merging this way, we would have to
-     * union the incoming memory bits, which easily leads to situations where
-     * more than one must alias set is supported by the same memory location.
-     * But we want our state structures to have support_map pointing to at most
-     * one must-alias-set for each location.
-     */
-    if (dst.lower_bound >= dst.memory_support.count() &&
-        src.lower_bound >= src.memory_support.count()) {
-      auto const new_memory_support = dst.memory_support & src.memory_support;
-      if (dst.memory_support != new_memory_support) {
-        auto const old_count = dst.memory_support.count();
-        auto const new_count = new_memory_support.count();
-        auto const delta     = old_count - new_count;
-        assertx(delta > 0);
-
-        dst.lower_bound -= delta;
-        dst.memory_support = new_memory_support;
-        changed = true;
-
-        assertx(dst.lower_bound >= 0);
-        assertx(dst.lower_bound >= dst.memory_support.count());
-      }
-      continue;
-    }
-
-    FTRACE(5, "     {} pessimizing during merge\n", asetID);
-    for (auto other = uint32_t{0}; other < dstState.asets.size(); ++other) {
-      if (pessimize_for_merge(dstState.asets[other])) {
-        changed = true;
-      }
-    }
-  }
-
-  return changed;
-}
-
-bool merge_into(Env& env, RCState& dst, const RCState& src) {
+bool merge_into(Env& /*env*/, RCState& dst, const RCState& src) {
   if (!dst.initialized) {
     dst = src;
     return true;
@@ -1549,28 +1583,56 @@ bool merge_into(Env& env, RCState& dst, const RCState& src) {
 
   always_assert(dst.asets.size() == src.asets.size());
 
+  if (src.unbalanced_decrefs.size()) {
+    auto tmp = src.unbalanced_decrefs;
+    if (dst.unbalanced_decrefs.size()) {
+      // Need to merge the unbalanced_decrefs. For each aset in
+      // either, we want the destination to end up with max(aset in
+      // dst, aset in src) occurrances of aset (a kind of "union with
+      // counts").
+      std::sort(tmp.begin(), tmp.end());
+      std::sort(dst.unbalanced_decrefs.begin(), dst.unbalanced_decrefs.end());
+      auto j = 0;
+      for (int i = 0, sz = dst.unbalanced_decrefs.size(); i < sz; ) {
+        if (j == tmp.size()) break;
+        if (tmp[j] > dst.unbalanced_decrefs[i]) {
+          ++i;
+          continue;
+        }
+        if (tmp[j] < dst.unbalanced_decrefs[i]) {
+          dst.unbalanced_decrefs.push_back(tmp[j++]);
+          continue;
+        }
+        i++;
+        j++;
+      }
+      while (j < tmp.size()) dst.unbalanced_decrefs.push_back(tmp[j++]);
+    } else {
+      dst.unbalanced_decrefs = std::move(tmp);
+    }
+  }
+
   // We'll reconstruct the support_map vector after merging each aset.
   dst.support_map.fill(-1);
 
   auto changed = false;
 
-  // First merge memory support information.  This is a separate step, because
-  // this merge can cause changes to other may-alias sets at each stage (it may
-  // pessimize all the sets in some situations).
-  if (merge_memory_support(dst, src)) changed = true;
-
+  dst.has_unsupported_refs = false;
   for (auto asetID = uint32_t{0}; asetID < dst.asets.size(); ++asetID) {
-    if (merge_into(dst.asets[asetID], src.asets[asetID])) {
+    auto &daset = dst.asets[asetID];
+    if (merge_into(daset, src.asets[asetID])) {
       changed = true;
     }
 
-    auto const& mem = dst.asets[asetID].memory_support;
-    if (mem.none()) continue;
-    for (auto loc = uint32_t{0}; loc < mem.size(); ++loc) {
-      if (!mem[loc]) continue;
-      assertx(dst.support_map[loc] == -1);
-      dst.support_map[loc] = asetID;
-    }
+    if (daset.unsupported_refs) dst.has_unsupported_refs = true;
+
+    bitset_for_each_set(
+      daset.memory_support,
+      [&](size_t loc) {
+        assertx(dst.support_map[loc] == -1);
+        dst.support_map[loc] = asetID;
+      }
+    );
   }
 
   assertx(check_state(dst));
@@ -1578,57 +1640,114 @@ bool merge_into(Env& env, RCState& dst, const RCState& src) {
   return changed;
 }
 
+bool is_same(const RCState &dstState, const RCState& srcState) {
+  assertx(srcState.initialized);
+  if (!dstState.initialized) return false;
+  for (auto asetID = uint32_t{0}; asetID < dstState.asets.size(); ++asetID) {
+    auto& dst = dstState.asets[asetID];
+    auto& src = srcState.asets[asetID];
+
+    if (dst.lower_bound != src.lower_bound ||
+        dst.unsupported_refs != src.unsupported_refs ||
+        dst.memory_support != src.memory_support) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 //////////////////////////////////////////////////////////////////////
 
-template<class Fn>
-void for_aset(Env& env, RCState& state, SSATmp* tmp, Fn fn) {
+template <class Fn>
+void if_aset(Env& env, SSATmp* tmp, Fn fn) {
   auto const asetID = env.asetMap[tmp];
   if (asetID == -1) { assertx(!tmp->type().maybe(TCounted)); return; }
-  if (state.asets[asetID].pessimized) return;
   fn(asetID);
 }
 
-template<class Fn>
-void for_each_bit(ALocBits bits, Fn fn) {
-  for (auto i = uint32_t{0}; i < bits.size(); ++i) {
-    if (!bits[i]) continue;
-    fn(i);
-  }
+folly::Optional<ASetID> lookup_aset(Env& env, SSATmp* tmp) {
+  auto const asetID = env.asetMap[tmp];
+  if (asetID != -1) return asetID;
+  assertx(!tmp->type().maybe(TCounted));
+  return folly::none;
 }
 
-void reduce_lower_bound(Env& env, RCState& state, uint32_t asetID) {
+void reduce_lower_bound(Env& /*env*/, RCState& state, uint32_t asetID) {
   FTRACE(5, "      reduce_lower_bound {}\n", asetID);
   auto& aset = state.asets[asetID];
   aset.lower_bound = std::max(aset.lower_bound - 1, 0);
+  if (aset.unsupported_refs > aset.lower_bound) {
+    aset.unsupported_refs = aset.lower_bound;
+  }
 }
 
-template<class NAdder>
-void pessimize_one(Env& env, RCState& state, ASetID asetID, NAdder add_node) {
+void observe_unbalanced_decrefs(Env& env, RCState& state, PreAdder add_node) {
+  for (auto asetID : state.unbalanced_decrefs) {
+    FTRACE(4, "    unbalanced decref: {}\n", asetID);
+    for (auto may_id : env.asets[asetID].may_alias) {
+      reduce_lower_bound(env, state, may_id);
+      DEBUG_ONLY auto& may_set = state.asets[may_id];
+      FTRACE(5, "      {} lb: {}({})\n",
+             may_id, may_set.lower_bound, may_set.unsupported_refs);
+      add_node(may_id, NReq{1});
+    }
+  }
+  state.unbalanced_decrefs.clear();
+}
+
+/*
+ * Note that its ok to clear the memory support and continue in
+ * pessimize situations. If later, after increasing the lower bound,
+ * we see an event that could DecRef a memory location that was
+ * previously in the support, there are two possibilities:
+ *
+ * - the location really is still in the support, and the event
+ *   decreases the refcount; but in that case, our lower_bound doesn't
+ *   include the reference coming from that location, so it was
+ *   previously at least one too low, and so there's nothing for us to
+ *   do.
+ *
+ * - the location was no longer in the support, and the event has no
+ *   effect; again there's nothing for us to do.
+ */
+void pessimize_one(Env& /*env*/, RCState& state, ASetID asetID,
+                   PreAdder add_node) {
   auto& aset = state.asets[asetID];
-  if (aset.pessimized) return;
+  if (!aset.lower_bound && aset.memory_support.none()) return;
   FTRACE(2, "      {} pessimized\n", asetID);
   aset.lower_bound = 0;
-  if (aset.memory_support.any()) {
-    for (auto id = uint32_t{0}; id < aset.memory_support.size(); ++id) {
-      if (!aset.memory_support[id]) continue;
-      state.support_map[id] = -1;
-    }
-    aset.memory_support.reset();
-  }
-  aset.pessimized = true;
-  add_node(asetID, NHalt{});
+  aset.unsupported_refs = 0;
+  bitset_for_each_set(
+    aset.memory_support,
+    [&](size_t id) { state.support_map[id] = -1; }
+  );
+  aset.memory_support.reset();
+  add_node(asetID, NReq{std::numeric_limits<int32_t>::max()});
 }
 
-template<class NAdder>
-void pessimize_all(Env& env, RCState& state, NAdder add_node) {
+void pessimize_all(Env& env, RCState& state, PreAdder add_node) {
   FTRACE(3, "    pessimize_all\n");
+  observe_unbalanced_decrefs(env, state, add_node);
   for (auto asetID = uint32_t{0}; asetID < state.asets.size(); ++asetID) {
     pessimize_one(env, state, asetID, add_node);
   }
 }
 
-template<class NAdder>
-void observe(Env& env, RCState& state, ASetID asetID, NAdder add_node) {
+void unsupport_all(Env& /*env*/, RCState& state) {
+  FTRACE(3, "    unsupport_all\n");
+  for (auto& aset : state.asets) {
+    aset.unsupported_refs = aset.lower_bound;
+    if (aset.unsupported_refs) state.has_unsupported_refs = true;
+    bitset_for_each_set(
+      aset.memory_support,
+      [&](size_t id) { state.support_map[id] = -1; }
+    );
+    aset.memory_support.reset();
+  }
+}
+
+void observe(Env& env, RCState& state, ASetID asetID, PreAdder add_node) {
   auto constexpr level = 2;
   add_node(asetID, NReq{level});
   auto const diff = level - state.asets[asetID].lower_bound;
@@ -1649,93 +1768,109 @@ void observe(Env& env, RCState& state, ASetID asetID, NAdder add_node) {
   }
 }
 
-template<class NAdder>
-void observe_all(Env& env, RCState& state, NAdder add_node) {
+void observe_all(Env& env, RCState& state, PreAdder add_node) {
   FTRACE(3, "    observe_all\n");
+  observe_unbalanced_decrefs(env, state, add_node);
   for (auto asetID = uint32_t{0}; asetID < state.asets.size(); ++asetID) {
     add_node(asetID, NReq{std::numeric_limits<int32_t>::max()});
   }
 }
 
-/*
- * When we call builtin functions, we need to make sure that we don't change
- * the return value of VRefParam::isReferenced on any possibly-KindOfRef
- * arguments.  We accomplish this with req nodes at level 2 for all asets that
- * could be boxed before we see builtin calls (we could do it only to the ones
- * that could be args, but we don't bother).
- *
- * The reason we have this unusual case only when dealing with builtin calls is
- * that in that situation, we're actually tracking references and memory
- * locations associated with the call.  This means it doesn't fall into the
- * usual category of not changing whether an "unknown pointer" could be the
- * last reference (as described in the "More about memory" section at the top
- * of this file)---we need to avoid changing whether a known pointer (the one
- * in memory for the CallBuiltin arg) is the last reference.  Basically,
- * CallBuiltin observes the reference count (at level 2) for their
- * possibly-boxed args, even though they can't decref the pointer through the
- * memory locations for those args.
- */
-template<class NAdder>
-void observe_for_is_referenced(Env& env, RCState& state, NAdder add_node) {
-  FTRACE(3, "    observe_for_is_referenced\n");
-  for (auto asetID = uint32_t{0}; asetID < state.asets.size(); ++asetID) {
-    if (env.asets[asetID].widestType.maybe(TBoxedCell)) {
-      add_node(asetID, NReq{2});
-    }
-  }
-}
-
-template<class NAdder>
-void may_decref(Env& env, RCState& state, ASetID asetID, NAdder add_node) {
+void may_decref(Env& env, RCState& state, ASetID asetID, PreAdder add_node) {
   auto& aset = state.asets[asetID];
 
-  auto const old_lower_bound = aset.lower_bound;
+  auto const balanced = aset.lower_bound > aset.unsupported_refs;
   reduce_lower_bound(env, state, asetID);
   add_node(asetID, NReq{1});
-  FTRACE(3, "    {} lb: {}\n", asetID, aset.lower_bound);
+  FTRACE(3, "    {} lb: {}({})\n",
+         asetID, aset.lower_bound, aset.unsupported_refs);
 
-  if (old_lower_bound >= 1) return;
-  FTRACE(4, "    unbalanced decref:\n");
-  for (auto may_id : env.asets[asetID].may_alias) {
-    reduce_lower_bound(env, state, may_id);
-    add_node(may_id, NReq{1});
+  if (balanced) {
+    FTRACE(4, "    adding balanced decref: {}\n", asetID);
+    if (!state.has_unsupported_refs) return;
+    for (auto may_id : env.asets[asetID].may_alias) {
+      auto& may_aset = state.asets[may_id];
+      if (!may_aset.unsupported_refs) continue;
+      may_aset.lower_bound -= 1;
+      may_aset.unsupported_refs -= 1;
+      FTRACE(5, "    dropping unsupported ref for {}: {}({})\n",
+             may_id, may_aset.lower_bound, may_aset.unsupported_refs);
+    }
+  } else {
+    FTRACE(4, "    adding unbalanced decref: {}\n", asetID);
+    state.unbalanced_decrefs.push_back(asetID);
   }
 }
 
-// Returns true if we actually removed the support (i.e. we accounted for it by
-// reducing a lower bound, or the location wasn't actually supporting anything
-// right now).
-template<class NAdder>
+void kill_unsupported_refs(RCState& state, PreAdder add_node = {}) {
+  if (state.has_unsupported_refs) {
+    FTRACE(3, "    killing all unsupported refs\n");
+    auto id = 0;
+    for (auto& aset : state.asets) {
+      if (aset.unsupported_refs) {
+        assertx(aset.unsupported_refs <= aset.lower_bound);
+        aset.lower_bound -= aset.unsupported_refs;
+        aset.unsupported_refs = 0;
+        if (aset.lower_bound < 2) add_node(id, NReq{1});
+        FTRACE(5, "      {} lb: {}(0)\n", id, aset.lower_bound);
+      }
+      id++;
+    }
+    state.has_unsupported_refs = false;
+  }
+}
+
+// Returns true if we actually removed the support (i.e. we accounted
+// for it by reducing a lower bound, or increasing unsupported_refs,
+// or the location wasn't actually supporting anything right now).
 bool reduce_support_bit(Env& env,
                         RCState& state,
                         uint32_t locID,
-                        NAdder add_node) {
+                        bool may_decref,
+                        PreAdder add_node) {
   auto const current_set = state.support_map[locID];
   if (current_set == -1) return true;
   FTRACE(3, "      {} removing support\n", current_set);
   auto& aset = state.asets[current_set];
-  if (aset.lower_bound == 0) {
+  if (aset.lower_bound == aset.unsupported_refs) {
+    // If decrefs can actually occur here, we should have killed the
+    // unsupported refs first.
+    assertx(!may_decref || !aset.unsupported_refs);
     /*
      * We can't remove the support bit, and we have no way to account for the
-     * reduction in lower bound.  There're two cases to consider:
+     * reduction in lower bound.  There are three cases to consider:
      *
-     *   o If the event we're processing actually DecRef'd this must-alias-set
-     *     through this memory location, the lower bound is still zero, and
-     *     leaving the bit set conservatively is not incorrect.
+     *   o If may_decref is false (we're trying to move the support
+     *     from this aset to another, but no refcounts are changing)
+     *     we simply need to report that we failed.
      *
-     *   o If the event we're processing did not actually DecRef this object
-     *     through this memory location, then we must not remove the bit,
-     *     because something in the future (after we've seen other IncRefs)
+     *   o If the event we're processing actually DecRef'd this
+     *     must-alias-set through this memory location (only possible
+     *     when may_decref is true implying a zero lower bound), the
+     *     lower bound will remain zero, and leaving the bit set
+     *     conservatively is not incorrect.
+     *
+     *   o If the event we're processing did not actually DecRef this
+     *     object through this memory location, because it stored
+     *     elsewhere, then we must not remove the bit, because
+     *     something in the future (after we've seen other IncRefs)
      *     still may decref it through this location.
      *
-     * So in this case we leave the lower bound alone, and also must not remove
-     * the bit.
+     * So in this case we leave the lower bound alone, and also must
+     * not remove the bit.
      */
     return false;
   }
   aset.memory_support.reset(locID);
   state.support_map[locID] = -1;
-  reduce_lower_bound(env, state, current_set);
+  if (may_decref) {
+    reduce_lower_bound(env, state, current_set);
+  } else {
+    aset.unsupported_refs++;
+    state.has_unsupported_refs = true;
+    FTRACE(5, "    {} lb: {}({})\n",
+           current_set, aset.lower_bound, aset.unsupported_refs);
+  }
   // Because our old lower bound is non-zero (from the memory support), we
   // don't need to deal with the possibility of may-alias observes or may-alias
   // decrefs here.
@@ -1745,34 +1880,43 @@ bool reduce_support_bit(Env& env,
 
 // Returns true if reduce_support_bit succeeded on every support bit in the
 // set.
-template<class NAdder>
 bool reduce_support_bits(Env& env,
                          RCState& state,
                          ALocBits set,
-                         NAdder add_node) {
+                         bool may_decref,
+                         PreAdder add_node) {
   FTRACE(2, "    remove: {}\n", show(set));
   auto ret = true;
-  for_each_bit(set, [&] (uint32_t locID) {
-    if (!reduce_support_bit(env, state, locID, add_node)) ret = false;
-  });
+  bitset_for_each_set(
+    set,
+    [&](uint32_t locID) {
+      if (!reduce_support_bit(env, state, locID, may_decref, add_node)) {
+        ret = false;
+      }
+    }
+  );
   return ret;
 }
 
 // Returns true if we completely accounted for removing the support.  If it
 // returns false, the support bits may still be marked on some must-alias-sets.
 // (See pure_load.)
-template<class NAdder>
 bool reduce_support(Env& env,
                     RCState& state,
                     AliasClass aclass,
-                    NAdder add_node) {
+                    bool may_decref,
+                    PreAdder add_node) {
   if (aclass == AEmpty) return true;
-  FTRACE(3, "    reduce support {}\n", show(aclass));
+  FTRACE(3, "    reduce support {}{}\n",
+         std::string{may_decref ? "(may_decref) " : ""}, show(aclass));
+  if (may_decref && state.has_unsupported_refs) {
+    kill_unsupported_refs(state, add_node);
+  }
   auto const alias = env.ainfo.may_alias(aclass);
-  return reduce_support_bits(env, state, alias, add_node);
+  return reduce_support_bits(env, state, alias, may_decref, add_node);
 }
 
-void drop_support_bit(Env& env, RCState& state, uint32_t bit) {
+void drop_support_bit(Env& /*env*/, RCState& state, uint32_t bit) {
   auto const current_set = state.support_map[bit];
   if (current_set != -1) {
     FTRACE(3, "    {} dropping support {}\n", current_set, bit);
@@ -1783,27 +1927,20 @@ void drop_support_bit(Env& env, RCState& state, uint32_t bit) {
 
 void drop_support_bits(Env& env, RCState& state, ALocBits bits) {
   FTRACE(3, "    drop support {}\n", show(bits));
-  for_each_bit(bits, [&] (uint32_t bit) {
-    drop_support_bit(env, state, bit);
-  });
+  bitset_for_each_set(
+    bits,
+    [&] (uint32_t bit) {
+      drop_support_bit(env, state, bit);
+    }
+  );
 }
 
-template<class NAdder>
-void create_store_support(Env& env,
-                          RCState& state,
-                          AliasClass dst,
-                          SSATmp* tmp,
-                          NAdder add_node) {
-  for_aset(env, state, tmp, [&] (ASetID asetID) {
+void create_store_support(Env& env, RCState& state, AliasClass dst, SSATmp* tmp,
+                          PreAdder /*add_node*/) {
+  if_aset(env, tmp, [&] (ASetID asetID) {
     auto& aset = state.asets[asetID];
 
     auto const meta = env.ainfo.find(dst);
-    if (!meta && aset.lower_bound == 0) {
-      FTRACE(3, "    {} causing pessimize\n", asetID);
-      pessimize_all(env, state, add_node);
-      return;
-    }
-
     if (meta) {
       FTRACE(3, "    {} adding support in {}\n", asetID, show(dst));
 
@@ -1832,41 +1969,46 @@ void create_store_support(Env& env,
       return;
     }
 
-    FTRACE(3, "    {} treating store as may_decref\n", asetID);
-    may_decref(env, state, asetID, add_node);
+    if (aset.lower_bound == aset.unsupported_refs) {
+      FTRACE(3, "    {} causing unsupport_all\n", asetID);
+      unsupport_all(env, state);
+      return;
+    }
+
+    FTRACE(3, "    {} store adds an unsupported_ref\n", asetID);
+    aset.unsupported_refs++;
+    state.has_unsupported_refs = true;
   });
 }
 
 //////////////////////////////////////////////////////////////////////
 
-template<class NAdder>
-void handle_call(Env& env,
-                 RCState& state,
-                 const IRInstruction& inst,
-                 CallEffects e,
-                 NAdder add_node) {
+void handle_call(Env& env, RCState& state, const IRInstruction& /*inst*/,
+                 CallEffects e, PreAdder add_node) {
   // We have to block all incref motion through a PHP call, by observing at the
   // max.  This is fundamentally required because the callee can side-exit or
   // throw an exception without a catch trace, so everything needs to be
   // balanced.
   observe_all(env, state, add_node);
 
+  // The call can affect any unsupported_refs
+  kill_unsupported_refs(state);
+
   // Figure out locations the call may cause stores to, then remove any memory
   // support on those locations.
   auto bset = ALocBits{};
-  if (e.destroys_locals) bset |= env.ainfo.all_frame;
-  bset |= env.ainfo.may_alias(e.stack);
+  bset |= env.ainfo.may_alias(e.inputs);
+  bset |= env.ainfo.may_alias(e.actrec);
+  bset |= env.ainfo.may_alias(e.outputs);
   bset |= env.ainfo.may_alias(AHeapAny);
-  bset &= ~env.ainfo.expand(e.kills);
-  reduce_support_bits(env, state, bset, add_node);
+  reduce_support_bits(env, state, bset, true, add_node);
 }
 
-template<class NAdder>
 void pure_load(Env& env,
                RCState& state,
                AliasClass src,
                SSATmp* dst,
-               NAdder add_node) {
+               PreAdder add_node) {
   auto const meta = env.ainfo.find(src);
   if (!meta) return;
   if (!state.avail.test(meta->index)) return;
@@ -1879,12 +2021,12 @@ void pure_load(Env& env,
    * because it could violate the exclusivity rule.
    */
   FTRACE(2, "    load: {}\n", show(src));
-  if (!reduce_support(env, state, src, add_node)) {
+  if (!reduce_support(env, state, src, false, add_node)) {
     FTRACE(2, "    couldn't remove all pre-existing support\n");
     return;
   }
 
-  for_aset(env, state, dst, [&] (ASetID asetID) {
+  if_aset(env, dst, [&] (ASetID asetID) {
     FTRACE(2, "    {} adding support: {}\n", asetID, show(src));
     auto& aset = state.asets[asetID];
     ++aset.lower_bound;
@@ -1893,12 +2035,11 @@ void pure_load(Env& env,
   });
 }
 
-template<class NAdder>
 void pure_store(Env& env,
                 RCState& state,
                 AliasClass dst,
                 SSATmp* tmp,
-                NAdder add_node) {
+                PreAdder add_node) {
   /*
    * First, handle the effects of the store on memory support.  See the docs
    * above in "Effects of Pure Stores on Memory Support" for an explanation.
@@ -1911,83 +2052,89 @@ void pure_store(Env& env,
    * Now handle the effects of the store on the aset for the value being
    * stored.
    */
-  create_store_support(env, state, dst, tmp, add_node);
+  if (tmp) create_store_support(env, state, dst, tmp, add_node);
 }
 
-template<class NAdder>
-void pure_spill_frame(Env& env,
-                      RCState& state,
-                      PureSpillFrame psf,
-                      SSATmp* ctx,
-                      NAdder add_node) {
-  /*
-   * First, the effects of PureStores on memory support.  A SpillFrame will
-   * store over kNumActRecCells stack slots, and just like normal PureStores we
-   * can drop any support bits for them without reducing their lower bounds.
-   */
-  drop_support_bits(env, state, env.ainfo.expand(psf.stk));
+void inline_enter_effects(Env& env,
+                          RCState& state,
+                          InlineEnterEffects& ief,
+                          PreAdder add_node) {
+  // We're converting a pre-live actrec to a live actrec, which effectively
+  // changes some stack AliasClasses to not exist anymore.
+  observe_unbalanced_decrefs(env, state, add_node);
 
-  /*
-   * Now the effects on the set being stored.  Pre-live frames are slightly
-   * different from other pure stores, because eventually they may become live
-   * frames even within our region (via DefInlineFP).  However, in the
-   * meantime, we need to treat the store of the context like a normal
-   * pure_store, because there are various IR instructions that can decref the
-   * context on a pre-live ActRec through memory (e.g. LdObjMethod).
-   *
-   * If the frame becomes live via DefInlineFP, we don't need to treat it as
-   * memory support for this set anymore, for the same reason that LdCtx
-   * doesn't need that.  The only way that reference can be DecRef'd in a
-   * semantically correct program is in a return sequence, and if it's done
-   * inside this region, we will see the relevant DecRef instructions and
-   * handle that.
-   */
-  create_store_support(env, state, psf.ctx, ctx, add_node);
+  // Kill locations that are going to be overwritten by the ActRec.
+  drop_support_bits(env, state, env.ainfo.expand(ief.actrec));
+
+  // DefInlineFP may store a $this to the ActRec. We don't need to treat it
+  // as a memory support, as LdCtx doesn't need that. The only way that
+  // reference can be DecRef'd in a semantically correct program is in a return
+  // sequence, and if it's done inside this region, we will see the relevant
+  // DecRef instructions and handle that.
 }
 
 //////////////////////////////////////////////////////////////////////
 
-template<class NAdder>
 void analyze_mem_effects(Env& env,
                          IRInstruction& inst,
                          RCState& state,
-                         NAdder add_node) {
+                         PreAdder add_node) {
   auto const effects = canonicalize(memory_effects(inst));
   FTRACE(4, "    mem: {}\n", show(effects));
   match<void>(
     effects,
     [&] (IrrelevantEffects) {},
 
+    [&] (InlineEnterEffects x) {
+      inline_enter_effects(env, state, x, add_node);
+    },
+
+    [&] (InlineExitEffects) {},
+
     [&] (GeneralEffects x)  {
       if (inst.is(CallBuiltin)) {
-        observe_for_is_referenced(env, state, add_node);
+        observe_unbalanced_decrefs(env, state, add_node);
+        kill_unsupported_refs(state, add_node);
       }
 
       // Locations that are killed don't need to be tracked as memory support
       // anymore, because nothing can load that pointer (and then decref it)
       // anymore without storing over the location first.
       drop_support_bits(env, state, env.ainfo.expand(x.kills));
-      // Locations in the stores set may be stored to with a 'normal write
-      // barrier', decreffing the pointer that used to be there.
-      reduce_support(env, state, x.stores, add_node);
+      // Locations in the stores set may be stored to with a 'normal
+      // write barrier', decreffing the pointer that used to be there.
+      // Various inline related instructions have non-empty stores to
+      // prevent store sinking, but don't actually change any
+      // refcounts, so we don't need to reduce lower bounds.
+      auto const may_decref = !inst.is(BeginInlining,
+                                       InlineReturnNoFrame,
+                                       SyncReturnBC
+                                      );
+      if (may_decref && x.stores != AEmpty) {
+        observe_unbalanced_decrefs(env, state, add_node);
+      }
+      reduce_support(env, state, x.stores, may_decref, add_node);
       // For the moves set, we have no way to track where the pointers may be
-      // moved to, so we need to account for it, conservatively, as if it were
-      // a decref right now.
-      reduce_support(env, state, x.moves, add_node);
+      // moved to, so we need to account for it, via unsupported_refs.
+      reduce_support(env, state, x.moves, false, add_node);
     },
 
-    [&] (ReturnEffects)     { observe_all(env, state, add_node); },
-    [&] (ExitEffects)       { observe_all(env, state, add_node); },
+    [&] (ReturnEffects)     {
+      observe_all(env, state, add_node);
+    },
+    [&] (ExitEffects)       {
+      observe_all(env, state, add_node);
+    },
 
-    [&] (UnknownEffects)    { pessimize_all(env, state, add_node); },
+    [&] (UnknownEffects)    {
+      pessimize_all(env, state, add_node);
+    },
 
-    [&] (CallEffects e) { handle_call(env, state, inst, e, add_node); },
+    [&] (CallEffects e) {
+      handle_call(env, state, inst, e, add_node);
+    },
     [&] (PureStore x)   { pure_store(env, state, x.dst, x.value, add_node); },
-    [&] (PureLoad x)    { pure_load(env, state, x.src, inst.dst(), add_node); },
-
-    [&] (PureSpillFrame x) {
-      pure_spill_frame(env, state, x, inst.src(2), add_node);
-    }
+    [&] (PureLoad x)    { pure_load(env, state, x.src, inst.dst(), add_node); }
   );
 }
 
@@ -1998,12 +2145,9 @@ void analyze_mem_effects(Env& env,
 bool consumes_reference_taken(const IRInstruction& inst, uint32_t srcID) {
   switch (inst.op()) {
   // The following consume some arguments only in the event of an exception.
-  case LookupClsMethod:
-    return srcID == 1;
-  case LdArrFuncCtx:
-  case LdArrFPushCuf:
-  case LdStrFPushCuf:
-  case SuspendHookE:
+  case SuspendHookAwaitEF:
+  case SuspendHookAwaitEG:
+  case SuspendHookCreateCont:
   case ReturnHook:
     return srcID == 0;
   default:
@@ -2020,17 +2164,7 @@ bool consumes_reference_taken(const IRInstruction& inst, uint32_t srcID) {
  */
 bool consumes_reference_next_not_taken(const IRInstruction& inst,
                                        uint32_t srcID) {
-  switch (inst.op()) {
-  // The following have the old CRc flag, but don't observe or consume from
-  // this module's perspective.  We'll clean this up when the old pass is gone.
-  case StLoc:
-  case StStk:
-  case SpillFrame:
-  case StMem:
-    return false;
-  default:
-    return inst.consumesReference(srcID);
-  }
+  return inst.consumesReference(srcID);
 }
 
 /*
@@ -2038,50 +2172,89 @@ bool consumes_reference_next_not_taken(const IRInstruction& inst,
  * specific argument.
  */
 bool observes_reference(const IRInstruction& inst, uint32_t srcID) {
-  return consumes_reference_next_not_taken(inst, srcID) ||
-         consumes_reference_taken(inst, srcID);
+  return
+    (consumes_reference_next_not_taken(inst, srcID) &&
+     !inst.movesReference(srcID)) ||
+    consumes_reference_taken(inst, srcID) ||
+    (inst.op() == CheckArrayCOW && srcID == 0);
 }
 
 //////////////////////////////////////////////////////////////////////
 
-template<class Propagate, class NAdder>
+template<typename Propagate>
 void rc_analyze_inst(Env& env,
                      IRInstruction& inst,
                      RCState& state,
                      Propagate propagate,
-                     NAdder add_node) {
+                     PreAdder add_node) {
   FTRACE(2, "  {}\n", inst);
 
   switch (inst.op()) {
+  case Jmp:
+    if (inst.numSrcs()) {
+      auto const& defLabel = inst.taken()->front();
+      assertx(defLabel.is(DefLabel));
+      for (auto i = 0; i < inst.numSrcs(); i++) {
+        auto const srcID = lookup_aset(env, inst.src(i));
+        if (!srcID) continue;
+        auto& srcSet = state.asets[*srcID];
+        auto const dstID = lookup_aset(env, defLabel.dst(i));
+        if (!dstID) continue;
+        auto& dstSet = state.asets[*dstID];
+        if (dstSet.lower_bound < srcSet.lower_bound) {
+          auto const delta = srcSet.lower_bound - dstSet.lower_bound;
+          dstSet.unsupported_refs += delta;
+          dstSet.lower_bound = srcSet.lower_bound;
+          state.has_unsupported_refs = true;
+          FTRACE(3,
+                 "    {} DefLabel lb({}) += {}\n",
+                 *dstID, dstSet.lower_bound, delta);
+        }
+      }
+    }
+    propagate(inst.taken());
+    return;
   case IncRef:
-    for_aset(env, state, inst.src(0), [&] (ASetID asetID) {
-      add_node(asetID, NInc{&inst});
+    observe_unbalanced_decrefs(env, state, add_node);
+    if_aset(env, inst.src(0), [&] (ASetID asetID) {
       auto& aset = state.asets[asetID];
+      if (!aset.lower_bound) {
+        FTRACE(3, "    {} unsupported_refs += 1\n", asetID);
+        assertx(!aset.unsupported_refs);
+        aset.lower_bound = aset.unsupported_refs = 1;
+        state.has_unsupported_refs = true;
+      }
+      add_node(asetID, NInc{&inst});
       ++aset.lower_bound;
-      FTRACE(3, "    {} lb: {}\n", asetID, aset.lower_bound);
+      FTRACE(3, "    {} lb: {}({})\n",
+             asetID, aset.lower_bound, aset.unsupported_refs);
     });
     return;
   case DecRef:
   case DecRefNZ:
     {
       auto old_lb = int32_t{0};
-      for_aset(env, state, inst.src(0), [&] (ASetID asetID) {
+      if_aset(env, inst.src(0), [&] (ASetID asetID) {
+        auto& aset = state.asets[asetID];
+        if (inst.op() == DecRefNZ && aset.lower_bound < 2) {
+          FTRACE(3, "    {} unsupported_refs += {}\n",
+                 asetID, 2 - aset.lower_bound);
+          assertx(aset.unsupported_refs <= aset.lower_bound);
+          aset.unsupported_refs += 2 - aset.lower_bound;
+          aset.lower_bound = 2;
+          state.has_unsupported_refs = true;
+        }
         add_node(asetID, NDec{&inst});
-        old_lb = state.asets[asetID].lower_bound;
+        old_lb = aset.lower_bound;
         may_decref(env, state, asetID, add_node);
       });
       if (old_lb <= 1) analyze_mem_effects(env, inst, state, add_node);
     }
     return;
-  case DefInlineFP:
-    // We're converting a pre-live actrec to a live actrec, which effectively
-    // changes some stack AliasClasses to not exist anymore.  See comments in
-    // pure_spill_frame for an explanation of why we don't need any support
-    // bits on this now.
-    drop_support_bits(env, state,
-      env.ainfo.expand(canonicalize(inline_fp_frame(&inst))));
-    break;
   default:
+    if (!irrelevant_inst(inst)) {
+      observe_unbalanced_decrefs(env, state, add_node);
+    }
     break;
   }
 
@@ -2093,7 +2266,7 @@ void rc_analyze_inst(Env& env,
    */
   for (auto srcID = uint32_t{0}; srcID < inst.numSrcs(); ++srcID) {
     if (observes_reference(inst, srcID)) {
-      for_aset(env, state, inst.src(srcID), [&] (ASetID asetID) {
+      if_aset(env, inst.src(srcID), [&] (ASetID asetID) {
         observe(env, state, asetID, add_node);
       });
     }
@@ -2110,7 +2283,7 @@ void rc_analyze_inst(Env& env,
   if (auto const taken = inst.taken()) {
     for (auto srcID = uint32_t{0}; srcID < inst.numSrcs(); ++srcID) {
       if (consumes_reference_taken(inst, srcID)) {
-        for_aset(env, state, inst.src(srcID), [&] (ASetID asetID) {
+        if_aset(env, inst.src(srcID), [&] (ASetID asetID) {
           may_decref(env, state, asetID, add_node);
         });
       }
@@ -2130,7 +2303,18 @@ void rc_analyze_inst(Env& env,
   for (auto srcID = uint32_t{0}; srcID < inst.numSrcs(); ++srcID) {
     if (consumes_reference_next_not_taken(inst, srcID)) {
       assertx(!consumes_reference_taken(inst, srcID));
-      for_aset(env, state, inst.src(srcID), [&] (ASetID asetID) {
+      if_aset(env, inst.src(srcID), [&] (ASetID asetID) {
+        if (inst.movesReference(srcID)) {
+          auto& aset = state.asets[asetID];
+          if (!aset.lower_bound) {
+            aset.lower_bound = aset.unsupported_refs = 1;
+            state.has_unsupported_refs = true;
+          } else if (aset.lower_bound > aset.unsupported_refs) {
+            aset.unsupported_refs++;
+            state.has_unsupported_refs = true;
+          }
+          return;
+        }
         may_decref(env, state, asetID, add_node);
       });
     }
@@ -2141,60 +2325,24 @@ void rc_analyze_inst(Env& env,
    * defines corresponds to a new increment on the lower_bound.
    */
   if (inst.producesReference()) {
-    for_aset(env, state, inst.dst(), [&] (ASetID asetID) {
+    if_aset(env, inst.dst(), [&] (ASetID asetID) {
       auto& aset = state.asets[asetID];
       ++aset.lower_bound;
       FTRACE(3, "    {} produced: lb {}\n", asetID, aset.lower_bound);
-    });
-  }
-
-  /*
-   * We assume that LdCtx on the main frame requires that the $this pointer has
-   * a non-zero reference count, without any need for memory support.  The
-   * reason for this is that nothing is allowed to DecRef the context of a
-   * frame, except code that tears down that frame (either via a return or
-   * unwinding).
-   *
-   * If this IR program contains a return sequence, it might DecRef the frame
-   * context below one (possibly freeing it).  It is legal IR to have a LdCtx
-   * after this sort of decref, but it would be a semantically incorrect
-   * program if it does anything with the context after loading it that cares
-   * about whether it's freed.  So we're safe assuming any load of the context
-   * has a lower bound of one, because if it is loaded in a program position
-   * where that doesn't hold, the program can't do anything that cares about
-   * that without being broken already.
-   *
-   * One final note: because of the exclusivity rule on lower bounds, we cannot
-   * assume a lower bound of one for a LdCtx unless it comes from the main
-   * frame.  We are guaranteed (from find_alias_sets) that all the main frame
-   * contexts are in the same must alias set, but the value stored to an
-   * inlined frame may be in a different must alias set than the inlined LdCtx
-   * set, and its lower bound could still be non-zero.  In practice, we expect
-   * to rarely see LdCtx instructions inside of an inlined function---normally
-   * the actual context object should be copy propagated.
-   */
-  if (inst.is(LdCtx) && inst.src(0) == env.unit.mainFP()) {
-    for_aset(env, state, inst.dst(), [&] (ASetID asetID) {
-      auto& aset = state.asets[asetID];
-      aset.lower_bound = std::max(aset.lower_bound, 1);
-      FTRACE(3, "    {} lb: {}\n", asetID, aset.lower_bound);
     });
   }
 }
 
 /*
  * This is the per-instruction analyze routine for rc_analyze, also used for
- * build_graphs.
- *
- * The NAdder function controls whether it's actually building a graph or just
- * performing analysis.
+ * pre_local_transfer.
  */
-template<class Propagate, class NAdder>
+template<class Propagate>
 void rc_analyze_step(Env& env,
                      IRInstruction& inst,
                      RCState& state,
                      Propagate propagate,
-                     NAdder add_node) {
+                     PreAdder add_node) {
   rc_analyze_inst(env, inst, state, propagate, add_node);
   // Note: we could use the gen set here to remove support entries when we step
   // the mrinfo, but it's not useful because only CallEffects causes it right
@@ -2205,9 +2353,64 @@ void rc_analyze_step(Env& env,
 
 //////////////////////////////////////////////////////////////////////
 
-struct EmptyAdder {
-  template<class T> void operator()(ASetID, const T&) const {}
-};
+/*
+ * Find the fixed point. If reprocess is non-null, add each block we
+ * process to it.
+ */
+void rc_analyze_worklist(Env& env,
+                         RCAnalysis& rca,
+                         dataflow_worklist<uint32_t>& incompleteQ,
+                         std::set<uint32_t>* reprocess) {
+  std::set<const Block*> reinited;
+  do {
+    auto const id = incompleteQ.pop();
+    if (reprocess) reprocess->insert(id);
+    auto const blk = env.rpoBlocks[id];
+    FTRACE(2, "B{}:\n", blk->id());
+    auto state = rca.info[blk].state_in;
+
+    auto propagate = [&] (Block* target) {
+      FTRACE(2, "   -> {}\n", target->id());
+      auto& tinfo = rca.info[target];
+      if (target->numPreds() == 1) {
+        // With a single predecessor tinfo.state_in should always
+        // simply be a copy of state. Special casing this will give
+        // better results than merging when we've made changes to blk
+        // or its preds.
+        if (!is_same(tinfo.state_in, state)) {
+          tinfo.state_in = state;
+          incompleteQ.push(tinfo.rpoId);
+        }
+        return;
+      }
+
+      if (reprocess && reinited.insert(target).second) {
+        // When we're reprocessing a set of blocks that have been
+        // modified, we need to restart the analysis of their
+        // successors, to ensure they get the most refined info
+        // possible. We could optimize this by storing the out states
+        // for each block - but that would cost a lot of memory
+        // (potentially two out states for each block).
+        FTRACE(2, "   re-init B{}\n", target->id());
+        tinfo.state_in = state;
+        incompleteQ.push(tinfo.rpoId);
+        target->forEachPred(
+          [&] (Block* pred) {
+            if (pred != blk) incompleteQ.push(rca.info[pred].rpoId);
+          }
+        );
+        return;
+      }
+      auto const changed = merge_into(env, tinfo.state_in, state);
+      if (changed) incompleteQ.push(tinfo.rpoId);
+    };
+
+    for (auto& inst : blk->instrs()) {
+      rc_analyze_step(env, inst, state, propagate, PreAdder{});
+    }
+    if (auto const next = blk->next()) propagate(next);
+  } while (!incompleteQ.empty());
+}
 
 RCAnalysis rc_analyze(Env& env) {
   FTRACE(1, "rc_analyze -----------------------------------------\n");
@@ -2231,26 +2434,7 @@ RCAnalysis rc_analyze(Env& env) {
    */
   ret.info[env.rpoBlocks[0]].state_in = entry_rc_state(env);
 
-  /*
-   * Find fixed point.
-   */
-  do {
-    auto const blk = env.rpoBlocks[incompleteQ.pop()];
-    FTRACE(2, "B{}:\n", blk->id());
-    auto state = ret.info[blk].state_in;
-
-    auto propagate = [&] (Block* target) {
-      FTRACE(2, "   -> {}\n", target->id());
-      auto& tinfo = ret.info[target];
-      auto const changed = merge_into(env, tinfo.state_in, state);
-      if (changed) incompleteQ.push(tinfo.rpoId);
-    };
-
-    for (auto& inst : blk->instrs()) {
-      rc_analyze_step(env, inst, state, propagate, EmptyAdder{});
-    }
-    if (auto const next = blk->next()) propagate(next);
-  } while (!incompleteQ.empty());
+  rc_analyze_worklist(env, ret, incompleteQ, nullptr);
 
   return ret;
 }
@@ -2282,1041 +2466,936 @@ DEBUG_ONLY std::string show_analysis(Env& env, const RCAnalysis& analysis) {
 
 //////////////////////////////////////////////////////////////////////
 
-DEBUG_ONLY bool direct_successor(Node* n, Node* succ) {
-  return n->next == succ || (n->type == NT::Sig && to_sig(n)->taken == succ);
-}
-
-bool is_phi_pred(const NPhi* phi, Node* pred) {
-  auto const last = phi->pred_list + phi->pred_list_sz;
-  return std::find(phi->pred_list, last, pred) != last;
-}
-
-void add_phi_pred(Env& env, NPhi* nphi, Node* pred) {
-  assertx(direct_successor(pred, nphi));
-  auto const phi = to_phi(nphi);
-  if (phi->pred_list_sz + 1 >= phi->pred_list_cap) {
-    ++phi->pred_list_cap;
-    auto const new_list = new (env.arena) Node*[phi->pred_list_cap];
-    std::copy(phi->pred_list, phi->pred_list + phi->pred_list_sz, new_list);
-    phi->pred_list = new_list;
-  }
-  phi->pred_list[phi->pred_list_sz++] = pred;
-}
-
-void rm_phi_pred(NPhi* phi, Node* n) {
-  assertx(is_phi_pred(phi, n));
-
-  // Only remove the first occurance of "n".  (A Sig node may be a predecessor
-  // of the same Phi more than once.)
-  auto const last = phi->pred_list + phi->pred_list_sz;
-  auto const it = std::find(phi->pred_list, last, n);
-  *it = last[-1];  // may self-assign if size is 1, but that's ok.
-  --phi->pred_list_sz;
-}
-
 /*
- * Replace one of the `first' Node's successor pointers to `current' with
- * `replace'
- *
- * Pre: direct_successor(first, current)
+ * sink_incs() is a simple pass that sinks IncRefs of values that may
+ * be uncount past some safe instructions.  These are instructions
+ * that cannot observe the reference count and so we can sink IncRefs
+ * across them regardless of their lower bounds.  The goal is to sink
+ * IncRefs past Check* and Assert* instructions that may provide
+ * further type information to enable more specialized IncRefs (or
+ * even completely eliminate them).
  */
-void rechain_forward(Node* first, Node* current, Node* replace) {
-  assertx(direct_successor(first, current));
-  if (first->next == current) {
-    first->next = replace;
-    return;
-  }
-  always_assert(first->type == NT::Sig && to_sig(first)->taken == current);
-  to_sig(first)->taken = replace;
-}
 
-/*
- * Given a sequence of nodes in the graph:
- *
- *     pred  --->  middle  --->  last
- *
- * Mutate the pointers so that middle is unlinked, and last succeeds pred in
- * the same way that middle did.  (That is to say, if pred->next is middle,
- * pred->next will become last, and if pred->taken is middle, pred->taken will
- * become last.)  Handles Phi nodes in any of the three positions.
- *
- * Note that the number of predecessors of both types (backedge or normal) on a
- * Phi node in last or pred is conserved under this operation.
- *
- * Requires that middle has no other nodes attached to it.  (I.e. it has no
- * predecessors other than `pred', and no successors other than `last'.)  This
- * means middle can't be a Sig unless one of it's next or taken pointers is
- * nullptr.
- *
- * Pre:  direct_successor(pred, middle)
- *       direct_successor(middle, last)
- *
- * Post: direct_successor(pred, last) and middle is unlinked entirely
- */
-void node_skip_over(Env& env, Node* pred, Node* middle, Node* last) {
-  assertx(direct_successor(pred, middle));
-  assertx(direct_successor(middle, last));
-  assertx(middle->type != NT::Sig ||
-    (middle->next == nullptr || to_sig(middle)->taken == nullptr));
+bool can_sink_inc_through(const IRInstruction& inst) {
+  switch (inst.op()) {
+    // these refine the type
+    case AssertType:
+    case AssertLoc:
+    case AssertStk:  return true;
 
-  // Unlink middle node.
-  if (last->type == NT::Phi) {
-    rm_phi_pred(to_phi(last), middle);
-  } else {
-    if (debug) last->prev = nullptr;
-  }
-  if (middle->type == NT::Phi) {
-    rm_phi_pred(to_phi(middle), pred);
-  } else {
-    middle->prev = nullptr;
-    middle->next = nullptr;
-  }
+    // these commonly occur along with type guards
+    case LdLoc:
+    case LdStk:
+    case BeginInlining:
+    case DefInlineFP:
+    case InlineReturn:
+    case InlineSuspend:
+    case InlineReturnNoFrame:
+    case FinishMemberOp:
+    case Nop:        return true;
 
-  // Rechain prev's forward pointer from pred to last.
-  rechain_forward(pred, middle, last);
-
-  // Set backward pointers from last to pred.
-  if (last->type == NT::Phi) {
-    add_phi_pred(env, to_phi(last), pred);
-  } else {
-    last->prev = pred;
+    default:         return false;
   }
 }
 
-/*
- * Allocate and insert a new node between two adjacent nodes, returning the new
- * node, handling backlinking appropriately.  Either node may be an NT::Phi,
- * but the new node may not be a Phi.
- *
- * Pre: direct_successor(pred, succ)
- */
-template<class T>
-Node* add_between(Env& env,
-                  Node* pred,
-                  Node* succ,
-                  const T& new_data) {
-  assertx(direct_successor(pred, succ));
-  auto const new_node = new (env.arena) T(new_data);
-  assertx(new_node->type != NT::Phi);
+void sink_incs(Env& env) {
+  FTRACE(2, "sink_incs ---------------------------------\n");
+  jit::vector<IRInstruction*> incs;
 
-  // Unlink backward pointers.
-  if (succ->type == NT::Phi) {
-    rm_phi_pred(to_phi(succ), pred);
-  } else {
-    if (debug) succ->prev = nullptr;
-  }
-
-  // Add forward pointers.
-  rechain_forward(pred, succ, new_node);
-  new_node->next = succ;
-
-  // Add backward pointers.
-  if (succ->type == NT::Phi) {
-    add_phi_pred(env, to_phi(succ), new_node);
-  } else {
-    succ->prev = new_node;
-  }
-  new_node->prev = pred;
-
-  return new_node;
-}
-
-//////////////////////////////////////////////////////////////////////
-
-std::string show(const Node* node) {
-  using folly::sformat;
-  return sformat(
-    "{} - {}",
-    [&] () -> std::string {
-      switch (node->type) {
-      case NT::Empty:   return "empty";
-      case NT::Halt:    return "halt";
-      case NT::Sig:     return u8"\u03c3";
-      case NT::Dec:     return sformat("dec({})", to_dec(node)->inst->id());
-      case NT::Phi:
-        return sformat(u8"\u03c6({},{})", to_phi(node)->pred_list_sz,
-          to_phi(node)->back_edge_preds);
-      case NT::Inc:
-        return sformat("inc({})", to_inc(node)->inst->id());
-      case NT::Req:
-        return to_req(node)->level == std::numeric_limits<int32_t>::max()
-          ? "req!"
-          : sformat("req{}", to_req(node)->level);
-      }
-      not_reached();
-    }(),
-    node->lower_bound
-  );
-}
-
-void find_nodes(jit::vector<Node*>& accum,
-                jit::hash_set<Node*>& seen,
-                Node* n) {
-  if (n == nullptr || seen.count(n)) return;
-  accum.push_back(n);
-  seen.insert(n);
-  if (n->type == NT::Sig) find_nodes(accum, seen, to_sig(n)->taken);
-  find_nodes(accum, seen, n->next);
-}
-
-std::string graph_dot_nodes(SSATmp* representative, size_t graph_id, Node* g) {
-  auto ret = std::string{};
-  auto nodes = jit::vector<Node*>{};
-  auto seen = jit::hash_set<Node*>{};
-  find_nodes(nodes, seen, g);
-
-  static const bool debug_back_links = getenv("RC_GRAPH_BACKLINKS");
-  constexpr int node_id_shift = 8;
-
-  jit::hash_map<Node*,uint32_t> node_to_id;
-  for (auto idx = uint32_t{0}; idx < nodes.size(); ++idx) {
-    node_to_id[nodes[idx]] = (idx + 1) << node_id_shift | graph_id;
-  }
-
-  folly::format(
-    &ret,
-    "N{} [shape=box,label=\"t{} :: {}\"]; "
-      "node [shape=plaintext]; N{} -> N{};\n",
-    graph_id,
-    representative->id(),
-    representative->type().toString(),
-    graph_id,
-    1 << node_id_shift | graph_id
-  );
-
-  for (auto idx = uint32_t{0}; idx < nodes.size(); ++idx) {
-    auto const n = nodes[idx];
-    auto const node_num = (idx + 1) << node_id_shift | graph_id;
-
-    folly::format(&ret, "N{} [label=\"{}\"];", node_num, show(n));
-
-    if (n->next) {
-      folly::format(&ret, " N{} -> N{};", node_num, node_to_id[n->next]);
-      assertx(n->next->type == NT::Phi || n->next->prev == n);
-    }
-
-    if (debug_back_links && n->prev) {
-      folly::format(&ret, " N{} -> N{} [color=cyan];", node_num,
-        node_to_id[n->prev]);
-    }
-
-    if (n->type == NT::Sig && to_sig(n)->taken) {
-      folly::format(&ret, " N{} -> N{} [color=green]", node_num,
-        node_to_id[to_sig(n)->taken]);
-    }
-
-    if (debug_back_links && n->type == NT::Phi) {
-      for (auto pred_i = uint32_t{0};
-           pred_i < to_phi(n)->pred_list_sz;
-           ++pred_i) {
-        auto const pred = to_phi(n)->pred_list[pred_i];
-        if (debug_back_links) {
-          folly::format(&ret, "N{} -> N{} [color=red];\n",
-            node_num, node_to_id[pred]);
-        }
-      }
-    }
-
-    folly::format(&ret, "\n");
-  }
-
-  return ret;
-}
-
-std::string graphs_dot_string(const jit::vector<MustAliasSet>& asets,
-                              const jit::vector<Node*>& heads) {
-  assertx(asets.size() == heads.size());
-  auto ret = std::string{};
-  ret = "digraph G {\n";
-  for (auto graph_id = size_t{0}; graph_id < heads.size(); ++graph_id) {
-    ret += graph_dot_nodes(
-      asets[graph_id].representative,
-      graph_id,
-      heads[graph_id]
-    );
-  }
-  ret.push_back('}');
-  ret.push_back('\n');
-  return ret;
-}
-
-DEBUG_ONLY std::string show_graphs(const jit::vector<MustAliasSet>& asets,
-                        const jit::vector<Node*>& heads) {
-  char fileBuf[] = "/tmp/hhvmXXXXXX";
-  int fd = mkstemp(fileBuf);
-  if (fd == -1) {
-    return folly::sformat("couldn't open temporary file: {}\n",
-      folly::errnoStr(errno));
-  }
-  SCOPE_EXIT { close(fd); };
-  auto file = fdopen(fd, "w");
-  std::fprintf(file, "%s", graphs_dot_string(asets, heads).c_str());
-  std::fflush(file);
-  return folly::sformat("dot -T xlib < {} &\n", fileBuf);
-}
-
-//////////////////////////////////////////////////////////////////////
-
-bool check_graph(Node* graph) {
-  auto nodes = jit::vector<Node*>{};
-  auto seen = jit::hash_set<Node*>{};
-  find_nodes(nodes, seen, graph);
-
-  for (auto& n : nodes) {
-    always_assert(n->lower_bound >= 0);
-
-    if (n->prev) {
-      always_assert(direct_successor(n->prev, n));
-    }
-
-    if (n->next) {
-      if (n->next->type == NT::Phi) {
-        always_assert(is_phi_pred(to_phi(n->next), n));
-      } else {
-        always_assert(n->next->prev == n);
-      }
-    }
-
-    switch (n->type) {
-    case NT::Inc:
-      always_assert(to_inc(n)->inst->is(IncRef));
-      break;
-    case NT::Dec:
-      always_assert(to_dec(n)->inst->is(DecRef, DecRefNZ));
-      break;
-    case NT::Phi:
-      always_assert(to_phi(n)->block != nullptr);
-      // At least one predecessor.  Normally there's two, but some of the
-      // clean_graphs code can create single predecessor phis (it also has
-      // rules to clean those up, but we'd rather have cleaning those up be
-      // optional instead of required as an invariant).
-      always_assert(to_phi(n)->pred_list_sz >= 1);
-      // At least one non-back edge predecessor.
-      always_assert(to_phi(n)->back_edge_preds < to_phi(n)->pred_list_sz);
-      // Size is always <= capacity.
-      always_assert(to_phi(n)->pred_list_sz <= to_phi(n)->pred_list_cap);
-      // Each pred has a forward link to the phi.
-      for (auto i = uint32_t{0}; i < to_phi(n)->pred_list_sz; ++i) {
-        auto const pred = to_phi(n)->pred_list[i];
-        always_assert(pred != nullptr);
-        always_assert(direct_successor(pred, n));
-      }
-      break;
-    case NT::Sig:
-      always_assert(to_sig(n)->block != nullptr);
-      if (auto const taken = to_sig(n)->taken) {
-        if (taken->type == NT::Phi) {
-          always_assert(is_phi_pred(to_phi(taken), n));
-        } else {
-          always_assert(taken->prev == n);
-        }
-      }
-      break;
-    case NT::Req:
-      // We should never have Req{0} nodes.
-      always_assert(to_req(n)->level >= 1);
-      break;
-    case NT::Empty:
-    case NT::Halt:
-      break;
-    }
-  }
-  return true;
-}
-
-DEBUG_ONLY bool check_graphs(const jit::vector<Node*>& graphs) {
-  for (auto& g : graphs) always_assert(check_graph(g));
-  return true;
-}
-
-//////////////////////////////////////////////////////////////////////
-
-void do_clean_graph(Env& env,
-                    jit::queue<std::pair<Node*,Node*>>& workQ,
-                    jit::hash_set<Node*>& seen_set,
-                    bool& changed,
-                    Node* prev,
-                    Node* cur) {
-  while (cur != nullptr) {
-    switch (cur->type) {
-    case NT::Req:
-    case NT::Inc:
-    case NT::Dec:
-    case NT::Halt:
-      // Normal nodes that we just keep
-      prev = cur;
-      cur = cur->next;
-      continue;
-
-    case NT::Phi:
-      if (seen_set.count(cur)) {
-        // Don't reprocess the phi.
-        return;
-      }
-      if (to_phi(cur)->pred_list_sz == 1 &&
-          to_phi(cur)->back_edge_preds == 0) {
-        auto const next = cur->next;
-        node_skip_over(env, prev, cur, next);
-        changed = true;
-        cur = next;
-        continue;
-      }
-      seen_set.insert(cur);
-      prev = cur;
-      cur = cur->next;
-      continue;
-
-    case NT::Sig:
-      {
-        auto const next = cur->next;
-        auto const taken = to_sig(cur)->taken;
-        if (next == nullptr && taken != nullptr) {
-          node_skip_over(env, prev, cur, taken);
-          changed = true;
-          cur = taken;
-          continue;
-        }
-        if (next != nullptr && taken == nullptr) {
-          node_skip_over(env, prev, cur, next);
-          changed = true;
-          cur = next;
-          continue;
-        }
-        if (next == taken && next != nullptr) {
-          assertx(next->type == NT::Phi);
-          auto const phi = to_phi(next);
-          // We only apply this rule when it isn't a back_edge_preds because we
-          // always want a Phi involved in loops.
-          if (phi->pred_list_sz == 2 && phi->back_edge_preds == 0) {
-            rm_phi_pred(phi, cur); // Leaving one of the preds.
-            assertx(is_phi_pred(phi, cur));
-            static_assert(sizeof(NEmpty) < sizeof(NPhi), "");
-            cur->type = NT::Empty;          // Let the empty rule remove it.
-            changed = true;
-            continue;
-          }
-        }
-
-        // Schedule taken for later, and continue doing the next path now.
-        assertx(taken && next);
-        workQ.emplace(cur, taken);
-        prev = cur;
-        cur = next;
-        continue;
-      }
-
-    case NT::Empty:
-      if (prev && cur->next) {
-        auto const next = cur->next;
-        node_skip_over(env, prev, cur, next);
-        changed = true;
-        cur = next;
-        continue;
-      }
-      prev = cur;
-      cur = cur->next;
-      continue;
-    }
-
-    always_assert(0);
-  }
-}
-
-Node* clean_graph(Env& env, Node* head) {
-  // Only used for phi nodes, to avoid processing them more than once.
-  auto seen_set = jit::hash_set<Node*>{};
-
-  // When we see control flow splits, we need want to process both paths.  We
-  // use this workQ containing (prev, cur) to delay one side.
-  auto workQ = jit::queue<std::pair<Node*,Node*>>{};
-
-  bool changed;
-  do {
-    changed = false;
-    assertx(workQ.empty());
-    workQ.emplace(nullptr, head);
-    do {
-      Node* prev;
-      Node* cur;
-      std::tie(prev, cur) = workQ.front();
-      workQ.pop();
-      do_clean_graph(env, workQ, seen_set, changed, prev, cur);
-    } while (!workQ.empty());
-  } while (changed);
-
-  return head;
-}
-
-jit::vector<Node*> clean_graphs(Env& env, jit::vector<Node*> heads) {
-  for (auto& h : heads) h = clean_graph(env, h);
-  return heads;
-}
-
-//////////////////////////////////////////////////////////////////////
-
-using ChainProgress = jit::vector<Node*>;
-using Incoming      = jit::vector<ChainProgress>;
-
-void add_node(const RCState& state,
-              ChainProgress& chains,
-              int32_t asetID,
-              Node* node) {
-  node->lower_bound = state.asets[asetID].lower_bound;
-  if (node->type != NT::Phi && node->type != NT::Sig) {
-    FTRACE(2, "      {} += {}\n", asetID, show(node));
-  }
-  auto& tail = chains[asetID];
-  tail->next = node;
-  node->prev = tail;
-  tail = node;
-}
-
-struct NodeAdder {
-  explicit NodeAdder(Env& env, RCState& state, ChainProgress& chains)
-    : env(env)
-    , state(state)
-    , chains(chains)
-  {}
-
-  template<class NodeT>
-  void operator()(ASetID asetID, const NodeT& n) const {
-    add_node(state, chains, asetID, new (env.arena) NodeT{n});
-  }
-
-  void operator()(ASetID asetID, const NReq& req) const {
-    auto& tail = chains[asetID];
-    if (tail->type == NT::Req) {
-      // Combine adjacent Req nodes.
-      to_req(tail)->level = std::max(to_req(tail)->level, req.level);
-      tail->lower_bound = std::min(
-        tail->lower_bound,
-        state.asets[asetID].lower_bound
-      );
-      FTRACE(2, "      {} += combining req {}\n", asetID, show(tail));
-      return;
-    }
-    add_node(state, chains, asetID, new (env.arena) NReq{req});
-  }
-
-private:
-  Env& env;
-  RCState& state;
-  ChainProgress& chains;
-};
-
-jit::vector<Node*> make_heads(Env& env) {
-  auto ret = ChainProgress{};
-  ret.resize(env.asets.size());
-  for (auto& n : ret) {
-    n = new (env.arena) NEmpty{};
-  }
-  return ret;
-}
-
-ChainProgress merge_incoming(Env& env,
-                             const RCState& state,
-                             Block* blk,
-                             const Incoming& incoming) {
-  assertx(!incoming.empty());
-  auto ret = ChainProgress{};
-  ret.resize(env.asets.size());
-  auto const incoming_sz = safe_cast<uint32_t>(incoming.size());
-  for (auto asetID = uint32_t{0}; asetID < env.asets.size(); ++asetID) {
-    auto const phi = new (env.arena) NPhi{blk};
-    phi->pred_list = new (env.arena) Node*[incoming_sz];
-    phi->pred_list_cap = incoming_sz;
-    phi->lower_bound = state.asets[asetID].lower_bound;
-    ret[asetID] = phi;
-    for (auto& inc : incoming) {
-      inc[asetID]->next = phi;
-      add_phi_pred(env, phi, inc[asetID]);
-    }
-  }
-  return ret;
-}
-
-template<class T>
-void add_node_all(Env& env,
-                  const RCState& state,
-                  ChainProgress& chains,
-                  const T& data) {
-  for (auto asetID = uint32_t{0}; asetID < env.asets.size(); ++asetID) {
-    add_node(state, chains, asetID, new (env.arena) T(data));
-  }
-}
-
-//////////////////////////////////////////////////////////////////////
-
-jit::vector<Node*> build_graphs(Env& env, const RCAnalysis& analysis) {
-  FTRACE(1, "build_graphs -----------------------------------------\n");
-
-  StateVector<Block,Incoming> incoming(env.unit, Incoming{});
-  auto pending_phis = sparse_idptr_map<Block,ChainProgress>(
-    env.unit.numBlocks()
-  );
-
-  auto heads = make_heads(env);
-
+  // Find all IncRefs in the unit.
   for (auto& blk : env.rpoBlocks) {
-    FTRACE(2, "B{}:\n", blk->id());
-
-    bool const missing_back_edges = incoming[blk].size() != blk->numPreds();
-    auto state = analysis.info[blk].state_in;
-    auto chains =
-      blk == env.rpoBlocks.front() ? heads :
-      !missing_back_edges &&
-        incoming[blk].size() == 1 ? incoming[blk].front() :
-      merge_incoming(env, state, blk, incoming[blk]);
-    if (missing_back_edges) {
-      pending_phis[blk] = chains;
-      if (debug) {
-        for (auto& n : pending_phis[blk]) always_assert(n->type == NT::Phi);
+    for (auto& inst : *blk) {
+      if (inst.is(IncRef)) {
+        incs.push_back(&inst);
       }
     }
+  }
 
-    auto node_adder = NodeAdder{env, state, chains};
-    for (auto& inst : blk->instrs()) {
-      auto propagate = [&] (Block* target) {
-        add_node_all(env, state, chains, NSig{blk});
+  // Process each of the IncRefs, including new ones that are created
+  // along the way.
+  while (!incs.empty()) {
+    auto inc = incs.back();
+    incs.pop_back();
 
-        if (!pending_phis.contains(target)) {
-          incoming[target].push_back(chains);
-          auto asetID = uint32_t{0};
-          for (auto& ch : incoming[target].back()) {
-            auto const sig = ch;
-            auto const empty = new (env.arena) NEmpty{};
-            to_sig(sig)->taken = empty;
-            empty->prev = sig;
-            empty->lower_bound = state.asets[asetID].lower_bound;
-            ch = empty;
-            ++asetID;
+    auto block  = inc->block();
+    auto bcctx  = inc->bcctx();
+    auto tmp    = inc->src(0);
+    if (!tmp->type().maybe(TUncounted)) continue;
+
+    auto iter = block->iteratorTo(inc);
+    auto iterOrigSucc = ++iter;
+    while (can_sink_inc_through(*iter)) {
+      iter++;
+    }
+
+    auto const& succ = *iter;
+    if (succ.is(CheckType, CheckLoc, CheckStk,
+                CheckMBase, CheckVArray, CheckDArray)) {
+      // We've split critical edges, so `next' and 'taken' blocks can't have
+      // other predecessors.  Therefore, `block' dominates both the 'next' and
+      // the 'taken' block, and so does the block defining `tmp'.
+      assertx(block->taken()->numPreds() == 1);
+      assertx(block->next()->numPreds() == 1);
+      auto const new_taken = env.unit.gen(IncRef, bcctx, tmp);
+      auto const new_next  = env.unit.gen(IncRef, bcctx, tmp);
+      block->taken()->prepend(new_taken);
+      block->next()->prepend(new_next);
+      incs.push_back(new_taken);
+      incs.push_back(new_next);
+      FTRACE(2, "    ** sink_incs: {} -> {}, {}\n",
+             *inc, *new_taken, *new_next);
+      remove_helper(env.unit, inc);
+
+    } else if (succ.is(Jmp)) {
+      // try to sink through trivial jumps (to blocks with one predecessor)
+      assertx(block->taken() != nullptr);
+      if (block->taken()->numPreds() > 1) continue;
+
+      auto const new_taken = env.unit.gen(IncRef, bcctx, tmp);
+      block->taken()->prepend(new_taken);
+      incs.push_back(new_taken);
+      FTRACE(2, "    ** sink_incs: {} -> {}\n", *inc, *new_taken);
+      remove_helper(env.unit, inc);
+
+    } else if (iter != iterOrigSucc) {
+      // insert the inc right before succ if we advanced any instruction
+      auto const new_inc = env.unit.gen(IncRef, bcctx, tmp);
+      block->insert(iter, new_inc);
+      FTRACE(2, "    ** sink_incs: {} -> {}\n", *inc, *new_inc);
+      remove_helper(env.unit, inc);
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////////////
+// Partial redundancy elimination of IncRef/DecRef pairs
+//
+// This pass chooses a direction - either look for Incs followed by
+// Decs or Decs followed by Incs. It then computes availability for
+// the kind that comes first, and anticipability for the kind that
+// comes second. Lets assume we're doing Incs follwed by Decs.
+//
+// An I is partially redundant if it's locally available, and
+// partially anticipated out, because on some of the paths from here
+// to the exit of the region there is a D with no interference in
+// between. Similarly a D is partially redundant if it's locally
+// anticipated, and partially available in.
+//
+// Note that being partially redundant doesn't necessarily mean we can
+// improve things - eg in the following case, both I and D are
+// partially redundant, but we would have to insert both a D and an I
+// to make them redundant; and then we could redo the optimization to
+// put things back to how they started.
+//
+//  AntLoc +---+     +---+
+//  AntIn  | D |     |   |
+//  PavlIn +---+     +---+ PavlIn
+//           ^         ^
+//            \       /
+//             \     /
+//              \   /
+//      PantOut +---+
+//      PantIn  |   |
+//      PavlIn  +---+
+//                |
+//      PantOut +---+
+//      PantIn  |   |
+//      PavlIn  +---+
+//               ^ ^
+//              /   \
+//             /     \
+//            /       \
+// PantOut +---+     +---+ PantOut
+// AvlOut  | I |     |   |
+// AvlLoc  +---+     +---+
+//
+// Generally, if we have a partially redundant D we can recursively
+// walk its predecessors stopping when we find a place where its fully
+// redundant, or where we can insert a D that isn't partially
+// redundant, or where we can't insert the D because the SSATmp isn't
+// defined, or the D isn't anticipated. If we hit the last case, we
+// have to give up on that D, and mark it altered, and not AntIn in
+// its block, propagate the attributes again, and start over (which
+// may then cause previously redundant Is to be no longer
+// redundant). Otherwise the walk must bottom out somewhere in one of
+// the other two cases. Anywhere its fully redundant there's nothing
+// to do; if its AntOut and PavlIn in at least one successor, we can
+// insert a copy.
+//
+// A couple of examples:
+//
+// AntLoc +---+     +---+ AntLoc        The Ds are partially redundant,
+// AntIn  | D |     | D | AntIn    <--  and we can insert a D to make
+// PavlIn +---+     +---+ PavlIn        them fully redundant, so we can
+//          ^         ^                 delete them.
+//           \       /
+//            \     /
+//             \   /
+//      AntOut +---+
+//      AntIn  |   |
+//      PavlIn +---+
+//               |
+//      AntOut +---+
+//      AntIn  |   |
+//      PavlIn +---+
+//              ^ ^
+//             /   \
+//            /     \
+//           /       \
+// AntOut +---+     +---+ AntOut      D is AntOut, and I is PavlIn
+// AvlOut | I |     |   |         <-- in its successor, so insert D
+// AvlLoc +---+     +---+             here. The I is already fully
+//                                    redundant, so delete it.
+//
+//
+// AntLoc  +---+
+// AntIn   | D |   <-- D is fully redundant, so delete it.
+// AvlIn   +---+
+//           ^          +---+          I is AvlIn, and D is PantOut
+//           |        ->|   |     <--  in its predecessor, so insert
+//           |      /   +---+ AvlIn    I here.
+//           |    /
+//           |  /
+// PantOut +-+-+
+// PantIn  |   |        +---+          I is AvlIn, and D is PantOut
+// AvlIn   +---+      ->|   |     <--  in its predecessor, so insert
+//           ^      /   +---+ AvlIn    I here.
+//           |    /
+//           |  /
+// PantOut +-+-+
+// PantIn  |   |
+// AvlIn   +---+
+//           ^
+//           |
+//           |
+// PantOut +-+-+        I is partially redundant, and can be
+// AvlOut  | I |   <--  made fully redundant by inserting above,
+// AvlLoc  +---+        so delete it.
+
+void pre_local_transfer(PreEnv& penv, bool incDec, Block* blk) {
+  FTRACE(3, "Blk(B{}) <-{}\n", blk->id(),
+         [&] {
+           std::string ret;
+           blk->forEachPred([&] (Block* pred) {
+               folly::format(&ret, " B{}", pred->id());
+             });
+           return ret;
+         }());
+  auto& s = penv.state[blk];
+  auto process = [&] (RCState state) {
+    PreAdderInfo adder{penv, s, state, incDec};
+    PreAdder preAdder{&adder};
+    for (auto iter = blk->begin(); iter != blk->end(); ++iter) {
+      auto& inst = *iter;
+      if (inst.is(DecRef)) {
+        auto const id = penv.env.asetMap[inst.src(0)];
+        if (id < 0) {
+          assertx(inst.src(0)->type() <= TUncounted);
+          FTRACE(3, "    ** kill uncounted inc/dec: {}\n", inst);
+          remove_helper(penv.env.unit, &inst);
+          continue;
+        }
+        if (state.asets[id].lower_bound >= 2) {
+          // take account of any unbalanced_decrefs that might mean
+          // that the lower bound is less than we think.
+          auto lb = state.asets[id].lower_bound;
+          for (auto const asetID : state.unbalanced_decrefs) {
+            for (auto may_id : penv.env.asets[asetID].may_alias) {
+              if (may_id == id) lb--;
+            }
           }
+          if (lb >= 2) {
+            FTRACE(2, "    ** decnz:  {}\n", inst);
+            inst.setOpcode(DecRefNZ);
+          }
+        }
+      }
+      rc_analyze_step(penv.env, inst, state, [&] (Block*) {}, preAdder);
+      if (adder.modified) return true;
+    }
+    return false;
+  };
+
+  while (process(penv.rca.info[blk].state_in)) {
+    s.avlLoc.reset();
+    s.antLoc.reset();
+    s.altLoc.reset();
+  }
+
+  if (blk->next()) {
+    FTRACE(4, "    -> B{}\n", blk->next()->id());
+  }
+}
+
+void pre_compute_available(PreEnv& penv) {
+  while (!penv.avlQ.empty()) {
+    auto& blk = penv.env.rpoBlocks[penv.avlQ.pop()];
+    auto& s = penv.state[blk];
+    auto first = true;
+    blk->forEachPred(
+      [&] (Block* pred) {
+        auto &ps = penv.state[pred];
+        if (first) {
+          s.avlIn.assign(ps.avlOut);
+          s.pavlIn.assign(ps.pavlOut);
+        } else {
+          s.avlIn &= ps.avlOut;
+          s.pavlIn |= ps.pavlOut;
+        }
+        first = false;
+      }
+    );
+    if (s.phiPropagate.any()) {
+      bitset_for_each_set(
+        s.phiPropagate,
+        [&] (int i) {
+          auto avl = true;
+          auto pavl = false;
+          blk->forEachPred(
+            [&] (Block* pred) {
+              auto const sid = lookup_aset(penv.env, pred->back().src(i));
+              if (!sid) return;
+              auto& ps = penv.state[pred];
+              if (!ps.avlOut.test(*sid)) avl = false;
+              if (ps.pavlOut.test(*sid)) pavl = true;
+            }
+          );
+          auto const id = lookup_aset(penv.env, blk->front().dst(i));
+          assertx(id);
+          if (avl) s.avlIn.set(*id);
+          if (pavl) s.pavlIn.set(*id);
+        }
+      );
+    }
+    auto changed = false;
+
+    penv.scratchBits.assign_sub(s.avlIn, s.altLoc);
+    penv.scratchBits |= s.avlLoc;
+    if (s.avlOut != penv.scratchBits) {
+      s.avlOut.assign(penv.scratchBits);
+      changed = true;
+    }
+
+    penv.scratchBits.assign_sub(s.pavlIn, s.altLoc);
+    penv.scratchBits |= s.avlLoc;
+    if (s.pavlOut != penv.scratchBits) {
+      s.pavlOut.assign(penv.scratchBits);
+      changed = true;
+    }
+    if (changed) {
+      auto propagate = [&] (Block* succ) {
+        if (!succ) return;
+        penv.avlQ.push(penv.state[succ].rpoId);
+      };
+      propagate(blk->next());
+      propagate(blk->taken());
+    }
+  }
+}
+
+void pre_compute_anticipated(PreEnv& penv) {
+  while (!penv.antQ.empty()) {
+    auto& blk = penv.env.rpoBlocks[penv.antQ.pop()];
+    auto& s = penv.state[blk];
+    auto first = true;
+    blk->forEachSucc(
+      [&] (Block* succ) {
+        auto &ss = penv.state[succ];
+        if (!first) {
+          s.antOut &= ss.antIn;
+          s.pantOut |= ss.pantIn;
           return;
         }
-
-        auto const& phis = pending_phis[target];
-        for (auto asetID = uint32_t{0}; asetID < chains.size(); ++asetID) {
-          auto const phi = phis[asetID];
-          to_sig(chains[asetID])->taken = phi;
-          ++to_phi(phi)->back_edge_preds;
-          add_phi_pred(env, to_phi(phi), chains[asetID]);
-        }
-      };
-
-      rc_analyze_step(env, inst, state, propagate, node_adder);
+        first = false;
+        s.antOut.assign(ss.antIn);
+        s.pantOut.assign(ss.pantIn);
+        if (!ss.phiPropagate.any()) return;
+        bitset_for_each_set(
+          ss.phiPropagate,
+          [&] (int i) {
+            auto const did = lookup_aset(penv.env, succ->front().dst(i));
+            assertx(did);
+            if (!ss.antIn.test(*did)) return;
+            auto const sid = lookup_aset(penv.env, blk->back().src(i));
+            if (!sid) return;
+            s.antOut.set(*sid);
+            s.pantOut.set(*sid);
+          }
+        );
+      }
+    );
+    penv.scratchBits.assign_sub(s.antOut, s.altLoc);
+    penv.scratchBits |= s.antLoc;
+    auto changed = false;
+    if (s.antIn != penv.scratchBits) {
+      s.antIn.assign(penv.scratchBits);
+      changed = true;
     }
-
-    if (auto const next = blk->next()) {
-      if (!pending_phis.contains(next)) {
-        incoming[next].emplace_back(std::move(chains));
-      } else {
-        auto const& phis = pending_phis[next];
-        for (auto asetID = uint32_t{0}; asetID < chains.size(); ++asetID) {
-          auto const phi = phis[asetID];
-          chains[asetID]->next = phi;
-          ++to_phi(phi)->back_edge_preds;
-          add_phi_pred(env, to_phi(phi), chains[asetID]);
+    penv.scratchBits.assign_sub(s.pantOut, s.altLoc);
+    penv.scratchBits |= s.antLoc;
+    if (s.pantIn != penv.scratchBits) {
+      s.pantIn.assign(penv.scratchBits);
+      changed = true;
+    }
+    if (changed) {
+      blk->forEachPred(
+        [&] (Block* pred) {
+          penv.antQ.push(penv.state[pred].rpoId);
         }
+      );
+    }
+  }
+}
+
+/*
+ * Find places where we can potentially kill IncRef/DecRef pairs
+ * across a phi node.
+ *
+ * Such cases are when the dst of a DefLabel is anticipated, and the
+ * src of at least one of the corresponding Jmps is partially available.
+ *
+ * We also avoid cases where the dst is partially available in to
+ * avoid overlap between the srcs and the dsts.
+ */
+bool pre_adjust_for_phis(PreEnv& penv) {
+  auto ret = false;
+  for (auto& blk : penv.env.rpoBlocks) {
+    auto const& front = blk->front();
+    if (!front.is(DefLabel)) continue;
+
+    auto& s = penv.state[blk];
+    auto newProp = s.phiPropagate;
+    for (auto i = 0; i < front.numDsts(); i++) {
+      if (i == s.phiPropagate.size()) break;
+      if (s.phiPropagate.test(i)) continue;
+      auto const did = lookup_aset(penv.env, front.dst(i));
+      if (!did || !s.antIn.test(*did) || s.pavlIn.test(*did)) continue;
+      blk->forEachPred(
+        [&] (Block* pred) {
+          auto const sid = lookup_aset(penv.env, pred->back().src(i));
+          if (!sid) return;
+          auto& ps = penv.state[pred];
+          if (ps.pavlOut.test(*sid)) {
+            penv.antQ.push(ps.rpoId);
+            newProp.set(i);
+            FTRACE(3, "setting phiPropagate[{}] in blk({})\n", i, blk->id());
+          }
+        }
+      );
+    }
+    if (s.phiPropagate != newProp) {
+      s.phiPropagate = newProp;
+      penv.avlQ.push(s.rpoId);
+      ret = true;
+    }
+  }
+
+  return ret;
+}
+
+void pre_insert(PreEnv& penv, bool incDec) {
+  for (auto& elm : penv.insMap) {
+    auto const tmp = elm.second;
+    auto const blk = std::get<0>(elm.first);
+    auto const id DEBUG_ONLY = std::get<1>(elm.first);
+    auto const atFront = std::get<2>(elm.first);
+    auto const op = atFront == incDec ? IncRef : DecRef;
+    FTRACE(3, "insert: {}({}) at {} in blk({})\n",
+           op == IncRef ? "IncRef" : "DecRef",
+           id,
+           atFront ? "front" : "back",
+           blk->id());
+    auto const bcctx = (atFront ? blk->begin() : blk->backIter())->bcctx();
+    auto const inst = op == IncRef ?
+      penv.env.unit.gen(op, bcctx, tmp) :
+      penv.env.unit.gen(op, bcctx, DecRefData(-1), tmp);
+    if (atFront) {
+      blk->prepend(inst);
+    } else if (blk->taken()) {
+      auto const back = blk->backIter();
+      // We're trying to insert at the end of the block, but there's a
+      // taken edge, so we have to insert before the last
+      // instruction. This could either be an unconditional jmp (which
+      // will be irrelevant), or we could be in the blk->numPreds()==1
+      // case in pre_find_insertions_helper, where the insertion needs
+      // to happen at the start of the block, but can be delayed to
+      // the end because it wasn't altered. In either case its safe
+      // (and correct) to insert before the last instruction.
+      assertx(irrelevant_inst(*back) || !penv.state[blk].altLoc[id]);
+      blk->insert(back, inst);
+    } else {
+      blk->push_back(inst);
+    }
+    penv.reprocess.insert(penv.state[blk].rpoId);
+  }
+}
+
+bool pre_insertions_for_delete_recur(PreEnv& penv, Block* blk,
+                                     bool atFront, SSATmp* tmp);
+
+bool pre_find_insertions_helper(PreEnv& penv,
+                                Block* blk, bool atFront, SSATmp* tmp) {
+  auto& s = penv.state[blk];
+  if (s.genId == penv.curGen) return true;
+  s.genId = penv.curGen;
+  auto id = penv.env.asetMap[tmp];
+  assertx(id >= 0);
+  if (atFront) {
+    // If its not available in, there's nothing we can do.
+    if (!s.avlIn.test(id)) return false;
+    // If its anticipated in, its dead on this path, and we're done.
+    if (s.antIn.test(id)) return true;
+  } else {
+    // If its not anticipated out, there's nothing we can do.
+    if (!s.antOut.test(id)) return false;
+    // If its available out, its dead on this path, and we're done.
+    if (s.avlOut.test(id)) return true;
+  }
+
+  auto const insertHere = [&] {
+    // If its not partially {anticipated in|available out}, we need to
+    // insert it.
+    if (!(atFront ? s.pantIn : s.pavlOut).test(id)) {
+      // id was pantOut/pavlIn in our predecessor/successor, so it must
+      // have had multiple successors/predecessors, and we've split
+      // critical edges, so...
+      assertx((atFront ? blk->numPreds() : blk->numSuccs()) == 1);
+      return true;
+    }
+    // If it was altered locally, then it would either be
+    // antLoc/avlLoc (and hence antIn/avlOut) or it would be
+    // !pantIn/pavlOut, both of which were checked above.
+    assertx(!s.altLoc.test(id));
+    if (atFront) {
+      if (blk->numSuccs() == 1) {
+        auto const succ = blk->next() ? blk->next() : blk->taken();
+        // When succ.avlIn is false, its ok to insert at the end of
+        // this block, but its not ok to insert at the start of the
+        // next one. Logically, we should insert at the end of this
+        // block; but we know its not altLoc, so its ok to insert at
+        // the start.
+        return !penv.state[succ].avlIn.test(id);
+      }
+    } else {
+      if (blk->numPreds() == 1) {
+        auto const pred = blk->preds().back().from();
+        // When pred.antOut is false, ts ok to insert at the start of
+        // this block, but its not ok to insert at the end of the
+        // previous one. Logically, we should insert at the front of
+        // this block; but we know its not altLoc, so its ok to insert
+        // at the end.
+        return !penv.state[pred].antOut.test(id);
       }
     }
+    return false;
+  }();
+
+  if (insertHere) {
+    while (true) {
+      auto const defBlock = findDefiningBlock(tmp, penv.env.idoms);
+      if (dominates(defBlock, blk, penv.env.idoms)) {
+        break;
+      }
+      // If tmp doesn't dominate this block, we can try a passthrough;
+      // otherwise we're done.
+      if (!tmp->inst()->isPassthrough()) return false;
+      tmp = tmp->inst()->getPassthroughValue();
+      assertx(penv.env.asetMap[tmp] == id);
+    }
+    penv.to_insert.push_back({blk, tmp});
+    return true;
   }
 
-  return heads;
+  if (atFront) {
+    // Its pantIn but not antIn, and not altered, so
+    assertx(s.pantOut.test(id) && !s.antOut.test(id));
+  } else {
+    // Its pavlOut but not avlOut, and not altered, so
+    assertx(s.pavlIn.test(id) && !s.avlIn.test(id));
+  }
+  return pre_insertions_for_delete_recur(penv, blk, atFront, tmp);
 }
 
-//////////////////////////////////////////////////////////////////////
+// Recursive walker for pre_insertions_for_delete.  Essentially, this
+// either walks forwards or backwards (depending on atFront), calling
+// pre_find_insertions_helper on each block, which will decide either
+//
+//  - we can't insert in this block (because eg the SSATmp isn't
+//    available there, or because we've found a case where we would
+//    have to insert both Incs and Decs), in which case we bail out of
+//    the walk.
+//  - there's no need to insert in this block (because its already
+//    Anticipated/Available, depending on atFront)
+//  - we need to insert here, in which case it adds it to penv.to_insert.
+//
+// phi nodes complicate this a little, because as we pass through
+// them, we might have to change which SSATmp to follow.
+bool pre_insertions_for_delete_recur(PreEnv& penv, Block* blk,
+                                     bool atFront, SSATmp* tmp) {
+  auto ret = true;
+  auto helper = [&] (Block* other) {
+    if (ret && !pre_find_insertions_helper(penv, other, atFront, tmp)) {
+      ret = false;
+    }
+  };
 
-/*
- * RC flowgraph rules.  ("rule_foo" functions)
- *
- * Each transformation on the RC flowgraph has a shape of the graph it matches
- * against, set of preconditions, and a "reprocess" point if it makes a
- * transformation.  Each rule has a diagram explaining the graph transformation
- * it makes, the changes it makes to the underlying IR, the preconditions for
- * the rule applying, and where it tries to reprocess.
- *
- * Often, the rules will want to "reprocess" by backing up a node.  This means
- * the transformations work with backtracking and infinite lookahead---but
- * because of the set of applicable rules, the infinite lookahead is limited to
- * sections of the graph that contain no control flow nodes.  Also, no
- * backtracking will occur unless a rule applies.
- *
- * The reason to allow back-tracking is easily shown by a series of foldable
- * incs and decs.  Consider the graph fragment:
- *
- *  ... ->  inc-2  -->  inc-3  -->  inc-4  -->  dec-5  -->  dec-4  --> ...
- *
- * Which we should be able to turn into just "inc-2".  The rule_inc_dec_fold
- * will first apply when we're pointing to the "inc-4" node, removing "inc-4"
- * and "dec-5".  Instead of proceeding to "dec-4" after it applies, it moves
- * back to reprocess at "inc-3", which lets the rule apply again to remove
- * "inc-3" and "dec-4".
- *
- * When scheduling reprocess nodes these functions use `reprocess_helper',
- * which prevent scheduling sigma nodes an extra time, since it's not
- * profitable and can cause us to get to phi nodes before we've processed their
- * predecessors (which can miss optimization opportunities).
- */
+  // Check to see if tmp is a src/dst of a phi that we want to follow
+  auto find_phi_index = [&] (Block* b) -> int {
+    auto const& bitset = penv.state[b].phiPropagate;
+    if (!bitset.any()) return -1;
+    for (auto i = bitset_find_first(bitset);
+         i < bitset.size();
+         i = bitset_find_next(bitset, i)) {
+      auto const t = atFront ? blk->back().src(i) : blk->front().dst(i);
+      if (t == tmp) return i;
+    }
+    return -1;
+  };
 
-Node* reprocess_helper(Node* pred, Node* succ) {
-  return pred->type == NT::Sig ? succ : pred;
-}
+  if (atFront) {
+    if (auto const succ = blk->taken()) {
+      auto i = find_phi_index(succ);
+      if (i >= 0) {
+        // The SSATmp we're following was the i'th src of a phi;
+        // follow the dst on the other side.
+        auto const dst = succ->front().dst(i);
+        assertx(lookup_aset(penv.env, dst));
+        return pre_find_insertions_helper(penv, succ, atFront, dst);
+      }
+    }
+    blk->forEachSucc(helper);
+    return ret;
+  }
 
-bool can_sink(Env& env, const IRInstruction* inst, const Block* block) {
-  assertx(inst->is(IncRef));
-  if (!block->taken() || !block->next()) return false;
-  if (inst->src(0)->inst()->is(DefConst)) return true;
-  auto const defBlock = findDefiningBlock(inst->src(0), env.idoms);
-  return dominates(defBlock, block->taken(), env.idoms) &&
-         dominates(defBlock, block->next(), env.idoms);
-}
-
-bool all_preds_are_sinkable_incs(const NPhi& phi) {
-  return std::all_of(
-    phi.pred_list,
-    phi.pred_list + phi.pred_list_sz,
-    [&] (const Node* n) {
-      return n->type == NT::Inc && n->lower_bound >= 1;
+  auto i = find_phi_index(blk);
+  if (i < 0) {
+    blk->forEachPred(helper);
+    return ret;
+  }
+  // The SSATmp we're following was the i'th dst of a phi; follow the
+  // srcs on the other side.
+  blk->forEachPred(
+    [&] (Block* pred) {
+      if (!ret) return;
+      auto const src = pred->back().src(i);
+      if (lookup_aset(penv.env, src) &&
+          !pre_find_insertions_helper(penv, pred, atFront, src)) {
+        ret = false;
+      }
     }
   );
+  return ret;
 }
 
-IRInstruction* find_sinkable_pred(const Env& env, const NPhi& phi) {
-  assertx(all_preds_are_sinkable_incs(phi));
-  auto const block = phi.block;
-  auto const it = std::find_if(
-    phi.pred_list,
-    phi.pred_list + phi.pred_list_sz,
-    [&] (const Node* pred) {
-      auto const defBlock = findDefiningBlock(to_inc(pred)->inst->src(0),
-                                              env.idoms);
-      return dominates(defBlock, block, env.idoms);
-    }
-  );
-  if (it == phi.pred_list + phi.pred_list_sz) return nullptr;
-  return to_inc(*it)->inst;
-}
+// Try to find places to insert copies of incOrDec that would make
+// it redundant. See the ascii art in the comment block headed
+// "Partial redundancy elimination of IncRef/DecRef pairs" above.
+bool pre_insertions_for_delete(PreEnv& penv,
+                               IRInstruction* incOrDec, bool insertAtFront) {
+  auto const tmp = incOrDec->src(0);
+  auto const id = penv.env.asetMap[tmp];
+  auto const blk = incOrDec->block();
+  auto& s = penv.state[blk];
 
-/*
- * Rule "inc_dec_fold":
- *
- *      [ A ]  |  x >= 1
- *        |    |  y >= 2
- *      inc-x  |
- *        |    |
- *      dec-y  |
- *        |    |
- *      [ B ]  |
- *     -----------------
- *
- *           [ A ]  <-- reprocess
- *             |
- *           [ B ]
- *
- * The IncRef and DecRef{NZ,} instructions in the underlying program are
- * removed.
- */
-Node* rule_inc_dec_fold(Env& env, Node* node) {
-  bool const applies =
-    node->type == NT::Inc && node->next &&
-    node->next->type == NT::Dec &&
-    node->next->lower_bound >= 2 &&
-    node->lower_bound >= 1;
-  if (!applies) return node;
-  auto const ninc  = node;
-  auto const ndec  = node->next;
-  auto const nprev = ninc->prev;
-  auto const nsucc = ndec->next;
-  FTRACE(2, "    ** inc_dec_fold: {}, {}\n", *to_inc(ninc)->inst,
-    *to_dec(ndec)->inst);
-  remove_helper(to_inc(ninc)->inst);
-  remove_helper(to_dec(ndec)->inst);
-  node_skip_over(env, ninc, ndec, ndec->next);
-  node_skip_over(env, nprev, ninc, ninc->next);
-  return reprocess_helper(nprev, nsucc);
-}
+  // We're going to do a recursive walk looking for the boundaries of
+  // the region we can move incOrDec to; that region could contain
+  // loops, so we need to prevent infinite recursion.
+  s.genId = ++penv.curGen;
 
-/*
- * Rule "inc_pass_req":
- *
- *      [ A ]   |  x >= 1
- *        |     |  y - 1 >= N
- *      inc-x   |
- *        |     |
- *     reqN-y   |
- *        |     |
- *      [ B ]   |
- *   ---------------------
- *
- *         [ A ]     <--- reprocess
- *           |
- *        reqN-(y-1)
- *           |
- *         inc-(y-1)
- *           |
- *         [ B ]
- *
- * No change to the underlying IR program.
- */
-Node* rule_inc_pass_req(Env& env, Node* node) {
-  bool const applies =
-    node->type == NT::Inc && node->next &&
-    node->next->type == NT::Req &&
-    (node->next->lower_bound - 1) >= to_req(node->next)->level &&
-    node->lower_bound >= 1;
-  if (!applies) return node;
-  FTRACE(2, "    ** inc_pass_req\n");
-  auto const ninc  = node;
-  auto const nreq  = node->next;
-  auto const nprev = ninc->prev;
-  node_skip_over(env, ninc, nreq, nreq->next);
-  rechain_forward(nprev, ninc, nreq);
-  ninc->prev = nreq;
-  nreq->prev = nprev;
-  nreq->next = ninc;
-  ninc->lower_bound = std::max(nreq->lower_bound - 1, 0);
-  nreq->lower_bound = std::max(nreq->lower_bound - 1, 0);
-  return reprocess_helper(nprev, ninc);
-}
+  penv.to_insert.clear();
+  // If incOrDec was fully redundant, there's nothing to do.  Note
+  // that when we're moving incOrDec forward, insertAtFront will be
+  // true, and when we're moving it backward it will be false. So when
+  // we're moving forward, we care about AntOut, and backward we care
+  // about AvlIn.
+  if ((insertAtFront ? s.antOut : s.avlIn).test(id)) return true;
 
-/*
- * Rule "inc_pass_sig":
- *
- *      [ A ]    |  x >= 1
- *        |      |  y >= 2
- *      inc-x    |
- *        |      |  the inc'd tmp is defined in B and C
- *     sigma-y   |
- *      /   \    |  B != C (normally removed by clean)
- *   [ B ] [ C ] |
- *  -----------------------------------------------
- *
- *            [ A ]      <--- reprocess
- *              |
- *         sigma-(y-1)
- *           /     \
- *     inc-(y-1)  inc-(y-1)
- *         |        |
- *       [ B ]    [ C ]
- *
- * The change to the RC graph is reflected in the underlying IR program.  We
- * remove the IncRef before the control flow split, and insert new copies on
- * the next and taken sides.
- */
-Node* rule_inc_pass_sig(Env& env, Node* node) {
-  bool const applies =
-    node->type == NT::Inc && node->next &&
-    node->next->type == NT::Sig &&
-    node->next->next != nullptr &&
-    to_sig(node->next)->taken != nullptr &&
-    node->next->next != to_sig(node->next)->taken &&
-    can_sink(env, to_inc(node)->inst, to_sig(node->next)->block) &&
-    node->lower_bound >= 1 &&
-    node->next->lower_bound >= 2;
-  if (!applies) return node;
-
-  auto const nold_inc = to_inc(node);
-  auto const nprev    = nold_inc->prev;
-  auto const nsig     = to_sig(node->next);
-
-  auto const value     = nold_inc->inst->src(0);
-  auto const marker    = nold_inc->inst->marker();
-  auto const new_taken = env.unit.gen(IncRef, marker, value);
-  auto const new_next  = env.unit.gen(IncRef, marker, value);
-
-  FTRACE(2, "    ** inc_pass_sig: {} -> {}, {}\n",
-    *nold_inc->inst, *new_taken, *new_next);
-
-  node_skip_over(env, nprev, nold_inc, nsig);
-  auto const ntaken = add_between(env, nsig, nsig->taken, NInc{new_taken});
-  auto const nnext  = add_between(env, nsig, nsig->next, NInc{new_next});
-
-  nnext->lower_bound  = std::max(nsig->lower_bound - 1, 0);
-  ntaken->lower_bound = std::max(nsig->lower_bound - 1, 0);
-  nsig->lower_bound   = std::max(nsig->lower_bound - 1, 0);
-
-  remove_helper(nold_inc->inst);
-  nsig->block->taken()->prepend(new_taken);
-  nsig->block->next()->prepend(new_next);
-
-  return reprocess_helper(nprev, nsig);
-}
-
-/*
- * Rule "inc_pass_phi":
- *
- *     [ A ]  [ B ] ... |  all pred lower_bounds x, y, ... >= 1
- *       |      |       |  z >= 2
- *     inc-x  inc-y     |
- *        \   /         |  at least one tmp defined at join
- *        phi-z         |
- *          |           |
- *        [ C ]         |
- *  --------------------------------
- *
- *          [ A ]  [ B ] ...
- *             \    /
- *            phi-(z-1)    <--- reprocess
- *               |
- *            inc-(z-1)
- *               |
- *             [ C ]
- *
- * The change to the RC graph is reflected in the underlying IR program.  We
- * remove the IncRefs for each incoming node, and insert a new one after the
- * join point.
- *
- * Note: it may seem like we should need a precondition on this rule that each
- * incoming node is distinct, since Phi nodes don't necessarily have unique
- * predecessor pointers.  However, only Sig nodes can have multiple successors,
- * so this situation doesn't apply.
- */
-Node* rule_inc_pass_phi(Env& env, Node* node) {
-  bool const applies =
-    node->type == NT::Phi &&
-    node->lower_bound >= 2 &&
-    all_preds_are_sinkable_incs(*to_phi(node));
-  if (!applies) return node;
-  auto const sink = find_sinkable_pred(env, *to_phi(node));
-  if (!sink) return node;
-
-  auto const nphi     = to_phi(node);
-  auto const new_inc  = env.unit.gen(IncRef, sink->marker(), sink->src(0));
-  auto const nnew_inc = add_between(env, nphi, nphi->next, NInc{new_inc});
-
-  nnew_inc->lower_bound = std::max(nphi->lower_bound - 1, 0);
-  nphi->lower_bound     = std::max(nphi->lower_bound - 1, 0);
-
-  FTRACE(2, "    ** inc_pass_phi: {}\n", *new_inc);
-  nphi->block->prepend(new_inc);
-
-  assertx(nphi->prev == nullptr);
-  for (auto i = uint32_t{0}; i < nphi->pred_list_sz; ++i) {
-    auto& pred_ptr = nphi->pred_list[i];
-    auto const inc = to_inc(pred_ptr);
-    auto const inc_pred = inc->prev;
-    rechain_forward(inc_pred, inc, nphi);
-    inc->prev = nullptr;
-    inc->next = nullptr;
-    remove_helper(inc->inst);
-    pred_ptr = inc_pred;
+  if (!pre_insertions_for_delete_recur(penv, blk, insertAtFront, tmp)) {
+    return false;
   }
 
-  return nphi;
+  for (auto const& elm : penv.to_insert) {
+    auto const key = std::make_tuple(elm.first,
+                                     penv.env.asetMap[elm.second],
+                                     insertAtFront);
+    penv.insMap[key] = elm.second;
+  }
+
+  return true;
 }
 
-/*
- * Rule "decnz":
- *
- *     [ A ]   | x >= 2
- *       |     |
- *     dec-x   |
- *       |     |
- *     [ B ]   |
- *  ----------------------
- *
- *  Convert DecRef to DecRefNZ in the underlying IR program---no change to
- *  the RC flowgraph.
- */
-Node* rule_decnz(Env& env, Node* node) {
-  bool const applies =
-    node->type == NT::Dec &&
-    node->lower_bound >= 2 &&
-    to_dec(node)->inst->is(DecRef);
-  if (!applies) return node;
-  FTRACE(2, "    ** decnz:  {}\n", *to_dec(node)->inst);
-  to_dec(node)->inst->setOpcode(DecRefNZ);
-  return node->next;
-}
+// pre_apply does two separate iterations to convergence.
+//
+// First it iterates, removing partially redundant incs or decs that
+// can't be made redundant from the set, and then repropagating the
+// block state. When its done, all the partially redundant incs and
+// decs can be removed, and the incs and decs in penv.insMap need to
+// be inserted to compensate.
+//
+// Then, if it did anything, it will recompute the transfer function
+// for each changed block, repropagate the block state, and run again,
+// since any incs or decs it removed could have prevented other
+// optimizations.
+bool pre_apply(PreEnv& penv, bool incDec) {
+  penv.insMap.clear();
+  for (auto& blk : penv.env.rpoBlocks) {
+    auto& s = penv.state[blk];
 
-Node* optimize_node(Env& env, Node* node, jit::queue<Node*>& workQ) {
-  if (node->type == NT::Phi) {
-    ++node->visit_counter;
-    if (node->visit_counter !=
-        to_phi(node)->pred_list_sz - to_phi(node)->back_edge_preds) {
-      // Wait until we've processed all the forward predecessors before looking
-      // at the Phi node.
-      return nullptr;
+    auto remove = [&] (IncDecBits& del, IRInstruction& inst,
+                       bool removeDec, bool insertAtFront) {
+      if (removeDec ? inst.is(DecRef, DecRefNZ) : inst.is(IncRef)) {
+        auto const id = penv.env.asetMap[inst.src(0)];
+        if (id >= 0 && del.test(id)) {
+          if (!pre_insertions_for_delete(penv, &inst, insertAtFront)) {
+            FTRACE(3, "No insertion for {} ({}) in B{}\n",
+                   id, inst.toString(), blk->id());
+            if (insertAtFront) {
+              s.avlLoc.reset(id);
+              penv.avlQ.push(s.rpoId);
+            } else {
+              s.antLoc.reset(id);
+              penv.antQ.push(s.rpoId);
+            }
+            s.altLoc.set(id);
+          }
+          del.reset(id);
+          return del.none();
+        }
+      }
+      return false;
+    };
+
+    auto& delFront = penv.scratchBits;
+    delFront.assign_and(s.antLoc, s.pavlIn);
+    if (delFront.any()) {
+      for (auto& inst : *blk) {
+        if (remove(delFront, inst, incDec, false)) break;
+      }
+      always_assert(delFront.none());
+    }
+
+    auto& delBack = penv.scratchBits;
+    delBack.assign_and(s.avlLoc, s.pantOut);
+    if (delBack.any()) {
+      for (auto it = blk->end(); it != blk->begin(); ) {
+        if (remove(delBack, *--it, !incDec, true)) break;
+      }
+      always_assert(delBack.none());
     }
   }
 
-  for (;;) {
-    auto const orig_node = node;
-    FTRACE(3, "  {}\n", show(node));
-    if (node->type == NT::Halt) return nullptr;
-
-    node = rule_inc_dec_fold(env, node);
-    node = rule_inc_pass_req(env, node);
-    node = rule_inc_pass_sig(env, node);
-    node = rule_inc_pass_phi(env, node);
-    node = rule_decnz(env, node);
-
-    if (node == nullptr || node == orig_node) break;
+  // If there were any partially redundant ops that couldn't be made
+  // redundant, there will be blocks in at least one of the queues
+  // that need reprocessing, so return here, and do that.
+  if (!penv.avlQ.empty() || !penv.antQ.empty()) {
+    FTRACE(4, "Recompute bit vectors after removing pre candidates\n");
+    return false;
   }
 
-  if (!node) return nullptr;
-  if (node->type == NT::Sig) {
-    if (auto const t = to_sig(node)->taken) {
-      workQ.push(t);
+  // We now know that every partially redundant inc/dec can be
+  // removed, and have a list of incs and decs to insert in
+  // penv.insMap. So go ahead and delete/insert everything as
+  // necessary.
+  for (auto& blk : penv.env.rpoBlocks) {
+    auto& s = penv.state[blk];
+    s.phiPropagate.reset();
+
+    FTRACE(4,
+           "PREApply Blk(B{}) <-{}\n"
+           "    antIn   : {}\n"
+           "    pantIn  : {}\n"
+           "    avlIn   : {}\n"
+           "    pavlIn  : {}\n"
+           "    antLoc  : {}\n"
+           "    altered : {}\n"
+           "    avlLoc  : {}\n"
+           "    antOut  : {}\n"
+           "    pantOut : {}\n"
+           "    avlOut  : {}\n"
+           "    pavlOut : {}\n"
+           "  ->{}\n",
+           blk->id(),
+           [&] {
+             std::string ret;
+             blk->forEachPred([&] (Block* pred) {
+                 folly::format(&ret, " B{}", pred->id());
+               });
+             return ret;
+           }(),
+           show(s.antIn),
+           show(s.pantIn),
+           show(s.avlIn),
+           show(s.pavlIn),
+           show(s.antLoc),
+           show(s.altLoc),
+           show(s.avlLoc),
+           show(s.antOut),
+           show(s.pantOut),
+           show(s.avlOut),
+           show(s.pavlOut),
+           [&] {
+             std::string ret;
+             blk->forEachSucc([&] (Block* succ) {
+                 folly::format(&ret, " B{}", succ->id());
+               });
+             return ret;
+           }());
+
+    auto remove = [&] (IncDecBits& del, IRInstruction& inst,
+                       bool removeDec, bool insertAtFront) {
+      if (removeDec ? inst.is(DecRef, DecRefNZ) : inst.is(IncRef)) {
+        auto const id = penv.env.asetMap[inst.src(0)];
+        if (id >= 0 && del.test(id)) {
+          FTRACE(3, "delete: {} = {}\n", id, inst.toString());
+          remove_helper(penv.env.unit, &inst);
+          del.reset(id);
+          return del.none();
+        }
+      }
+      return false;
+    };
+
+    auto& delFront = penv.scratchBits;
+    delFront.assign_and(s.antLoc, s.pavlIn);
+    if (delFront.any()) {
+      for (auto& inst : *blk) {
+        if (remove(delFront, inst, incDec, false)) break;
+      }
+      always_assert(delFront.none());
+      penv.reprocess.insert(penv.state[blk].rpoId);
+    }
+
+    auto& delBack = penv.scratchBits;
+    delBack.assign_and(s.avlLoc, s.pantOut);
+    if (delBack.any()) {
+      for (auto it = blk->end(); it != blk->begin(); ) {
+        if (remove(delBack, *--it, !incDec, true)) break;
+      }
+      always_assert(delBack.none());
+      penv.reprocess.insert(penv.state[blk].rpoId);
     }
   }
-  // Return the next, or nullptr if it doesn't have a next:
-  return node->next;
+
+  pre_insert(penv, incDec);
+  // If we didn't do anything, we're done...
+  if (!penv.reprocess.size()) {
+    FTRACE(4, "No changes... done\n");
+    return true;
+  }
+  // ... otherwise update the RCAnalysis for the modified blocks
+  assertx(penv.avlQ.empty());
+  for (auto rpoId : penv.reprocess) {
+    penv.avlQ.push(rpoId);
+  }
+  FTRACE(3, "re-analyze after modifications\n");
+  rc_analyze_worklist(penv.env, penv.rca, penv.avlQ, &penv.reprocess);
+  // ... then update the local transfer functions for any blocks where
+  // it might have changed, and setup the work queues to propagate the
+  // changes
+  assertx(penv.antQ.empty());
+  assertx(penv.avlQ.empty());
+  FTRACE(3, "re-compute local transfer after modifications\n");
+  auto reprocess = std::move(penv.reprocess);
+  for (auto rpoId : reprocess) {
+    auto const blk = penv.env.rpoBlocks[rpoId];
+    auto& s = penv.state[blk];
+    s.avlLoc.reset();
+    s.antLoc.reset();
+    s.altLoc.reset();
+    pre_local_transfer(penv, incDec, blk);
+    penv.avlQ.push(rpoId);
+    penv.antQ.push(rpoId);
+  }
+  FTRACE(4, "Redo pre-apply\n");
+  return false;
 }
 
-void optimize_graph(Env& env, Node* head) {
-  auto workQ = jit::queue<Node*>{};
-  workQ.push(head);
+/*
+ * Partial redundancy elimination for IncRef/DecRef pairs.
+ *
+ * When incDec is true, we're going to remove incs followed by decs;
+ * otherwise decs followed by incs.
+ */
+void pre_incdecs(Env& env, RCAnalysis& rca, bool incDec) {
+  FTRACE(2, "pre_incdecs ({})---------------------------------\n",
+         incDec ? "Inc->Dec" : "Dec->Inc");
+
+  PreEnv penv{env, rca};
+  for (auto blk : env.rpoBlocks) {
+    pre_local_transfer(penv, incDec, blk);
+  }
+
   do {
-    auto current = workQ.front();
-    workQ.pop();
-    do {
-      current = optimize_node(env, current, workQ);
-    } while (current != nullptr);
-  } while (!workQ.empty());
+    FTRACE(4, "pre_compute_available\n");
+    pre_compute_available(penv);
+    FTRACE(4, "pre_compute_anticipated\n");
+    pre_compute_anticipated(penv);
+    FTRACE(4, "pre_adjust_for_phis\n");
+  } while (pre_adjust_for_phis(penv) ||
+           !pre_apply(penv, incDec));
 }
 
-void optimize_graphs(Env& env, const jit::vector<Node*>& graphs) {
-  FTRACE(1, "optimize_graphs -----------------------------------------\n");
-  for (auto asetID = uint32_t{0}; asetID < graphs.size(); ++asetID) {
-    FTRACE(2, "{} {}\n", asetID, *env.asets[asetID].representative);
-    optimize_graph(env, graphs[asetID]);
+//////////////////////////////////////////////////////////////////////
+
+/*
+ * This pass delays DecRef* instructions to try to expose more opportunities
+ * for eliminating IncRef/DecRef pairs. The idea is to remember the last IncRef
+ * tX that was seen and move DecRefs of other SSATmps later, until after a
+ * DecRef tX is found.  If any other instruction that is not "irrelevant" is
+ * found along the way, the set of DecRefs that are candidates to be moved has
+ * to be cleared.  For now, this pass is only applied locally, within a basic
+ * block.
+ */
+void delay_decrefs(IRUnit& unit) {
+  FTRACE(2, "delay_decrefs: unit before: {}\n", show(unit));
+
+  auto blocks = rpoSortCfg(unit);
+  for (auto block : blocks) {
+    IRInstruction* last_incref = nullptr;
+    jit::vector<IRInstruction*> other_decrefs;
+
+    for (auto& inst : *block) {
+      if (inst.is(IncRef)) {
+        last_incref = &inst;
+        other_decrefs.clear();
+      }
+
+      if (last_incref == nullptr || irrelevant_inst(inst)) continue;
+
+      if (inst.is(DecRef, DecRefNZ)) {
+        if (inst.src(0) != last_incref->src(0)) {
+          other_decrefs.push_back(&inst);
+          continue;
+        }
+        // Move all the DecRefs in other_decrefs after inst
+        auto iter = block->iteratorTo(&inst);
+        iter++;
+        for (auto other : other_decrefs) {
+          auto new_decref = unit.gen(DecRef, other->bcctx(),
+                                     *(other->extra<DecRefData>()),
+                                     other->src(0));
+          FTRACE(2, "delay_decrefs: moving {} after {} as {}\n",
+                 *other, inst, *new_decref);
+          remove_helper(unit, other);
+          block->insert(iter, new_decref);
+        }
+      }
+      // Either we moved other_decrefs or we hit some other relevant
+      // instruction.  In either case, we need to forget the other decrefs.
+      other_decrefs.clear();
+    }
   }
-  FTRACE(1, "{}", show_graphs(env.asets, graphs));
 }
 
-void rcgraph_opts(Env& env) {
-  // Get analysis results that let us build the rc flowgraphs.
-  auto const rcAnalysis = rc_analyze(env);
-  FTRACE(1, "\nRCAnalysis:\n\n{}\n", show_analysis(env, rcAnalysis));
-
-  // Build the graphs.
-  auto graphs = build_graphs(env, rcAnalysis);
-  FTRACE(1, "rc arena size: {}\n", env.arena.size());
-  assertx(check_graphs(graphs));
-  FTRACE(1, "{}", show_graphs(env.asets, graphs));
-
-  // Clean the graphs up, so they're easier to pattern match against in the
-  // optimize pass.
-  graphs = clean_graphs(env, std::move(graphs));
-  assertx(check_graphs(graphs));
-  FTRACE(1, "{}", show_graphs(env.asets, graphs));
-
-  // Optimize each graph.
-  optimize_graphs(env, graphs);
-  assertx(check_graphs(graphs));
-  FTRACE(1, "rc arena size: {}\n", env.arena.size());
+//////////////////////////////////////////////////////////////////////
 }
 
 //////////////////////////////////////////////////////////////////////
 
-}
-
-//////////////////////////////////////////////////////////////////////
-
-void optimizeRefcounts2(IRUnit& unit) {
-  Timer timer(Timer::optimize_refcountOpts);
+void optimizeRefcounts(IRUnit& unit) {
+  Timer timer(Timer::optimize_refcountOpts, unit.logEntry().get_pointer());
   splitCriticalEdges(unit);
+  delay_decrefs(unit);
 
   PassTracer tracer{&unit, Trace::hhir_refcount, "optimizeRefcounts"};
   Env env { unit };
@@ -3326,13 +3405,69 @@ void optimizeRefcounts2(IRUnit& unit) {
 
   populate_mrinfo(env);
   weaken_decrefs(env);
-  rcgraph_opts(env);
-  remove_trivial_incdecs(env);
+  {
+    auto rca = rc_analyze(env);
+    pre_incdecs(env, rca, true);
+    pre_incdecs(env, rca, false);
+  }
+  sink_incs(env);
+  weaken_decrefs(env);
 
   // We may have pushed IncRefs past CheckTypes, which could allow us to
   // specialize them.
   insertNegativeAssertTypes(unit, env.rpoBlocks);
   refineTmps(unit, env.rpoBlocks, env.idoms);
+}
+
+/*
+ * This optimization selectively transforms DecRefs into DecRefNZs, which is
+ * valid when destructors are disallowed.  This tranformation avoids checking if
+ * the count got to zero and immediately releasing the object. This will use
+ * more memory, but it is still OK to do because the tracing GC can later
+ * collect the garbage produced.  This transformation can also trigger more
+ * copy-on-write for arrays and strings for which there are transitive
+ * references inside the object that is not immediately released. To limit these
+ * overheads, this optimization is selectively performed based on profiling and
+ * it's only applied when the number of times that the DecRef reached 0 is below
+ * a certain threshold.  When the type is known to be a string or uncounted, we
+ * can be more aggressive because they don't hold internal references to other
+ * objects, so a separate threshold is used in that case.
+ */
+void selectiveWeakenDecRefs(IRUnit& unit) {
+  auto blocks = poSortCfg(unit);
+
+  // Union of types that cannot trigger Copy-On-Write for inner elements in case
+  // they're not released.  We can be more aggressive when optimizing them here.
+  auto const cowFree = TStr | TUncounted;
+  auto const TAwaitable = Type::SubObj(c_Awaitable::classof());
+
+  for (auto& block : blocks) {
+    for (auto& inst : *block) {
+      if (inst.is(DecRef)) {
+        const auto& type = inst.src(0)->type();
+        const auto profile = decRefProfile(unit, &inst);
+        if (profile.optimizing()) {
+          const auto data = profile.data();
+          const auto decrefdPct = data.percent(data.destroyed()) +
+                                  data.percent(data.survived());
+          double decrefdPctLimit = inst.src(0)->type() <= cowFree
+            ? RuntimeOption::EvalJitPGODecRefNopDecPercent
+            : RuntimeOption::EvalJitPGODecRefNopDecPercentCOW;
+          if (decrefdPct < decrefdPctLimit && !(type <= TCounted)) {
+            inst.convertToNop();
+          } else {
+            const auto destroyPct = data.percent(data.destroyed());
+            double destroyPctLimit = inst.src(0)->type() <= cowFree
+              ? RuntimeOption::EvalJitPGODecRefNZReleasePercent
+              : RuntimeOption::EvalJitPGODecRefNZReleasePercentCOW;
+            if (destroyPct < destroyPctLimit && !(type <= TAwaitable)) {
+              inst.setOpcode(DecRefNZ);
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 }}

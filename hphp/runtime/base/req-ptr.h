@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -49,7 +49,7 @@ template<typename T> struct ptr final {
 
   enum class NonNull {};
   explicit ptr(T* px, NonNull) : m_px(px) {
-    assert(px);
+    assertx(px);
     m_px->incRefCount();
   }
 
@@ -93,7 +93,7 @@ template<typename T> struct ptr final {
   // Move assignment for derived types
   template<class Y>
   ptr& operator=(ptr<Y>&& src) {
-    assert((void*)this != (void*)&src);
+    assertx((void*)this != (void*)&src);
     // Update m_px before releasing the goner
     auto goner = m_px;
     m_px = src.m_px;
@@ -169,7 +169,7 @@ template<typename T> struct ptr final {
 
 private:
   // For templatized ptr<Y> move constructor.
-  template <typename Y> friend class ptr;
+  template <typename Y> friend struct ptr;
 
   static ALWAYS_INLINE void decRefPtr(T* ptr) {
     if (LIKELY(ptr != nullptr)) ptr->decRefAndRelease();
@@ -253,44 +253,44 @@ inline auto deref(const P& p) -> decltype(P().get()) {
 
 struct ResourceData;
 struct ObjectData;
-class Resource;
-class Object;
+struct Resource;
+struct Object;
 struct Variant;
 
-ATTRIBUTE_NORETURN extern void throw_null_pointer_exception();
-ATTRIBUTE_NORETURN void throw_invalid_object_type(ResourceData* p);
-ATTRIBUTE_NORETURN void throw_invalid_object_type(ObjectData* p);
-ATTRIBUTE_NORETURN void throw_invalid_object_type(const Variant& p);
-ATTRIBUTE_NORETURN void throw_invalid_object_type(const Resource& p);
-ATTRIBUTE_NORETURN void throw_invalid_object_type(const Object& p);
+[[noreturn]] extern void throw_null_pointer_exception();
+[[noreturn]] void throw_invalid_object_type(ResourceData* p);
+[[noreturn]] void throw_invalid_object_type(ObjectData* p);
+[[noreturn]] void throw_invalid_object_type(const Variant& p);
+[[noreturn]] void throw_invalid_object_type(const Resource& p);
+[[noreturn]] void throw_invalid_object_type(const Object& p);
 template <typename T>
-ATTRIBUTE_NORETURN void throw_invalid_object_type(const req::ptr<T>& p);
+[[noreturn]] void throw_invalid_object_type(const req::ptr<T>& p);
 template <typename T>
 void throw_invalid_object_type(const req::ptr<T>& p) {
   throw_invalid_object_type(p.get());
 }
 
 template <typename T>
-inline bool is_null(const T& p) {
+inline bool ptr_is_null(const T& p) {
   return !p;
 }
 
 template <typename T, typename P>
 inline bool isa_non_null(const P& p) {
-  assert(!is_null(p));
+  assertx(!ptr_is_null(p));
   return p->template instanceof<T>();
 }
 
 // Is pointer contained in p castable to a T?
 template <typename T, typename P>
 inline bool isa(const P& p) {
-  return !is_null(p) && isa_non_null<T>(p);
+  return !ptr_is_null(p) && isa_non_null<T>(p);
 }
 
 // Is pointer contained in p null or castable to a T?
 template <typename T, typename P>
 inline bool isa_or_null(const P& p) {
-  return is_null(p) || isa_non_null<T>(p);
+  return ptr_is_null(p) || isa_non_null<T>(p);
 }
 
 // Perform an unsafe cast operation on p.  The value p is assumed
@@ -317,7 +317,7 @@ inline req::ptr<T> unsafe_cast_or_null(P&& p) {
 // result in an exception.
 template <typename T, typename P>
 inline req::ptr<T> unsafe_cast(P&& p) {
-  if (!is_null(p)) {
+  if (!ptr_is_null(p)) {
     return unsafe_cast_or_null<T>(std::forward<P>(p));
   }
   throw_null_pointer_exception();
@@ -327,7 +327,7 @@ inline req::ptr<T> unsafe_cast(P&& p) {
 // a T, an exception will be thrown.
 template <typename T, typename P>
 inline req::ptr<T> cast(P&& p) {
-  if (!is_null(p)) {
+  if (!ptr_is_null(p)) {
     if (isa_non_null<T>(p)) {
       return unsafe_cast_or_null<T>(std::forward<P>(p));
     }
@@ -340,7 +340,7 @@ inline req::ptr<T> cast(P&& p) {
 // passed through.
 template <typename T, typename P>
 inline req::ptr<T> cast_or_null(P&& p) {
-  if (!is_null(p)) {
+  if (!ptr_is_null(p)) {
     if (isa_non_null<T>(p)) {
       return unsafe_cast_or_null<T>(std::forward<P>(p));
     }
@@ -354,7 +354,7 @@ inline req::ptr<T> cast_or_null(P&& p) {
 // is thrown.
 template <typename T, typename P>
 inline req::ptr<T> dyn_cast(P&& p) {
-  if (!is_null(p)) {
+  if (!ptr_is_null(p)) {
     if (isa_non_null<T>(p)) {
       return unsafe_cast_or_null<T>(std::forward<P>(p));
     }

@@ -1,37 +1,38 @@
-<?php
+<?hh
 
-$test = 0;
+abstract final class ZendGoodZendTestsBug31102 {
+  public static $test = 0;
+}
 
 function __autoload($class)
 {
-	global $test;
 
-	echo __METHOD__ . "($class,$test)\n";
-	switch($test)
-	{
-	case 1:
-		eval("class $class { function __construct(){throw new Exception('$class::__construct');}}");
-		return;
-	case 2:
-		eval("class $class { function __construct(){throw new Exception('$class::__construct');}}");
-		throw new Exception(__METHOD__);
-		return;
-	case 3:
-		return;
-	}
+
+    echo __METHOD__ . "($class,".ZendGoodZendTestsBug31102::$test.")\n";
+    switch(ZendGoodZendTestsBug31102::$test)
+    {
+    case 1:
+        eval("class $class { function __construct(){throw new Exception('$class::__construct');}}");
+        return;
+    case 2:
+        eval("class $class { function __construct(){throw new Exception('$class::__construct');}}");
+        throw new Exception(__METHOD__);
+        return;
+    case 3:
+        return;
+    }
 }
-
-while($test++ < 5)
+<<__EntryPoint>> function main(): void {
+while(ZendGoodZendTestsBug31102::$test++ < 5)
 {
-	try
-	{
-		eval("\$bug = new Test$test();");
-	}
-	catch (Exception $e)
-	{
-		echo "Caught: " . $e->getMessage() . "\n";
-	}
+    try
+    {
+        eval("\$bug = new Test".ZendGoodZendTestsBug31102::$test."();");
+    }
+    catch (Exception $e)
+    {
+        echo "Caught: " . $e->getMessage() . "\n";
+    }
 }
-?>
-===DONE===
-<?php exit(0); ?>
+echo "===DONE===\n";
+}

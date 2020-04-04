@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -102,14 +102,109 @@ void emit_svcreq_stub(Venv& env, const Venv::SvcReqPatch& p);
  *
  * Return true if the instruction was supported.
  */
-template<class Inst> bool emit(Venv& env, const Inst&) { return false; }
+template <class Inst>
+bool emit(Venv& /*env*/, const Inst&) {
+  return false;
+}
+bool emit(Venv& env, const callphp& i);
 bool emit(Venv& env, const bindjmp& i);
 bool emit(Venv& env, const bindjcc& i);
-bool emit(Venv& env, const bindjcc1st& i);
 bool emit(Venv& env, const bindaddr& i);
 bool emit(Venv& env, const fallback& i);
 bool emit(Venv& env, const fallbackcc& i);
 bool emit(Venv& env, const retransopt& i);
+bool emit(Venv& env, const movqs& i);
+bool emit(Venv& env, const debugguardjmp& i);
+bool emit(Venv& env, const jmps& i);
+
+inline bool emit(Venv& env, const pushframe&) {
+  if (env.frame == -1) return true; // unreachable block
+  assertx(env.pending_frames > 0);
+
+  --env.pending_frames;
+  return true;
+}
+
+inline bool emit(Venv& env, const popframe&) {
+  if (env.frame == -1) return true; // unreachable block
+
+  ++env.pending_frames;
+  return true;
+}
+
+inline bool emit(Venv& env, const recordstack& i) {
+  env.record_inline_stack(i.fakeAddress);
+  return true;
+}
+
+inline void record_frame(Venv& env) {
+  auto const& block = env.unit.blocks[env.current];
+  auto const frame = env.frame;
+  auto const start = env.framestart;
+  auto& frames = env.unit.frames;
+  auto const size = env.cb->frontier() - start;
+  // It's possible that (a) this block is empty, and (b) cb is full, so the
+  // frontier from the start of the block is actually the first byte after the
+  // block. This is particularly likely when RetranslateAll is in use as
+  // ephemeral code blocks are resizable.
+  always_assert(!size || env.cb->contains(start));
+  always_assert((int64_t)size >= 0);
+  auto const area = static_cast<uint8_t>(block.area_idx);
+  frames[frame].sections[area].exclusive += size;
+  for (auto f = block.frame; f != Vframe::Top; f = frames[f].parent) {
+    frames[f].sections[area].inclusive += size;
+  }
+  env.framestart = env.cb->frontier();
+}
+
+inline bool emit(Venv& env, const inlinestart& i) {
+  if (env.frame == -1) return true; // unreachable block
+
+  ++env.pending_frames;
+  always_assert(0 <= i.id && i.id < env.unit.frames.size());
+  record_frame(env);
+  env.frame = i.id;
+  return true;
+}
+inline bool emit(Venv& env, const inlineend&) {
+  if (env.frame == -1) return true; // unreachable block
+  assertx(env.pending_frames > 0);
+
+  --env.pending_frames;
+  record_frame(env);
+  env.frame = env.unit.frames[env.frame].parent;
+  always_assert(0 <= env.frame && env.frame < env.unit.frames.size());
+  return true;
+}
+
+template<class Vemit>
+void check_nop_interval(Venv& env, const Vinstr& inst,
+                        int& nop_counter, int nop_interval) {
+  if (LIKELY(nop_counter < 0)) return;
+
+  switch (inst.op) {
+    // These instructions are for exception handling or state syncing and do
+    // not represent any actual work, so they're excluded from the nop counter.
+    case Vinstr::landingpad:
+    case Vinstr::nothrow:
+    case Vinstr::syncpoint:
+    case Vinstr::unwind:
+      break;
+
+    default:
+      if (--nop_counter == 0) {
+        // We use a special emit_nop() function rather than emit(nop{}) because
+        // many performance counters exclude nops from their count of retired
+        // instructions. It's up the to arch-specific backends to emit some
+        // real work with no visible side-effects.
+        Vemit(env).emit_nop();
+        nop_counter = nop_interval;
+      }
+      break;
+  }
+}
+
+void computeFrames(Vunit& unit);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -117,11 +212,35 @@ bool emit(Venv& env, const retransopt& i);
 
 ///////////////////////////////////////////////////////////////////////////////
 
+inline Venv::Venv(Vunit& unit, Vtext& text, CGMeta& meta)
+  : unit(unit)
+  , text(text)
+  , meta(meta)
+{
+  vaddrs.resize(unit.next_vaddr);
+}
+
+inline void Venv::record_inline_stack(TCA addr) {
+  uint32_t callOff = 0;
+  auto const func = unit.frames[frame].func;
+  auto const in_builtin = func && func->isCPPBuiltin();
+  if (origin && !in_builtin) {
+    auto const marker = origin->marker();
+    callOff = marker.bcOff() - marker.func()->base();
+  }
+  stacks.emplace_back(addr, IStack{frame - 1, pending_frames, callOff});
+}
+
 template<class Vemit>
-void vasm_emit(const Vunit& unit, Vtext& text, AsmInfo* asm_info) {
+void vasm_emit(Vunit& unit, Vtext& text, CGMeta& fixups,
+               AsmInfo* asm_info) {
   using namespace vasm_detail;
 
-  Venv env { unit, text };
+  // Lower inlinestart and inlineend instructions to jmps, and annotate blocks
+  // with inlined function parents
+  computeFrames(unit);
+
+  Venv env { unit, text, fixups };
   env.addrs.resize(unit.blocks.size());
 
   auto labels = layoutBlocks(unit);
@@ -129,9 +248,15 @@ void vasm_emit(const Vunit& unit, Vtext& text, AsmInfo* asm_info) {
   IRMetadataUpdater irmu(env, asm_info);
 
   auto const area_start = [&] (Vlabel b) {
-    auto area = unit.blocks[b].area;
+    auto area = unit.blocks[b].area_idx;
     return text.area(area).start;
   };
+
+  // We don't want to put nops in Vunits representing stubs, and those Vunits
+  // don't have a context set.
+  auto const nop_interval =
+    unit.context ? RuntimeOption::EvalJitNopInterval : 0;
+  auto nop_counter = nop_interval;
 
   for (int i = 0, n = labels.size(); i < n; ++i) {
     assertx(checkBlockEnd(unit, labels[i]));
@@ -139,8 +264,11 @@ void vasm_emit(const Vunit& unit, Vtext& text, AsmInfo* asm_info) {
     auto b = labels[i];
     auto& block = unit.blocks[b];
 
-    env.cb = &text.area(block.area).code;
+    env.cb = &text.area(block.area_idx).code;
     env.addrs[b] = env.cb->frontier();
+    env.framestart = env.cb->frontier();
+    env.frame = block.frame;
+    env.pending_frames = std::max<int32_t>(block.pending_frames, 0);
 
     { // Compute the next block we will emit into the current area.
       auto const cur_start = area_start(labels[i]);
@@ -159,6 +287,9 @@ void vasm_emit(const Vunit& unit, Vtext& text, AsmInfo* asm_info) {
 
     for (auto& inst : block.code) {
       irmu.register_inst(inst);
+      env.origin = inst.origin;
+
+      check_nop_interval<Vemit>(env, inst, nop_counter, nop_interval);
 
       switch (inst.op) {
 #define O(name, imms, uses, defs)               \
@@ -171,17 +302,37 @@ void vasm_emit(const Vunit& unit, Vtext& text, AsmInfo* asm_info) {
       }
     }
 
+    if (block.frame != -1) record_frame(env);
     irmu.register_block_end();
   }
 
+  Vemit::emitVeneers(env);
+
+  Vemit::handleLiterals(env);
+
   // Emit service request stubs and register patch points.
   for (auto& p : env.stubs) emit_svcreq_stub(env, p);
+
+  // Bind any Vaddrs that correspond to Vlabels.
+  for (auto const& p : env.pending_vaddrs) {
+    assertx(env.addrs[p.target]);
+    env.vaddrs[p.vaddr] = env.addrs[p.target];
+  }
 
   // Patch up jump targets and friends.
   Vemit::patch(env);
 
   // Register catch blocks.
   for (auto& p : env.catches) register_catch_block(env, p);
+
+  // Register inline frames.
+  for (auto& f : unit.frames) {
+    if (f.parent == Vframe::Top) continue; // skip the top frame
+    fixups.inlineFrames.emplace_back(IFrame{f.func, f.callOff, f.parent - 1});
+  }
+
+  // Register inline stacks.
+  fixups.inlineStacks = std::move(env.stacks);
 
   if (unit.padding) Vemit::pad(text.main().code);
 

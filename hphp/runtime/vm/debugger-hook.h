@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,8 +19,10 @@
 
 #include <functional>
 
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
+#include "hphp/runtime/base/request-injection-data.h"
 #include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/server/cli-server.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/unit.h"  // OffsetRangeVec
@@ -41,13 +43,17 @@ struct Func;
 struct ObjectData;
 
 // Is this thread being debugged?
-inline bool isDebuggerAttached(ThreadInfo* ti = nullptr) {
-  ti = (ti != nullptr) ? ti : &TI();
+inline bool isDebuggerAttached(RequestInfo* ti = nullptr) {
+  ti = (ti != nullptr) ? ti : &RI();
   return ti->m_reqInjectionData.getDebuggerAttached();
 }
 
-/* Hacky way of checking if a DebuggerHook is an HphpdHook. */
-bool isHphpd(const DebuggerHook*);
+inline bool requestHasBreakpoints(RequestInjectionData& rid) {
+  return !rid.m_breakPointFilter.isNull() ||
+         !rid.m_lineBreakPointFilter.isNull() ||
+         !rid.m_callBreakPointFilter.isNull() ||
+         !rid.m_retBreakPointFilter.isNull();
+}
 
 // Executes the passed code only if there is a debugger attached to the current
 // thread.
@@ -61,6 +67,12 @@ bool isHphpd(const DebuggerHook*);
 // out of JIT code. Second, that phpDebuggerOpcodeHook will continue to allow
 // debugger interrupts for every opcode executed (modulo filters.)
 #define DEBUGGER_FORCE_INTR (RID().getDebuggerForceIntr())
+
+enum class StackDepthDisposition {
+  Equal,        // Same.
+  Shallower,    // Less than baseline.
+  Deeper,       // Greater than baseline.
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 // DebuggerHook
@@ -76,29 +88,44 @@ struct DebuggerHook {
   // success, false on failure (for instance, if another debugger hook is
   // already attached).
   template<class HookClass>
-  static bool attach(ThreadInfo* ti = nullptr) {
-    ti = (ti != nullptr) ? ti : &TI();
+  static bool attach(RequestInfo* ti = nullptr) {
+    ti = (ti != nullptr) ? ti : &RI();
 
-    // The only time one hook can override another is when hphpd tries to
-    // override xdebug.
     if (isDebuggerAttached(ti)) {
-      if (!std::is_same<HookClass, HPHP::Eval::HphpdHook>::value) {
-        return false;
-      }
-      if (isHphpd(ti->m_debuggerHook)) {
-        return false;
-      }
-      detach();
+      // Check if this debugger hook is already attached.
+      // TODO: Ideally this wouldn't be necessary here, debuggers should
+      // be well behaved and only attach once per thread. There is at least
+      // one instance where hphpd still needs this. Remove once that's
+      // cleaned up.
+      return dynamic_cast<HookClass*>(ti->m_debuggerHook) != nullptr;
     }
-
-    // Attach to the thread
-    ti->m_debuggerHook = HookClass::GetInstance();
 
     // Increment the number of attached hooks.
     {
       Lock lock(s_lock);
+      auto instance = HookClass::GetInstance();
+
+      // Once a debugger has attached to any request, it is the only debugger
+      // allowed to attach to subsequent requests until it has detached from
+      // all requests.
+      if (s_activeHook == nullptr) {
+        s_activeHook = instance;
+      } else if (s_activeHook != instance) {
+        return false;
+      }
+
+      // Attach to the thread
+      ti->m_debuggerHook = instance;
+
       s_numAttached++;
       ti->m_reqInjectionData.setDebuggerAttached(true);
+      if (requestHasBreakpoints(ti->m_reqInjectionData) ||
+          !RuntimeOption::ServerExecutionMode() || is_cli_server_mode()) {
+        ti->m_reqInjectionData.setJittingDisabled(true);
+        rl_typeProfileLocals->forceInterpret = true;
+        ti->m_reqInjectionData.updateJit();
+      }
+
     }
 
     // Event hooks need to be enabled to receive function entry and exit events.
@@ -113,58 +140,79 @@ struct DebuggerHook {
     return true;
   }
 
+  // Attempts to set or remove the specified debugger hook as the "active" hook.
+  // The active hook is the only hook that is permitted to attach to any request
+  static bool setActiveDebuggerInstance(DebuggerHook* hook, bool attach) {
+    Lock lock(s_lock);
+    if (attach) {
+      if (s_activeHook != nullptr) {
+        return s_activeHook == hook;
+      }
+
+      s_activeHook = hook;
+      return true;
+    } else {
+      if (s_activeHook != hook) {
+        return false;
+      }
+
+      s_activeHook = nullptr;
+      return true;
+    }
+  }
+
   // If a hook is attached to the thread, detaches it.
-  static void detach(ThreadInfo* ti = nullptr);
+  static void detach(RequestInfo* ti = nullptr);
 
   // Debugger events. Subclasses can override these methods to receive
   // events.
-  virtual void onExceptionThrown(ObjectData* exception) {}
+  virtual void onExceptionThrown(ObjectData* /*exception*/) {}
   virtual void onExceptionHandle() {}
-  virtual void onError(const ExtendedException &ee,
-                       int errnum,
-                       const std::string& message) {}
-  virtual void onEval(const Func* f) {}
-  virtual void onFileLoad(Unit* efile) {}
-  virtual void onDefClass(const Class* cls) {}
-  virtual void onDefFunc(const Func* func) {}
+  virtual void onError(const ExtendedException& /*ee*/, int /*errnum*/,
+                       const std::string& /*message*/) {}
+  virtual void onEval(const Func* /*f*/) {}
+  virtual void onFileLoad(Unit* /*efile*/) {}
+  virtual void onDefClass(const Class* /*cls*/) {}
+  virtual void onDefFunc(const Func* /*func*/) {}
+  virtual void onRegisterFuncIntercept(const String& /*name*/) {}
 
   // Called whenever the program counter is at a location that could be
   // interesting to a debugger. Such as when have hit a registered breakpoint
   // (regardless of type), when interrupt forcing is enabled, or when the pc is
   // over an active line breakpoint
-  virtual void onOpcode(const unsigned char* pc) {}
+  virtual void onOpcode(const unsigned char* /*pc*/) {}
 
-  // Called right before top-level pseudo-main enters and right after it
-  // exits. This is useful for debuggers to initialize and shutdown separate
-  // from an extension as they can assume other extensions are initialized.
+  // Called right before top-level pseudo-main enters. This may be useful for
+  // debuggers to initialize separate from an extension as they can assume
+  // other extensions are initialized.
   virtual void onRequestInit() {}
-  virtual void onRequestShutdown() {}
 
   // Called whenever we are breaking due to completion of a step in or step out
-  virtual void onStepInBreak(const Unit* unit, int line) {}
-  virtual void onStepOutBreak(const Unit* unit, int line) {}
-  virtual void onNextBreak(const Unit* unit, int line) {}
+  virtual void onStepInBreak(const Unit* /*unit*/, int /*line*/) {}
+  virtual void onStepOutBreak(const Unit* /*unit*/, int /*line*/) {}
+  virtual void onNextBreak(const Unit* /*unit*/, int /*line*/) {}
 
   // Called when we have hit a registered function entry breakpoint
-  virtual void onFuncEntryBreak(const Func* f) {}
+  virtual void onFuncEntryBreak(const Func* /*f*/) {}
 
   // Called when we have hit a registered function exit breakpoint
-  virtual void onFuncExitBreak(const Func* f) {}
+  virtual void onFuncExitBreak(const Func* /*f*/) {}
 
   // Called when we have hit a registered line breakpoint. Even though a line
   // spans multiple opcodes, this will only be called once per hit.
-  virtual void onLineBreak(const Unit* unit, int line) {}
+  virtual void onLineBreak(const Unit* /*unit*/, int /*line*/) {}
 
   // The number of DebuggerHooks that are currently attached to the process.
   // The mutex is needed because we need to perform work when we are sure there
   // are no hooks attached.
   static Mutex s_lock;
   static int s_numAttached;
+  static DebuggerHook* s_activeHook;
 };
 
 // Returns the current hook.
 inline DebuggerHook* getDebuggerHook() {
-  return TI().m_debuggerHook;
+  return RI().m_debuggerHook;
 }
 
 // Is this process being debugged? Since this is across all threads, this cannot
@@ -180,18 +228,18 @@ inline bool isDebuggerAttachedProcess() {
 // execution indefinitely within one of these hooks.
 void phpDebuggerOpcodeHook(const unsigned char* pc);
 void phpDebuggerRequestInitHook();
-void phpDebuggerRequestShutdownHook();
 void phpDebuggerFuncEntryHook(const ActRec* ar);
 void phpDebuggerFuncExitHook(const ActRec* ar);
 void phpDebuggerExceptionThrownHook(ObjectData* exception);
 void phpDebuggerExceptionHandlerHook() noexcept;
-void phpDebuggerErrorHook(const ExtendedException &ee,
+void phpDebuggerErrorHook(const ExtendedException& ee,
                           int errnum,
                           const std::string& message);
 void phpDebuggerEvalHook(const Func* f);
 void phpDebuggerFileLoadHook(Unit* efile);
 void phpDebuggerDefClassHook(const Class* cls);
 void phpDebuggerDefFuncHook(const Func* func);
+void phpDebuggerInterceptRegisterHook(const String& name);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Flow commands
@@ -218,7 +266,6 @@ void phpDebuggerNext();
 
 // Add breakpoints of various types
 void phpAddBreakPoint(const Unit* unit, Offset offset);
-void phpAddBreakPointRange(const Unit* unit, OffsetRangeVec& offsets);
 void phpAddBreakPointFuncEntry(const Func* f);
 void phpAddBreakPointFuncExit(const Func* f);
 // Returns false if the line is invalid
@@ -242,6 +289,13 @@ void phpRemoveBreakPointFuncExit(const Func* f);
 void phpRemoveBreakPointLine(const Unit* unit, int line);
 
 bool phpHasBreakpoint(const Unit* unit, Offset offset);
+
+StackDepthDisposition getStackDisposition(int baseline);
+
+PCFilter* getBreakPointFilter();
+PCFilter* getFlowFilter();
+
+String getCurrentFilePath(int* pLine);
 
 }
 

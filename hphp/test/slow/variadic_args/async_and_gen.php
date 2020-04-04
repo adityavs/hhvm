@@ -6,15 +6,16 @@ async function genEager(...$args) {
 }
 
 function block() { // simulates blocking I/O
-  return RescheduleWaitHandle::create(1,1);
-};
-
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
+}
 function generator(...$args) {
   yield 'a';
   yield $args;
   yield break;
-};
-
+}
 async function genBlocking(...$args) {
   echo "before blocking\n";
   var_dump($args);
@@ -37,4 +38,10 @@ function main() {
     var_dump($yielded);
   }
 }
+
+<<__EntryPoint>>
+function main_async_and_gen() {
+;
+;
 main();
+}

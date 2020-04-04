@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,8 +26,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlTimeZone;
 
-class IntlTimeZone : public IntlError {
- public:
+struct IntlTimeZone : IntlError {
   IntlTimeZone() {}
   IntlTimeZone(const IntlTimeZone&) = delete;
   IntlTimeZone& operator=(const IntlTimeZone& src) {
@@ -41,7 +40,7 @@ class IntlTimeZone : public IntlError {
   static Object newInstance(icu::TimeZone *tz = nullptr, bool owned = true) {
     if (!c_IntlTimeZone) {
       c_IntlTimeZone = Unit::lookupClass(s_IntlTimeZone.get());
-      assert(c_IntlTimeZone);
+      assertx(c_IntlTimeZone);
     }
     Object obj{c_IntlTimeZone};
     if (tz) {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,29 +18,31 @@
 #ifndef incl_HPHP_EXT_ASIO_ASYNC_GENERATOR_H_
 #define incl_HPHP_EXT_ASIO_ASYNC_GENERATOR_H_
 
+#include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/ext/asio/ext_async-generator-wait-handle.h"
 #include "hphp/runtime/ext/generator/ext_generator.h"
 #include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
-class c_AsyncGeneratorWaitHandle;
-class c_StaticWaitHandle;
-class c_WaitableWaitHandle;
+struct c_AsyncGeneratorWaitHandle;
+struct c_StaticWaitHandle;
+struct c_WaitableWaitHandle;
+struct c_Awaitable;
 
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncGenerator
 
-class AsyncGenerator final : public BaseGenerator {
-public:
-   AsyncGenerator() : m_waitHandle(nullptr) {}
+struct AsyncGenerator final : BaseGenerator {
+   AsyncGenerator() : m_waitHandle() {}
   ~AsyncGenerator();
 
   static ObjectData* Create(const ActRec* fp, size_t numSlots,
-                            jit::TCA resumeAddr, Offset resumeOffset);
+                            jit::TCA resumeAddr, Offset suspendOffset);
   static Class* getClass() {
-    assert(s_class);
+    assertx(s_class);
     return s_class;
   }
   static constexpr ptrdiff_t objectOff() {
@@ -50,10 +52,8 @@ public:
     return Native::data<AsyncGenerator>(obj);
   }
 
-  c_AsyncGeneratorWaitHandle* await(Offset resumeOffset,
-                                    c_WaitableWaitHandle* child);
-  c_StaticWaitHandle* yield(Offset resumeOffset,
-                            const Cell* key, Cell value);
+  c_StaticWaitHandle* yield(Offset suspendOffset,
+                            const TypedValue* key, TypedValue value);
   c_StaticWaitHandle* ret();
   c_StaticWaitHandle* fail(ObjectData* exception);
   void failCpp();
@@ -63,18 +63,27 @@ public:
   }
 
   bool isEagerlyExecuted() const {
-    assert(getState() == State::Running);
-    return m_waitHandle == nullptr;
+    assertx(isRunning());
+    return !m_waitHandle;
   }
 
   c_AsyncGeneratorWaitHandle* getWaitHandle() const {
-    assert(getState() == State::Running);
-    return m_waitHandle;
+    assertx(!isEagerlyExecuted());
+    return m_waitHandle.get();
+  }
+
+  req::ptr<c_AsyncGeneratorWaitHandle> detachWaitHandle() {
+    return std::move(m_waitHandle);
+  }
+
+  void attachWaitHandle(req::ptr<c_AsyncGeneratorWaitHandle>&& waitHandle) {
+    assertx(isEagerlyExecuted());
+    m_waitHandle = std::move(waitHandle);
   }
 
 private:
   // valid only in Running state; null during eager execution
-  c_AsyncGeneratorWaitHandle* m_waitHandle;
+  req::ptr<c_AsyncGeneratorWaitHandle> m_waitHandle;
 
 public:
   static Class* s_class;

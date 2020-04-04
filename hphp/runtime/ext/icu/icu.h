@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,9 +21,11 @@
 #include "hphp/runtime/vm/native-data.h"
 #include <unicode/utypes.h>
 #include <unicode/ucnv.h>
+#include <unicode/unistr.h>
 #include <unicode/ustring.h>
+#include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/runtime/base/request-local.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 /////////////////////////////////////////////////////////////////////////////
@@ -32,19 +34,12 @@ namespace Intl {
 
 /* Common error handling logic used by all Intl classes
  */
-class IntlError {
- public:
+struct IntlError {
   void setError(UErrorCode code, const char *format = nullptr, ...);
   void clearError(bool clearGlobalError = true);
 
-  Object getException(const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-    return SystemLib::AllocExceptionObject(buffer);
-  }
+  [[noreturn]]
+  void throwException(const char *format, ...);
 
   UErrorCode getErrorCode() const { return m_errorCode; }
 
@@ -99,8 +94,7 @@ inline String u8(const icu::UnicodeString& u16, UErrorCode& error) {
   return u8(u16.getBuffer(), u16.length(), error);
 }
 
-class IntlExtension final : public Extension {
- public:
+struct IntlExtension final : Extension {
   IntlExtension() : Extension("intl", "1.1.0") {}
 
   void moduleInit() override {
@@ -130,7 +124,6 @@ class IntlExtension final : public Extension {
   void threadInit() override {
     bindIniSettings();
   }
-  void threadShutdown() override;
  private:
   void bindIniSettings();
   void bindConstants();
@@ -167,7 +160,6 @@ struct IntlGlobalError final : RequestEventHandler, Intl::IntlError {
   void requestShutdown() override {
     clearError();
   }
-  void vscan(IMarker&) const override {}
 };
 DECLARE_EXTERN_REQUEST_LOCAL(IntlGlobalError, s_intl_error);
 

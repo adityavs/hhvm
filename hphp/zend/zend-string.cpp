@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -16,12 +16,175 @@
 */
 
 #include "hphp/zend/zend-string.h"
+
 #include <cinttypes>
+
 #include "hphp/util/assertions.h"
 #include "hphp/util/mutex.h"
 #include "hphp/util/lock.h"
+#include "hphp/zend/crypt-blowfish.h"
+
+#include <folly/portability/Unistd.h>
+
+#if defined(_MSC_VER) || defined(__APPLE__)
+# include "hphp/zend/php-crypt_r.h"
+# define USE_PHP_CRYPT_R 1
+#else
+# include <crypt.h>
+#endif
 
 namespace HPHP {
+
+int string_copy(char *dst, const char *src, int siz) {
+  register char *d = dst;
+  register const char *s = src;
+  register size_t n = siz;
+
+  /* Copy as many bytes as will fit */
+  if (n != 0 && --n != 0) {
+    do {
+      if ((*d++ = *s++) == 0)
+        break;
+    } while (--n != 0);
+  }
+
+  /* Not enough room in dst, add NUL and traverse rest of src */
+  if (n == 0) {
+    if (siz != 0)
+      *d = '\0';    /* NUL-terminate dst */
+    while (*s++)
+      ;
+  }
+
+  return(s - src - 1);  /* count does not include NUL */
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// comparisons
+
+int string_ncmp(const char *s1, const char *s2, int len) {
+  for (int i = 0; i < len; i++) {
+    char c1 = s1[i];
+    char c2 = s2[i];
+    if (c1 > c2) return 1;
+    if (c1 < c2) return -1;
+  }
+  return 0;
+}
+
+static int compare_right(char const **a, char const *aend,
+                         char const **b, char const *bend) {
+  int bias = 0;
+
+  /* The longest run of digits wins.  That aside, the greatest
+     value wins, but we can't know that it will until we've scanned
+     both numbers to know that they have the same magnitude, so we
+     remember it in BIAS. */
+  for(;; (*a)++, (*b)++) {
+    if ((*a == aend || !isdigit((int)(unsigned char)**a)) &&
+        (*b == bend || !isdigit((int)(unsigned char)**b)))
+      return bias;
+    else if (*a == aend || !isdigit((int)(unsigned char)**a))
+      return -1;
+    else if (*b == bend || !isdigit((int)(unsigned char)**b))
+      return +1;
+    else if (**a < **b) {
+      if (!bias)
+        bias = -1;
+    } else if (**a > **b) {
+      if (!bias)
+        bias = +1;
+    }
+  }
+
+  return 0;
+}
+
+static int compare_left(char const **a, char const *aend,
+                        char const **b, char const *bend) {
+  /* Compare two left-aligned numbers: the first to have a
+     different value wins. */
+  for(;; (*a)++, (*b)++) {
+    if ((*a == aend || !isdigit((int)(unsigned char)**a)) &&
+        (*b == bend || !isdigit((int)(unsigned char)**b)))
+      return 0;
+    else if (*a == aend || !isdigit((int)(unsigned char)**a))
+      return -1;
+    else if (*b == bend || !isdigit((int)(unsigned char)**b))
+      return +1;
+    else if (**a < **b)
+      return -1;
+    else if (**a > **b)
+      return +1;
+  }
+
+  return 0;
+}
+
+int string_natural_cmp(char const *a, size_t a_len,
+                       char const *b, size_t b_len, int fold_case) {
+  char ca, cb;
+  char const *ap, *bp;
+  char const *aend = a + a_len, *bend = b + b_len;
+  int fractional, result;
+
+  if (a_len == 0 || b_len == 0)
+    return a_len - b_len;
+
+  ap = a;
+  bp = b;
+  while (1) {
+    ca = *ap; cb = *bp;
+
+    /* skip over leading spaces or zeros */
+    while (isspace((int)(unsigned char)ca))
+      ca = *++ap;
+
+    while (isspace((int)(unsigned char)cb))
+      cb = *++bp;
+
+    /* process run of digits */
+    if (isdigit((int)(unsigned char)ca)  &&  isdigit((int)(unsigned char)cb)) {
+      fractional = (ca == '0' || cb == '0');
+
+      if (fractional)
+        result = compare_left(&ap, aend, &bp, bend);
+      else
+        result = compare_right(&ap, aend, &bp, bend);
+
+      if (result != 0)
+        return result;
+      else if (ap == aend && bp == bend)
+        /* End of the strings. Let caller sort them out. */
+        return 0;
+      else {
+        /* Keep on comparing from the current point. */
+        ca = *ap; cb = *bp;
+      }
+    }
+
+    if (fold_case) {
+      ca = toupper((int)(unsigned char)ca);
+      cb = toupper((int)(unsigned char)cb);
+    }
+
+    if (ca < cb)
+      return -1;
+    else if (ca > cb)
+      return +1;
+
+    ++ap; ++bp;
+    if (ap >= aend && bp >= bend)
+      /* The strings compare the same.  Perhaps the caller
+         will want to call strcmp to break the tie. */
+      return 0;
+    else if (ap >= aend)
+      return -1;
+    else if (bp >= bend)
+      return 1;
+  }
+}
+
 
 //////////////////////////////////////////////////////////////////////
 
@@ -155,11 +318,73 @@ int string_crc32(const char *p, int len) {
 ///////////////////////////////////////////////////////////////////////////////
 // crypt
 
-#include <unistd.h>
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
-# include <crypt.h>
+#ifdef USE_PHP_CRYPT_R
+
+char* php_crypt_r(const char* key, const char* salt) {
+  if (salt[0] == '$' && salt[1] == '1' && salt[2] == '$') {
+    char output[MD5_HASH_MAX_LEN], *out;
+
+    out = php_md5_crypt_r(key, salt, output);
+    return out ? strdup(out) : nullptr;
+  } else if (salt[0] == '$' && salt[1] == '6' && salt[2] == '$') {
+    char output[PHP_MAX_SALT_LEN + 1];
+
+    char* crypt_res = php_sha512_crypt_r(key, salt, output, PHP_MAX_SALT_LEN);
+    if (!crypt_res) {
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return nullptr;
+    } else {
+      char* result = strdup(output);
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return result;
+    }
+  } else if (salt[0] == '$' && salt[1] == '5' && salt[2] == '$') {
+    char output[PHP_MAX_SALT_LEN + 1];
+
+    char* crypt_res = php_sha256_crypt_r(key, salt, output, PHP_MAX_SALT_LEN);
+    if (!crypt_res) {
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return nullptr;
+    } else {
+      char* result = strdup(output);
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return result;
+    }
+  } else if (
+    salt[0] == '$' &&
+    salt[1] == '2' &&
+    salt[3] == '$') {
+    char output[PHP_MAX_SALT_LEN + 1];
+
+    memset(output, 0, PHP_MAX_SALT_LEN + 1);
+
+    char* crypt_res = php_crypt_blowfish_rn(key, salt, output, sizeof(output));
+    if (!crypt_res) {
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return nullptr;
+    } else {
+      char* result = strdup(output);
+      SECURE_ZERO(output, PHP_MAX_SALT_LEN + 1);
+      return result;
+    }
+  } else if (salt[0] == '*' && (salt[1] == '0' || salt[1] == '1')) {
+    return nullptr;
+  } else {
+    struct php_crypt_extended_data buffer;
+    /* DES Fallback */
+    memset(&buffer, 0, sizeof(buffer));
+    _crypt_extended_init_r();
+
+    char* crypt_res = _crypt_extended_r(key, salt, &buffer);
+    if (!crypt_res || (salt[0] == '*' && salt[1] == '0')) {
+      return nullptr;
+    } else {
+      return strdup(crypt_res);
+    }
+  }
+}
+
 #endif
-#include "hphp/zend/crypt-blowfish.h"
 
 static unsigned char itoa64[] =
   "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -198,25 +423,17 @@ char *string_crypt(const char *key, const char *salt) {
 
   } else {
     // System crypt() function
-#ifdef HAVE_CRYPT_R
-# if defined(CRYPT_R_STRUCT_CRYPT_DATA)
-    struct crypt_data buffer;
-    memset(&buffer, 0, sizeof(buffer));
-# elif defined(CRYPT_R_CRYPTD)
-    CRYPTD buffer;
-# else
-#  error "Data struct used by crypt_r() is unknown. Please report."
-# endif
-    char *crypt_res = crypt_r(key, salt, &buffer);
+#ifdef USE_PHP_CRYPT_R
+    return php_crypt_r(key, salt);
 #else
     static Mutex mutex;
     Lock lock(mutex);
     char *crypt_res = crypt(key,salt);
-#endif
 
     if (crypt_res) {
       return strdup(crypt_res);
     }
+#endif
   }
 
   return ((salt[0] == '*') && (salt[1] == '0'))
@@ -239,7 +456,6 @@ char *string_bin2hex(const char *input, int len, char* result) {
     result[j++] = hexconvtab[(unsigned char)input[i] & 15];
   }
   result[j] = '\0';
-  len = j;
   return result;
 }
 

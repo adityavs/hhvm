@@ -1,11 +1,11 @@
-<?php
+<?hh
 
 
 class C {
   const x = "C::x constant";
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   print "Test begin\n";
 
   var_dump(C::x);
@@ -14,4 +14,3 @@ function main() {
 
   print "Test end\n";
 }
-main();

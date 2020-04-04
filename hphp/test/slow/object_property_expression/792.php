@@ -1,18 +1,22 @@
-<?php
+<?hh
 
 class C1 {
   public function __get( $what ) {
     echo "get
 ";
-    return $this->_p[ $what ];
+    try { return $this->_p[ $what ]; }
+    catch (Exception $e) { echo $e->getMessage()."\n"; return null; }
   }
   public function __set( $what, $value ) {
     echo "set
 ";
     $this->_p[ $what ] = $value;
   }
-  private $_p = array();
+  private $_p = varray[];
 }
+
+<<__EntryPoint>>
+function main_792() {
 $c = new C1();
 $c->a += 1;
 print $c->a;
@@ -36,3 +40,4 @@ $c->a &= 333;
 print $c->a;
 $c->a |= 7;
 print $c->a;
+}

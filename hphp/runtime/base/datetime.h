@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,7 @@
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/timezone.h"
 #include "hphp/runtime/base/dateinterval.h"
-#include "hphp/runtime/base/request-local.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -33,8 +33,7 @@ namespace HPHP {
  * Encapsulating all date/time manipulations, conversions, input and output
  * into this one single class.
  */
-class DateTime final : public SweepableResourceData {
-public:
+struct DateTime final : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(DateTime);
 
   /**
@@ -268,7 +267,7 @@ public:
   void setISODate(int year, int week, int day = 1);
   void setTime(int hour, int minute, int second = 0);
   void setTimezone(req::ptr<TimeZone> tz);
-  void modify(const String& diff); // PHP's date_modify() function, muy powerful
+  bool modify(const String& diff); // PHP's date_modify() function, muy powerful
   void add(const req::ptr<DateInterval>& interval);
   void sub(const req::ptr<DateInterval>& interval);
 
@@ -286,6 +285,7 @@ public:
   // comparison
   req::ptr<DateInterval> diff(req::ptr<DateTime> datetime2,
                               bool absolute = false);
+  int compare(req::ptr<DateTime> datetime2);
 
   // cloning
   req::ptr<DateTime> cloneDateTime() const;
@@ -315,8 +315,8 @@ private:
       m_errors = ec;
     }
     Array getLastWarnings() const {
-      if (!m_errors) return empty_array();
-      ArrayInit ret(m_errors->warning_count, ArrayInit::Map{});
+      if (!m_errors) return Array::CreateDArray();
+      DArrayInit ret(m_errors->warning_count);
       for(int i = 0; i < m_errors->warning_count; i++) {
         timelib_error_message *em = m_errors->warning_messages + i;
         ret.set(em->position, String(em->message, CopyString));
@@ -324,15 +324,14 @@ private:
       return ret.toArray();
     }
     Array getLastErrors() const {
-      if (!m_errors) return empty_array();
-      ArrayInit ret(m_errors->error_count, ArrayInit::Map{});
+      if (!m_errors) return Array::CreateDArray();
+      DArrayInit ret(m_errors->error_count);
       for(int i = 0; i < m_errors->error_count; i++) {
         timelib_error_message *em = m_errors->error_messages + i;
         ret.set(em->position, String(em->message, CopyString));
       }
       return ret.toArray();
     }
-    void vscan(IMarker&) const override {}
 
   private:
     timelib_error_container *m_errors;

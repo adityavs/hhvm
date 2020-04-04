@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class rii extends RecursiveIteratorIterator
 {
@@ -23,9 +23,19 @@ class rii extends RecursiveIteratorIterator
   }
 }
 
-$ar = array(1, 2, array(31));
+class MyAggregate implements IteratorAggregate {
+  public function __construct(public $a) {}
 
-$it = new rii(new ArrayObject($ar, 0, "RecursiveArrayIterator"));
+  public function getIterator() {
+    return new RecursiveArrayIterator($this->a);
+  }
+}
+
+<<__EntryPoint>>
+function main_recursive_iterator_iterator_begin_end_iteration() {
+$ar = varray[1, 2, varray[31]];
+
+$it = new rii(new MyAggregate($ar));
 
 $it->rewind();
 $it->rewind();
@@ -36,3 +46,4 @@ while($it->valid()) // call EndIteration on last call
 
 $it->valid(); // Don't call EndIteration
 $it->valid(); // Don't
+}

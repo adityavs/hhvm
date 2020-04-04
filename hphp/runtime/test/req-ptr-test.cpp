@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -128,16 +128,16 @@ TEST(ReqPtr, Casts) {
 
     try {
       cast<File>(res);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     try {
       cast<DummyResource>(empty);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // cast_or_null tests
@@ -147,9 +147,9 @@ TEST(ReqPtr, Casts) {
 
     try {
       cast_or_null<File>(res);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast tests
@@ -159,9 +159,9 @@ TEST(ReqPtr, Casts) {
     EXPECT_EQ(dyn_cast<File>(res), nullptr);
     try {
       dyn_cast<File>(emptyFile);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast_or_null

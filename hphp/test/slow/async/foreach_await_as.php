@@ -1,4 +1,4 @@
-<?hh
+<?hh // decl
 
 class DestructLogger {
   private $where;
@@ -7,9 +7,6 @@ class DestructLogger {
     echo "constructing in {$this->where}\n";
   }
 
-  private function __destruct() {
-    echo "destructing in {$this->where}\n";
-  }
 }
 
 function l($obj, $where) {
@@ -18,7 +15,7 @@ function l($obj, $where) {
 }
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function foo($from, $to) {
@@ -36,7 +33,7 @@ async function bar($from, $to) {
     if ($num > 47) {
       break;
     }
-    yield $num => array($num * $num, $num * $num * $num);
+    yield $num => varray[$num * $num, $num * $num * $num];
   }
   echo "end bar\n";
 }
@@ -53,4 +50,8 @@ async function baz($from, $to) {
   echo "end baz\n";
 }
 
+
+<<__EntryPoint>>
+function main_foreach_await_as() {
 HH\Asio\join(baz(42, 100));
+}

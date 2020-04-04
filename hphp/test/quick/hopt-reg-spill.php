@@ -1,4 +1,4 @@
-<?php
+<?hh
 function foo($t0, $t1, $t2, $t3, $t4, $t5, $t6, $t7,
              $t8, $t9, $t10, $t11, $t12, $t13, $t14, $t15) {
   $sum = 0;
@@ -49,5 +49,6 @@ function foo($t0, $t1, $t2, $t3, $t4, $t5, $t6, $t7,
   if ($sum != 0)
     echo $sum . "\n";
 }
-
+<<__EntryPoint>> function main(): void {
 foo(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+}

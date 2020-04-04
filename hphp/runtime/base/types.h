@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,74 +23,30 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class String;
+struct String;
 struct StaticString;
-class Array;
-class Variant;
-class VarNR;
+struct Array;
+struct Variant;
 
-extern const Variant null_variant;      // uninitialized variant
-extern const Variant init_null_variant; // php null
-extern const VarNR null_varNR;
-extern const VarNR true_varNR;
-extern const VarNR false_varNR;
-extern const VarNR INF_varNR;
-extern const VarNR NEGINF_varNR;
-extern const VarNR NAN_varNR;
+#define uninit_variant    tvAsCVarRef(&immutable_uninit_base)
+#define init_null_variant tvAsCVarRef(&immutable_null_base)
+
 extern const String null_string;
 extern const Array null_array;
-extern const Array empty_array_ref;
 extern const StaticString array_string; // String("Array")
+extern const StaticString vec_string; // String("Vec")
+extern const StaticString dict_string; // String("Dict")
+extern const StaticString keyset_string; // String("Keyset")
 
 // Use empty_string() if you're returning String
-// Use empty_string_variant() if you're returning Variant
+// Use empty_string_tv() if you're returning TypedValue
 // Or use these if you need to pass by const reference:
 extern const StaticString empty_string_ref; // const StaticString&
-extern const Variant empty_string_variant_ref; // const Variant&
 
-class StringData;
+struct StringData;
 using LowStringPtr = LowPtr<const StringData>;
 
 ///////////////////////////////////////////////////////////////////////////////
-
-using VRefParam = const class VRefParamValue&;
-using RefResult = const class RefResultValue&;
-
-inline const Variant& variant(RefResult v)      {
-  return *(Variant*)&v;
-}
-
-inline const Variant& variant(const Variant& v) {
-  return v;
-}
-
-/**
- * ref() can be used to cause strong binding.
- *
- *   a = ref(b); // strong binding: now both a and b point to the same data
- *   a = b;      // weak binding: a will copy or copy-on-write
- *
- */
-inline RefResult ref(const Variant& v) {
-  return *(RefResultValue*)&v;
-}
-
-inline RefResult ref(Variant& v) {
-  return *(RefResultValue*)&v;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-struct AccessFlags {
-  enum Type {
-    None = 0,
-    Error = 1,
-    Key = 2,
-    Error_Key = Error | Key,
-  };
-  static Type IsKey(bool s) { return s ? Key : None; }
-  static Type IsError(bool e) { return e ? Error : None; }
-};
 
 /*
  * Program counters in the bytecode interpreter.
@@ -108,6 +64,21 @@ using PC = const uint8_t*;
  */
 using Id = int;
 constexpr Id kInvalidId = -1;
+
+
+/*
+ * Id type for local names.  Indexes into the local name table of the func.
+ */
+using LocalName = int;
+constexpr LocalName kInvalidLocalName = -1;
+
+/*
+ * A local index alongside an local name id.
+ */
+struct NamedLocal {
+  LocalName name;
+  int32_t id;
+};
 
 /*
  * Translation IDs.

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,7 +20,9 @@
 
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/util/data-block.h"
+#include "hphp/util/rds-local.h"
 #include "hphp/util/trace.h"
+
 
 namespace HPHP {
 namespace Stats {
@@ -35,30 +37,17 @@ namespace Stats {
   STAT(TgtCache_StaticMethodFHit) \
   STAT(TgtCache_StaticMethodFMiss) \
   STAT(TgtCache_StaticMethodFFill) \
-  /* Type prediction stats */ \
-  STAT(TypePred_Insert) \
-  STAT(TypePred_Evict) \
-  STAT(TypePred_Hit) \
-  STAT(TypePred_Miss) \
-  STAT(TypePred_MissTooFew) \
-  STAT(TypePred_MissTooWeak) \
   /* Translation cache statistics */ \
   STAT(TC_Sync) \
   STAT(TC_SyncUnwind) \
   STAT(TC_CatchTrace) \
   STAT(TC_CatchSideExit) \
   STAT(TC_DecRef_NZ) \
-  STAT(TC_DecRef_Normal_Decl) \
-  STAT(TC_DecRef_Normal_Destroy) \
-  STAT(TC_DecRef_Likely_Decl) \
-  STAT(TC_DecRef_Likely_Destroy) \
   STAT(TC_DecRef_Profiled_100) \
   STAT(TC_DecRef_Profiled_0) \
   /* Execute pseudomain */ \
-  STAT(PseudoMain_Reentered) \
   STAT(PseudoMain_Executed) \
   STAT(PseudoMain_Skipped) \
-  STAT(PseudoMain_SkipDeep) \
   STAT(PseudoMain_Guarded) \
   STAT(VMEnter) \
   /* Unit merging stats */ \
@@ -72,31 +61,14 @@ namespace Stats {
   STAT(UnitMerge_mergeable_unique_persistent) \
   STAT(UnitMerge_mergeable_unique_persistent_cache) \
   STAT(UnitMerge_mergeable_define) \
-  STAT(UnitMerge_mergeable_global) \
+  STAT(UnitMerge_mergeable_persistent_define) \
   STAT(UnitMerge_mergeable_class) \
-  STAT(UnitMerge_mergeable_require) \
+  STAT(UnitMerge_mergeable_record) \
   STAT(UnitMerge_mergeable_typealias) \
   STAT(UnitMerge_redo_hoistable) \
   /* stub reuse stats */ \
   STAT(Astub_New) \
   STAT(Astub_Reused) \
-  /* Switches */ \
-  STAT(Switch_Generic) \
-  STAT(Switch_Integer) \
-  STAT(Switch_String) \
-  /* ARM simulator */ \
-  STAT(vixl_SimulatedInstr) \
-  STAT(vixl_SimulatedLoad) \
-  STAT(vixl_SimulatedStore) \
-  /* ArrayGet */ \
-  STAT(ArrayGet_Total) \
-  STAT(ArrayGet_Opt) \
-  STAT(ArrayGet_Mono) \
-  STAT(ArrayGet_Packed) \
-  STAT(ArrayGet_Mixed) \
-  /* ObjectData construction */ \
-  STAT(ObjectData_new_dtor_yes) \
-  STAT(ObjectData_new_dtor_no) \
   STAT(ObjMethod_total) \
   STAT(ObjMethod_known) \
   STAT(ObjMethod_methodslot) \
@@ -113,7 +85,12 @@ enum StatCounter {
 #undef O
 
 extern const char* g_counterNames[kNumStatCounters];
-extern __thread uint64_t tl_counters[kNumStatCounters];
+
+struct StatCounters {
+  uint64_t counters[kNumStatCounters];
+};
+
+extern RDS_LOCAL(StatCounters, rl_counters);
 
 inline bool enabled() {
   return Trace::moduleEnabled(Trace::stats, 1);
@@ -129,25 +106,14 @@ inline bool enableInstrCount() {
 
 inline void inc(StatCounter stat, int n = 1) {
   if (enabled()) {
-    tl_counters[stat] += n;
+    rl_counters->counters[stat] += n;
   }
 }
 
-static_assert(static_cast<uint64_t>(OpLowInvalid) == 0,
-              "stats.h assumes OpLowInvalid == 0");
-
-inline StatCounter opcodeToStatCounter(Op opc) {
-  return StatCounter(Instr_InterpBBLowInvalid +
-                     STATS_PER_OPCODE * uint8_t(opc));
-}
-
-inline void incOp(Op opc) {
-  inc(opcodeToStatCounter(opc));
-}
-
-inline StatCounter opcodeToTranslStatCounter(Op opc) {
-  return StatCounter(Instr_TranslLowInvalid +
-                     STATS_PER_OPCODE * uint8_t(opc));
+// see stats-opcodeDef.h
+// which_ctr: 0 = Instr_InterpOne, 1 = InterpBB, 2 = Transl
+inline StatCounter opToTranslStat(Op opc, size_t which_ctr = 0) {
+  return StatCounter(which_ctr + STATS_PER_OPCODE * size_t(opc));
 }
 
 extern void init();

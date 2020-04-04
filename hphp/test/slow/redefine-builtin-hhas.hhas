@@ -1,0 +1,20 @@
+.hh_file 1;
+#
+# Can't redefine builtins, even if you bypass the parser
+#
+
+.main {
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "parse_str"
+  PopC
+  Int 1
+  RetC
+}
+
+.function parse_str {
+  String "Fake parse_str!\n"
+  Print
+  RetC
+}

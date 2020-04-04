@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class a {
   private static function priv() {
@@ -10,8 +10,7 @@ class a {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   a::pub();
   a::priv();
 }
-main();

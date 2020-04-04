@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,139 +16,231 @@
 #ifndef HPHP_HEAP_SCAN_H
 #define HPHP_HEAP_SCAN_H
 
-#include "hphp/runtime/base/string-data.h"
-#include "hphp/runtime/base/array-data.h"
-#include "hphp/runtime/base/object-data.h"
-#include "hphp/runtime/base/resource-data.h"
-#include "hphp/runtime/base/ref-data.h"
-#include "hphp/runtime/base/proxy-array.h"
-#include "hphp/runtime/base/packed-array.h"
-#include "hphp/runtime/base/packed-array-defs.h"
-#include "hphp/runtime/base/mixed-array.h"
-#include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/apc-local-array.h"
 #include "hphp/runtime/base/apc-local-array-defs.h"
-#include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/vm/globals-array.h"
-#include "hphp/runtime/base/rds-header.h"
-#include "hphp/runtime/base/imarker.h"
+#include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/base/heap-graph.h"
 #include "hphp/runtime/base/memory-manager.h"
-#include "hphp/runtime/ext/extension-registry.h"
-#include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/runtime/server/server-note.h"
-#include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
-#include "hphp/runtime/ext/asio/asio-external-thread-event-queue.h"
-#include "hphp/runtime/ext/asio/ext_reschedule-wait-handle.h"
-#include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
-#include "hphp/runtime/ext/asio/ext_resumable-wait-handle.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/object-data.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
+#include "hphp/runtime/base/rds-header.h"
+#include "hphp/runtime/base/req-root.h"
+#include "hphp/runtime/base/resource-data.h"
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/base/request-info.h"
 
-#ifdef ENABLE_ZEND_COMPAT
-#include "hphp/runtime/ext_zend_compat/php-src/TSRM/TSRM.h"
-#endif
+#include "hphp/runtime/ext/asio/asio-external-thread-event-queue.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-generator.h"
+#include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_reschedule-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_resumable-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
+#include "hphp/runtime/ext/extension-registry.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
+
+#include "hphp/runtime/server/server-note.h"
+
+#include "hphp/runtime/vm/globals-array.h"
+#include "hphp/runtime/vm/named-entity.h"
+#include "hphp/runtime/vm/named-entity-defs.h"
+#include "hphp/runtime/vm/runtime.h"
+
+#include "hphp/util/hphp-config.h"
+
+#include "hphp/util/rds-local.h"
+#include "hphp/util/type-scan.h"
 
 namespace HPHP {
 
-template<class F> void scanHeader(const Header* h, F& mark) {
+inline void scanFrameSlots(const ActRec* ar, type_scan::Scanner& scanner) {
+  // layout: [iters][locals][ActRec]
+  //                        ^ar
+  auto num_locals = ar->func()->numLocals();
+  auto locals = frame_local(ar, num_locals - 1);
+  scanner.scan(*locals, num_locals * sizeof(TypedValue));
+  auto num_iters = ar->func()->numIterators();
+  auto iters = frame_iter(ar, num_iters - 1);
+  scanner.scan(*iters, num_iters * sizeof(Iter));
+}
+
+inline void scanNative(const NativeNode* node, type_scan::Scanner& scanner) {
+  auto obj = Native::obj(node);
+  auto ndi = obj->getVMClass()->getNativeDataInfo();
+  auto data = (const char*)obj - ndi->sz;
+  scanner.scanByIndex(node->typeIndex(), data, ndi->sz);
+  if (auto off = node->arOff()) {
+    scanFrameSlots((const ActRec*)((const char*)node + off), scanner);
+  }
+}
+
+inline void scanAFWH(const c_Awaitable* wh, type_scan::Scanner& scanner) {
+  assertx(!wh->hasNativeData());
+  // scan ResumableHeader before object
+  auto r = Resumable::FromObj(wh);
+  if (!wh->isFinished()) {
+    scanFrameSlots(r->actRec(), scanner);
+    scanner.scan(*r);
+  }
+  return wh->scan(scanner);
+}
+
+inline void scanMemoSlots(const ObjectData* obj,
+                          type_scan::Scanner& scanner,
+                          bool isNative) {
+  auto const cls = obj->getVMClass();
+  assertx(cls->hasMemoSlots());
+
+  if (!obj->getAttribute(ObjectData::UsedMemoCache)) return;
+
+  auto const numSlots = cls->numMemoSlots();
+  if (!isNative) {
+    for (Slot i = 0; i < numSlots; ++i) scanner.scan(*obj->memoSlot(i));
+  } else {
+    auto const ndi = cls->getNativeDataInfo();
+    for (Slot i = 0; i < numSlots; ++i) {
+      scanner.scan(*obj->memoSlotNativeData(i, ndi->sz));
+    }
+  }
+}
+
+inline void scanHeapObject(const HeapObject* h, type_scan::Scanner& scanner) {
   switch (h->kind()) {
-    case HeaderKind::Proxy:
-      return h->proxy_.scan(mark);
     case HeaderKind::Empty:
       return;
     case HeaderKind::Packed:
-      return PackedArray::scan(&h->arr_, mark);
-    case HeaderKind::Struct:
-      return h->struct_.scan(mark);
+    case HeaderKind::VecArray:
+      return PackedArray::scan(static_cast<const ArrayData*>(h), scanner);
     case HeaderKind::Mixed:
-      return h->mixed_.scan(mark);
+    case HeaderKind::Dict:
+      return static_cast<const MixedArray*>(h)->scan(scanner);
+    case HeaderKind::Keyset:
+      return static_cast<const SetArray*>(h)->scan(scanner);
     case HeaderKind::Apc:
-      return h->apc_.scan(mark);
+      return static_cast<const APCLocalArray*>(h)->scan(scanner);
     case HeaderKind::Globals:
-      return h->globals_.scan(mark);
+      return static_cast<const GlobalsArray*>(h)->scan(scanner);
+    case HeaderKind::RecordArray:
+      return static_cast<const RecordArray*>(h)->scan(scanner);
+    case HeaderKind::Closure:
+      scanner.scan(*static_cast<const c_Closure*>(h)->hdr());
+      return static_cast<const c_Closure*>(h)->scan(scanner);
     case HeaderKind::Object:
-    case HeaderKind::ResumableObj:
+      // NativeObject should hit the NativeData case below.
+      return static_cast<const ObjectData*>(h)->scan(scanner);
+    case HeaderKind::WaitHandle:
+      // scan C++ properties after [ObjectData] header. should pick up
+      // unioned and bit-packed fields
+      return static_cast<const c_Awaitable*>(h)->scan(scanner);
     case HeaderKind::AwaitAllWH:
-    case HeaderKind::Vector:
-    case HeaderKind::Map:
-    case HeaderKind::Set:
+      // scan C++ properties after [ObjectData] header. should pick up
+      // unioned and bit-packed fields
+      return static_cast<const c_AwaitAllWaitHandle*>(h)->scan(scanner);
+    case HeaderKind::AsyncFuncWH:
+      return scanAFWH(static_cast<const c_Awaitable*>(h), scanner);
+    case HeaderKind::NativeData: {
+      auto native = static_cast<const NativeNode*>(h);
+      scanNative(native, scanner);
+      auto const obj = Native::obj(native);
+      if (UNLIKELY(obj->getVMClass()->hasMemoSlots())) {
+        scanMemoSlots(obj, scanner, true);
+      }
+      return obj->scan(scanner);
+    }
+    case HeaderKind::AsyncFuncFrame:
+      return scanAFWH(asyncFuncWH(h), scanner);
+    case HeaderKind::ClosureHdr:
+      scanner.scan(*static_cast<const ClosureHdr*>(h));
+      return closureObj(h)->scan(scanner);
+    case HeaderKind::MemoData: {
+      auto const obj = memoObj(h);
+      scanMemoSlots(obj, scanner, false);
+      return obj->scan(scanner);
+    }
     case HeaderKind::Pair:
+      return static_cast<const c_Pair*>(h)->scan(scanner);
+    case HeaderKind::Vector:
     case HeaderKind::ImmVector:
+      return static_cast<const BaseVector*>(h)->scan(scanner);
+    case HeaderKind::Map:
     case HeaderKind::ImmMap:
+    case HeaderKind::Set:
     case HeaderKind::ImmSet:
-      return h->obj_.scan(mark);
-    case HeaderKind::Resource:
-      return h->res_.data()->scan(mark);
-    case HeaderKind::Ref:
-      return h->ref_.scan(mark);
+      return static_cast<const HashCollection*>(h)->scan(scanner);
+    case HeaderKind::Resource: {
+      auto res = static_cast<const ResourceHdr*>(h);
+      return scanner.scanByIndex(res->typeIndex(), res->data(),
+                                 res->heapSize() - sizeof(ResourceHdr));
+    }
+    case HeaderKind::ClsMeth:
+      // ClsMeth only holds pointers to non-request allocated data
+      return;
+    case HeaderKind::Record:
+      return static_cast<const RecordData*>(h)->scan(scanner);
+    case HeaderKind::RFunc: // TODO(T63348446)
+    case HeaderKind::Cpp:
     case HeaderKind::SmallMalloc:
-      return mark((&h->small_)+1, h->small_.padbytes - sizeof(SmallNode));
-    case HeaderKind::BigMalloc:
-      return mark((&h->big_)+1, h->big_.nbytes - sizeof(BigNode));
-    case HeaderKind::NativeData:
-      return h->nativeObj()->scan(mark);
-    case HeaderKind::ResumableFrame:
-      return h->resumableObj()->scan(mark);
+    case HeaderKind::BigMalloc: {
+      auto n = static_cast<const MallocNode*>(h);
+      return scanner.scanByIndex(n->typeIndex(), n + 1,
+                                 n->nbytes - sizeof(MallocNode));
+    }
     case HeaderKind::String:
     case HeaderKind::Free:
+    case HeaderKind::Hole:
       // these don't have pointers. some clients might generically
       // scan them even if they aren't interesting.
       return;
-    case HeaderKind::BigObj:
-    case HeaderKind::Hole:
+    case HeaderKind::NativeObject:
+      // should have scanned the NativeData header.
+      break;
+    case HeaderKind::Slab:
       // these aren't legitimate headers, and heap iteration should skip them.
       break;
   }
   always_assert(false && "corrupt header in worklist");
 }
 
-template<class F> void ObjectData::scan(F& mark) const {
-  auto props = propVec();
-  if (getAttribute(HasNativeData)) {
-    // [NativeNode][NativeData][ObjectData][props]
-    Native::nativeDataScan(this, mark);
-  } else if (m_hdr.kind == HeaderKind::ResumableObj) {
-    // scan the frame locals, iterators, and Resumable
-    auto r = Resumable::FromObj(this);
-    auto frame = reinterpret_cast<const TypedValue*>(r) -
-                 r->actRec()->func()->numSlotsInFrame();
-    mark(frame, uintptr_t(this) - uintptr_t(frame));
-  }
+inline void c_AwaitAllWaitHandle::scan(type_scan::Scanner& scanner) const {
+  scanner.scanByIndex(m_tyindex, this, heapSize());
+  ObjectData::scan(scanner); // in case of dynprops
+}
 
-  if (getAttribute(IsCppBuiltin)) {
-    // [ObjectData][C++ fields][props]
-    // TODO t6169228 virtual call for exact marking
-    mark(this + 1, uintptr_t(props) - uintptr_t(this + 1));
-  }
-  mark(m_cls);
-  for (size_t i = 0, n = m_cls->numDeclProperties(); i < n; ++i) {
-    mark(props[i]);
-  }
+inline void c_Awaitable::scan(type_scan::Scanner& scanner) const {
+  assertx(kind() != HeaderKind::AwaitAllWH);
+  auto const size =
+    kind() == HeaderKind::AsyncFuncWH ? sizeof(c_AsyncFunctionWaitHandle) :
+              asio_object_size(this);
+  scanner.scanByIndex(m_tyindex, this, size);
+  ObjectData::scan(scanner);
+}
+
+inline void RecordBase::scan(type_scan::Scanner& scanner) const {
+  auto fields = fieldVec();
+  scanner.scan(*fields, m_record->numFields() * sizeof(*fields));
+}
+
+inline void RecordData::scan(type_scan::Scanner& scanner) const {
+  RecordBase::scan(scanner);
+}
+
+inline void RecordArray::scan(type_scan::Scanner& scanner) const {
+  RecordBase::scan(scanner);
+  scanner.scan(extraFieldMap());
+}
+
+inline void ObjectData::scan(type_scan::Scanner& scanner) const {
+  props()->scan(m_cls->countablePropsEnd(), scanner);
   if (getAttribute(HasDynPropArr)) {
-    // nb: dynamic property arrays are pointed to by ExecutionContext,
-    // which is marked as a root.
-    mark(g_context->dynPropTable[this].arr());
+    // nb: dynamic property arrays are in ExecutionContext::dynPropTable,
+    // which is not marked as a root. Scan the entry pair, so both the key
+    // and value are scanned.
+    auto iter = g_context->dynPropTable.find(this);
+    scanner.scan(*iter); // *iter is pair<ObjectData*,ArrayNoDtor>
   }
-}
-
-template<class F> void ResourceData::scan(F& mark) const {
-  ExtMarker<F> bridge(mark);
-  vscan(bridge);
-}
-
-template<class F> void RequestEventHandler::scan(F& mark) const {
-  ExtMarker<F> bridge(mark);
-  vscan(bridge);
-}
-
-template<class F> void scan_ezc_resources(F& mark) {
-#ifdef ENABLE_ZEND_COMPAT
-  ExtMarker<F> bridge(mark);
-  ts_scan_resources(bridge);
-#endif
-}
-
-template<class F> void ExtendedException::scan(F& mark) const {
-  ExtMarker<F> bridge(mark);
-  vscan(bridge);
 }
 
 //   [<-stack[iters[locals[params[ActRec[stack[iters[locals[ActRec...
@@ -178,135 +270,102 @@ template<class F> void ExtendedException::scan(F& mark) const {
 //     m_sfp                prev ActRec*
 //     m_savedRIP           return addr
 //     m_func               Func*
-//     m_soff               return vmpc
+//     m_callOffAndFlags    caller's vmpc
 //     m_argc_flags
 //     m_this|m_cls         ObjectData* or Class*
 //     m_varenv|extraArgs
 //
 // for reference, see vm/unwind.cpp and visitStackElms() in bytecode.h
 
-// scan the whole rds, including the php stack and the rds segment.
-//  * stack: should be exact-scannable.
-//  * rds threadlocal part: conservative scan until we teach the
-//    jit to tell us where the pointers live.
-//  * rds shared part: should not contain heap pointers!
-template<class F> void scanRds(F& mark, rds::Header* rds) {
-  // rds sections
-  auto markSection = [&](folly::Range<const char*> r) {
-    mark(r.begin(), r.size());
-  };
-  mark.where("rds-normal");
-  markSection(rds::normalSection());
-  mark.where("rds-local");
-  markSection(rds::localSection());
-  mark.where("rds-persistent");
-  markSection(rds::persistentSection());
-  // php stack TODO #6509338 exactly scan the php stack.
-  mark.where("php-stack");
-  auto stack_end = (TypedValue*)rds->vmRegs.stack.getStackHighAddress();
-  auto sp = rds->vmRegs.stack.top();
-  mark(sp, (stack_end - sp) * sizeof(*sp));
-}
+// Descriptive wrapper types to annotate root nodes
+struct PhpStack    { TYPE_SCAN_CONSERVATIVE_ALL; void* dummy; };
+struct CppStack    { TYPE_SCAN_CONSERVATIVE_ALL; void* dummy; };
 
-template<class F>
-void MemoryManager::scanSweepLists(F& mark) const {
-  for (auto s = m_sweepables.next(); s != &m_sweepables; s = s->next()) {
-    if (auto h = static_cast<Header*>(s->owner())) {
-      assert(h->kind() == HeaderKind::Resource || isObjectKind(h->kind()));
-      if (isObjectKind(h->kind())) {
-        mark(&h->obj_);
-      } else {
-        mark(&h->res_);
-      }
-    }
+template<class Fn>
+void MemoryManager::iterateRoots(Fn fn) const {
+  fn(&m_sweepables, sizeof(m_sweepables),
+     type_scan::getIndexForScan<SweepableList>());
+  for (auto& node: m_natives) {
+    fn(&node, sizeof(node), type_scan::getIndexForScan<NativeNode*>());
   }
-  for (auto node: m_natives) {
-    mark(Native::obj(node));
+  for (const auto root : m_root_handles) {
+    root->iterate(fn);
   }
 }
 
-template <typename F>
-void MemoryManager::scanRootMaps(F& m) const {
-  if (m_objectRoots) {
-    for(const auto& root : *m_objectRoots) {
-      scan(root.second, m);
-    }
-  }
-  if (m_resourceRoots) {
-    for(const auto& root : *m_resourceRoots) {
-      scan(root.second, m);
-    }
-  }
-  for (const auto& root : m_exceptionRoots) {
-    root->scan(m);
-  }
-}
-
-template<class F>
-void ThreadLocalManager::scan(F& mark) const {
+template<class Fn> void ThreadLocalManager::iterate(Fn fn) const {
   auto list = getList(pthread_getspecific(m_key));
   if (!list) return;
   for (auto p = list->head; p != nullptr;) {
     auto node = static_cast<ThreadLocalNode<void>*>(p);
-    mark(node->m_p, node->m_size);
+    if (node->m_p) {
+      fn(node->m_p, node->m_size, node->m_tyindex);
+    }
     p = node->m_next;
   }
 }
 
-// Scan request-local roots
-template<class F> void scanRoots(F& mark) {
-  // rds, including php stack
-  if (auto rds = rds::header()) {
-    scanRds(mark, rds);
+// Visit request-local roots. Each invocation of fn represents one root
+// instance of a given type and size, containing potentially several
+// pointers.
+template<class Fn> void iterateConservativeRoots(Fn fn) {
+  auto rds = rds::header();
+
+  // php header and stack
+  // TODO #6509338 exactly scan the php stack.
+  if (rds) {
+    fn(rds, sizeof(*rds), type_scan::getIndexForScan<rds::Header>());
+    auto stack_end = rds->vmRegs.stack.getStackHighAddress();
+    auto sp = rds->vmRegs.stack.top();
+    fn(sp, uintptr_t(stack_end) - uintptr_t(sp),
+       type_scan::getIndexForScan<PhpStack>());
   }
-  // ExecutionContext
+
   if (!g_context.isNull()) {
-    mark.where("g_context");
-    g_context->scan(mark);
+    // m_nestedVMs contains MInstrState, which has a conservatively-scanned
+    // fields. Scan it now, then ignore when ExecutionContext is scanned.
+    fn(&g_context->m_nestedVMs, sizeof(g_context->m_nestedVMs),
+       type_scan::getIndexForScan<ExecutionContext::VMStateVec>());
   }
-  // ThreadInfo
-  mark.where("ThreadInfo");
-  TI().scan(mark);
-  // C++ stack
-  mark.where("cpp-stack");
-  auto sp = stack_top_ptr();
-  mark(sp, s_stackLimit + s_stackSize - uintptr_t(sp));
-  // C++ threadlocal data, but don't scan MemoryManager
-  auto tdata = getCppTdata(); // tdata = { ptr, size }
-  if (tdata.second > 0) {
-    auto tm = (char*)tdata.first;
-    auto tm_end = tm + tdata.second;
-    auto mm = (char*)&MM();
-    auto mm_end = mm + sizeof(MemoryManager);
-    assert(mm >= tm && mm_end <= tm_end);
-    mark(tm, mm - tm);
-    mark(mm_end, tm_end - mm_end);
-  }
-  // Extension thread locals
-  mark.where("extensions");
-  ExtMarker<F> xm(mark);
-  ExtensionRegistry::scanExtensions(xm);
-  // Root maps
-  mark.where("rootmaps");
-  MM().scanRootMaps(mark);
-  // treat sweep lists as roots until we are ready to test what happens
-  // when we start calling various sweep() functions early.
-  mark.where("sweeplists");
-  MM().scanSweepLists(mark);
-  // these have rogue thread_local stuff
-  if (auto asio = AsioSession::Get()) {
-    mark.where("AsioSession");
-    asio->scan(mark);
-  }
-  mark.where("get_server_note");
-  get_server_note()->scan(mark);
-  mark.where("ezc resources");
-  scan_ezc_resources(mark);
+
+  // cpp stack. ensure stack contains callee-saved registers.
+  CALLEE_SAVED_BARRIER();
+  auto sp = stack_top_ptr_conservative();
+  fn(sp, s_stackLimit + s_stackSize - uintptr_t(sp),
+     type_scan::getIndexForScan<CppStack>());
 }
 
-template <typename T, typename F>
-void scan(const req::ptr<T>& ptr, F& mark) {
-  ptr->scan(mark);
+template<class Fn> void iterateExactRoots(Fn fn) {
+  auto rds = rds::header();
+
+  // normal section
+  if (rds) {
+    rds::forEachNormalAlloc(fn);
+  }
+
+  // Local section (mainly static properties).
+  // static properties have a per-class, versioned, bool in rds::Normal,
+  // tracked by Class::m_sPropCacheInit, plus one TypedValue in rds::Local
+  // for each property, tracked in Class::m_sPropCache. Just scan the
+  // properties in rds::Local. We ignore the state of the bool, because it
+  // is not initialized until after all sprops are initialized, and it's
+  // necessary to scan static properties *during* initialization.
+  if (rds) {
+    rds::forEachLocalAlloc(fn);
+  }
+
+  rds::local::iterateRoots(fn);
+
+  // Root handles & sweep lists
+  tl_heap->iterateRoots(fn);
+
+  // ThreadLocal nodes (but skip MemoryManager).
+  ThreadLocalManager::GetManager().iterate(fn);
+}
+
+template<class Fn> void iterateRoots(Fn fn) {
+  iterateConservativeRoots(fn);
+  iterateExactRoots(fn);
 }
 
 }

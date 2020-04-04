@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -31,23 +31,20 @@ namespace HPHP {
  * wait handle if a result is not yet available. Once the wait handle finishes,
  * all blocked wait handles are notified.
  */
-class AsioBlockable;
-class AsioContext;
+struct AsioBlockable;
+struct AsioContext;
 
-class c_WaitableWaitHandle : public c_WaitHandle {
- public:
-  DECLARE_CLASS_NO_SWEEP(WaitableWaitHandle)
+struct c_WaitableWaitHandle : c_Awaitable {
+  WAITHANDLE_CLASSOF(WaitableWaitHandle);
+  WAITHANDLE_DTOR(WaitableWaitHandle);
 
-  explicit c_WaitableWaitHandle(Class* cls = c_WaitableWaitHandle::classof(),
-                                HeaderKind kind = HeaderKind::Object) noexcept;
+  explicit c_WaitableWaitHandle(Class*, HeaderKind, type_scan::Index) noexcept;
   ~c_WaitableWaitHandle();
 
-  int t_getcontextidx();
-  Object t_getcreator();
-  Array t_getparents();
-  Array t_getdependencystack();
-
  public:
+  static constexpr ptrdiff_t contextIdxOff() {
+    return offsetof(c_WaitableWaitHandle, m_contextIdx);
+  }
   static constexpr ptrdiff_t parentChainOff() {
     return offsetof(c_WaitableWaitHandle, m_parentChain);
   }
@@ -59,6 +56,7 @@ class c_WaitableWaitHandle : public c_WaitHandle {
   AsioBlockableChain& getParentChain();
   void join();
   String getName();
+  Array getDependencyStack();
 
  protected:
   c_WaitableWaitHandle* getChild();
@@ -66,7 +64,7 @@ class c_WaitableWaitHandle : public c_WaitHandle {
   void detectCycle(c_WaitableWaitHandle* child) const;
 
  private:
-  NEVER_INLINE ATTRIBUTE_NORETURN
+  [[noreturn]] NEVER_INLINE
   void throwCycleException(c_WaitableWaitHandle* child) const;
 };
 

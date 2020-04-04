@@ -1,9 +1,7 @@
-<?php
-
-current($arr = array(0 => "a"));
-current(array(0 => "a"));
+<?hh
+<<__EntryPoint>> function main(): void {
+$arr = darray[0 => "a"];
 current($arr);
 
 echo "DONE";
-
-?>
+}

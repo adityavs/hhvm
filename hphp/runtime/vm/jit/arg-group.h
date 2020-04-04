@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,11 @@
 #include "hphp/runtime/vm/jit/reg-alloc.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
+#include "hphp/util/arch.h"
+
 namespace HPHP { namespace jit {
 
-class SSATmp;
+struct SSATmp;
 struct IRInstruction;
 
 namespace NativeCalls { struct CallInfo; }
@@ -42,20 +44,31 @@ namespace NativeCalls { struct CallInfo; }
 //////////////////////////////////////////////////////////////////////
 
 enum class DestType : uint8_t {
-  None,  // return void (no valid registers)
-  SSA,   // return a single-register value
-  Byte,  // return a single-byte register value
-  TV,    // return a TypedValue packed in two registers
-  Dbl,   // return scalar double in a single FP register
-  SIMD,  // return a TypedValue in one SIMD register
+  None,      // return void (no valid registers)
+  Indirect,  // return struct/object to the address in the first arg
+  SSA,       // return an SSA value in 1 or 2 integer registers
+  Byte,      // return a single-byte register value
+  TV,        // return a TypedValue packed in two registers
+  Dbl,       // return scalar double in a single FP register
+  SIMD,      // return a TypedValue in one SIMD register
 };
 const char* destTypeName(DestType);
 
 struct CallDest {
-  DestType type;
+  CallDest(DestType t, Type vt, Vreg r0 = Vreg{}, Vreg r1 = Vreg{})
+    : valueType{vt}, reg0{r0}, reg1{r1}, type{t}
+  {}
+
+  CallDest(DestType t, Vreg r0 = Vreg{}, Vreg r1 = Vreg{})
+    : CallDest(t, TTop, r0, r1)
+  {}
+
+  Type valueType;
   Vreg reg0, reg1;
+  DestType type;
 };
 UNUSED const CallDest kVoidDest { DestType::None };
+UNUSED const CallDest kIndirectDest { DestType::Indirect };
 
 struct ArgDesc {
   enum class Kind {
@@ -63,19 +76,29 @@ struct ArgDesc {
     Imm,     // 64-bit Immediate
     TypeImm, // DataType Immediate
     Addr,    // Address (register plus 32-bit displacement)
+    DataPtr, // Pointer to data section
+    IndRet,  // Indirect Return Address (register plus 32-bit displacement)
   };
 
   PhysReg dstReg() const { return m_dstReg; }
   Vreg srcReg() const { return m_srcReg; }
   Kind kind() const { return m_kind; }
   void setDstReg(PhysReg reg) { m_dstReg = reg; }
-  Immed64 imm() const { assertx(m_kind == Kind::Imm); return m_imm64; }
+  Immed64 imm() const {
+    assertx(m_kind == Kind::Imm || m_kind == Kind::DataPtr);
+    return m_imm64;
+  }
   DataType typeImm() const {
     assertx(m_kind == Kind::TypeImm);
     return m_typeImm;
   }
-  Immed disp() const { assertx(m_kind == Kind::Addr); return m_disp32; }
+  Immed disp() const {
+    assertx(m_kind == Kind::Addr ||
+            m_kind == Kind::IndRet);
+    return m_disp32;
+  }
   bool isZeroExtend() const { return m_zeroExtend; }
+  folly::Optional<AuxUnion> aux() const { return m_aux; }
   bool done() const { return m_done; }
   void markDone() { m_done = true; }
 
@@ -97,7 +120,10 @@ private: // These should be created using ArgGroup.
     : m_kind(kind)
   {}
 
-  explicit ArgDesc(SSATmp* tmp, Vloc, bool val = true);
+  explicit ArgDesc(SSATmp* tmp,
+                   Vloc,
+                   bool val = true,
+                   folly::Optional<AuxUnion> aux = folly::none);
 
 private:
   Kind m_kind;
@@ -108,6 +134,7 @@ private:
     Immed m_disp32;  // 32-bit displacement
     DataType m_typeImm;
   };
+  folly::Optional<AuxUnion> m_aux;
   bool m_zeroExtend{false};
   bool m_done{false};
 };
@@ -131,13 +158,17 @@ struct ArgGroup {
 
   explicit ArgGroup(const IRInstruction* inst,
                     const StateVector<SSATmp,Vloc>& locs)
-    : m_inst(inst), m_locs(locs), m_override(nullptr)
+    : m_inst(inst), m_locs(locs)
   {}
 
   size_t numGpArgs() const { return m_gpArgs.size(); }
   size_t numSimdArgs() const { return m_simdArgs.size(); }
   size_t numStackArgs() const { return m_stkArgs.size(); }
+  size_t numIndRetArgs() const { return m_indRetArgs.size(); }
 
+  const std::vector<Type>& argTypes() const {
+    return m_argTypes;
+  }
   ArgDesc& gpArg(size_t i) {
     assertx(i < m_gpArgs.size());
     return m_gpArgs[i];
@@ -153,6 +184,10 @@ struct ArgGroup {
     assertx(i < m_stkArgs.size());
     return m_stkArgs[i];
   }
+  const ArgDesc& indRetArg(size_t i) const {
+    assertx(i < m_indRetArgs.size());
+    return m_indRetArgs[i];
+  }
   ArgDesc& operator[](size_t i) = delete;
 
   ArgGroup& imm(Immed64 imm) {
@@ -166,6 +201,11 @@ struct ArgGroup {
 
   ArgGroup& immPtr(std::nullptr_t) { return imm(0); }
 
+  template<class T> ArgGroup& dataPtr(const T* ptr) {
+    push_arg(ArgDesc{ArgDesc::Kind::DataPtr, ptr});
+    return *this;
+  }
+
   ArgGroup& reg(Vreg reg) {
     push_arg(ArgDesc(ArgDesc::Kind::Reg, reg, -1));
     return *this;
@@ -176,21 +216,23 @@ struct ArgGroup {
     return *this;
   }
 
-  ArgGroup& ssa(int i, bool isFP = false) {
-    auto s = m_inst->src(i);
-    ArgDesc arg(s, m_locs[s]);
-    if (isFP) {
-      push_SIMDarg(arg);
-    } else {
-      push_arg(arg);
-    }
+  /*
+   * indRet args are similar to simple addr args, but are used specifically to
+   * pass the address that the native call will use for indirect returns. If a
+   * platform has no dedicated registers for indirect returns, then it uses
+   * the first general purpose argument register.
+   */
+  ArgGroup& indRet(Vreg base, Immed off) {
+    push_arg(ArgDesc(ArgDesc::Kind::IndRet, base, off));
     return *this;
   }
+
+  ArgGroup& ssa(int i, bool allowFP = true);
 
   /*
    * Pass tmp as a TypedValue passed by value.
    */
-  ArgGroup& typedValue(int i);
+  ArgGroup& typedValue(int i, folly::Optional<AuxUnion> aux = folly::none);
 
   ArgGroup& memberKeyIS(int i) {
     return memberKeyImpl(i, true);
@@ -205,15 +247,15 @@ struct ArgGroup {
   }
 
 private:
-  void push_arg(const ArgDesc& arg);
-  void push_SIMDarg(const ArgDesc& arg);
+  void push_arg(const ArgDesc& arg, Type t = TBottom);
+  void push_SIMDarg(const ArgDesc& arg, Type t = TBottom);
 
   /*
    * For passing the m_type field of a TypedValue.
    */
-  ArgGroup& type(int i) {
+  ArgGroup& type(int i, folly::Optional<AuxUnion> aux) {
     auto s = m_inst->src(i);
-    push_arg(ArgDesc(s, m_locs[s], false));
+    push_arg(ArgDesc(s, m_locs[s], false, aux));
     return *this;
   }
 
@@ -228,10 +270,12 @@ private:
 private:
   const IRInstruction* m_inst;
   const StateVector<SSATmp,Vloc>& m_locs;
-  ArgVec* m_override; // used to force args to go into a specific ArgVec
+  ArgVec* m_override{nullptr}; // force args to go into a specific ArgVec
+  ArgVec m_indRetArgs; // Indirect Return Address
   ArgVec m_gpArgs; // INTEGER class args
   ArgVec m_simdArgs; // SSE class args
   ArgVec m_stkArgs; // Overflow
+  std::vector<Type> m_argTypes;
 };
 
 ArgGroup toArgGroup(const NativeCalls::CallInfo&,

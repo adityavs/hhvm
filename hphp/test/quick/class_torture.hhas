@@ -1,0 +1,97 @@
+.hh_file 1;
+# tests various ways poorly defined classes should fail the verifier
+
+.main {
+  .declvars $x;
+
+  DefCls 0
+  NewObjD "A"
+  Dup
+  NullUninit
+  NullUninit
+  String "foo"
+  FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+  PopC
+  LockObj
+  PopC
+
+  DefCls 0
+  NewObjD "B"
+  Dup
+  NullUninit
+  NullUninit
+  String "foo"
+  FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+  PopC
+  LockObj
+  PopC
+
+  DefCls 0
+  NewObjD "C"
+  Dup
+  NullUninit
+  NullUninit
+  String "foo"
+  FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+  PopC
+  LockObj
+  PopC
+
+  DefCls 0
+  NewObjD "E"
+  Dup
+  NullUninit
+  NullUninit
+  String "foo"
+  FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+  PopC
+  LockObj
+  PopC
+
+  DefCls 0
+  NewObjD "G"
+  Dup
+  NullUninit
+  NullUninit
+  String "foo"
+  FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+  PopC
+  LockObj
+  PopC
+
+  Int 1
+  RetC
+}
+
+.class [final interface] iface {
+
+}
+
+.class A extends A {
+}
+
+.class B {
+
+}
+
+.class C {
+}
+
+
+.class [final] D {
+  .method [public no_injection] __construct() {
+    Null
+    RetC
+  }
+}
+
+.class E extends D {
+
+}
+
+.class [abstract] F {
+}
+
+.class G extends F{
+
+}

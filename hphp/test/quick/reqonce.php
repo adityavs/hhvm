@@ -1,7 +1,4 @@
-<?php
-$c = new TestClass;
-$c->testwithctx();
-testnoctx();
+<?hh
 
 function testnoctx() {
   echo "testing from anonymous context\n";
@@ -19,4 +16,10 @@ class TestClass {
     echo "value of var after ReqOnce: " . $this->var . "\n";
     echo "testvar set after ReqOnce? " . isset($testvar) . "\n";
   }
+}
+<<__EntryPoint>>
+function main_entry(): void {
+  $c = new TestClass;
+  $c->testwithctx();
+  testnoctx();
 }

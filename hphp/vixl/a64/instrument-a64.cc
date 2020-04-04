@@ -466,6 +466,13 @@ void Instrument::VisitLoadStoreUnsignedOffset(Instruction* instr) {
   InstrumentLoadStore(instr);
 }
 
+void Instrument::VisitLoadStoreExclusive(Instruction* instr) {
+  USE(instr);
+  Update();
+  static Counter* counter = GetCounter("Other");
+  counter->Increment();
+}
+
 
 void Instrument::VisitLogicalShifted(Instruction* instr) {
   USE(instr);
@@ -634,5 +641,9 @@ void Instrument::VisitUnimplemented(Instruction* instr) {
   counter->Increment();
 }
 
+
+void Instrument::VisitLseLdOp(Instruction* instr) {
+  VisitUnimplemented(instr);
+}
 
 }  // namespace v8::internal

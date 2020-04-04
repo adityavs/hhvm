@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function foo() {
   $i = 0;
@@ -6,8 +6,9 @@ function foo() {
     yield $letter => ++$i;
   }
 }
-
+<<__EntryPoint>> function main(): void {
 foreach (foo() as $k => $v) {
   var_dump($k);
   var_dump($v);
+}
 }

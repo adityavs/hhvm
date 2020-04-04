@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 function foo() {
-  return mt_rand() ? array(1,2,3) : array(2,3,4);
+  return mt_rand() ? varray[1,2,3] : varray[2,3,4];
 }
 function bar() {
   $x = foo();
@@ -13,4 +13,8 @@ function main() {
   $x = bar();
   var_dump($x['asdasdasd']);
 }
+
+<<__EntryPoint>>
+function main_array_045() {
 main();
+}

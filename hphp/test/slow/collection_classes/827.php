@@ -1,7 +1,7 @@
 <?hh
 
 function f() {
-  $mp1 = Map { 'a' => 1, 2 => 'b', 'c' => array()};
+  $mp1 = Map { 'a' => 1, 2 => 'b', 'c' => varray[]};
   $mp2 = Map {};
   $mp3 = Map {} ;
   foreach ($mp1->items() as $t) {
@@ -13,4 +13,8 @@ function f() {
   }
   var_dump($mp3);
 }
+
+<<__EntryPoint>>
+function main_827() {
 f();
+}

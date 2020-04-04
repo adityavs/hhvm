@@ -1,10 +1,11 @@
-<?php
-
+<?hh
+abstract final class FpushFatal { public static $x; }
 function blah() {}
 function foo() {
-  global $x;
+  $x = FpushFatal::$x;
   blah(blah(), $x());
 }
-
-$x = 'asdasdasd';
+<<__EntryPoint>> function main(): void {
+FpushFatal::$x = 'asdasdasd';
 foo();
+}

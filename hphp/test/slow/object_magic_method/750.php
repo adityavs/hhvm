@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 class A {
-   public $a = array();
+   public $a = varray[];
    function __set($name, $value) {
  $this->a[$name] = $value;
 }
@@ -9,6 +9,10 @@ class A {
  return $this->a[$name];
 }
  }
- $obj = new A();
+
+ <<__EntryPoint>>
+function main_750() {
+$obj = new A();
  $obj->test = 'test';
  var_dump($obj->test);
+}

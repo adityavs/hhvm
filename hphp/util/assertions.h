@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,11 +34,13 @@
 
 #define IMPLIES(a, b) (!(a) || (b))
 
-#if defined(__INTEL_COMPILER) || defined(_MSC_VER)
+#if defined(__INTEL_COMPILER)
 #define not_reached()                                                \
   do {                                                               \
     assert(false);                                                   \
   } while (true)
+#elif defined(_MSC_VER)
+#define not_reached() __assume(0)
 #else
 #define not_reached() /* gcc-4.5 supports __builtin_unreachable() */  \
   do {                                                                \
@@ -61,6 +63,16 @@
 
 namespace HPHP {
 
+/*
+ * assert_not_null() exists to help the compiler along when we know that a
+ * pointer can't be null, and knowing this results in better codegen.
+ */
+template<typename T>
+T* assert_not_null(T* ptr) {
+  if (ptr == nullptr) not_reached();
+  return ptr;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
@@ -68,28 +80,12 @@ namespace HPHP {
  *
  * These are intended for use primarily by the assert macros below.
  */
-ATTRIBUTE_NORETURN
+[[noreturn]]
 void assert_fail(const char* e,
                  const char* file,
                  unsigned int line,
                  const char* func,
                  const std::string& msg);
-
-ATTRIBUTE_NORETURN
-void assert_fail_no_log(const char* e,
-                        const char* file,
-                        unsigned int line,
-                        const char* func,
-                        const std::string& msg);
-
-void assert_log_failure(const char* title, const std::string& msg);
-
-/*
- * Register a function for auxiliary assert logging.
- */
-using AssertFailLogger = std::function<void(const char*, const std::string&)>;
-
-void register_assert_fail_logger(AssertFailLogger);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -98,11 +94,10 @@ void register_assert_fail_logger(AssertFailLogger);
  */
 struct AssertDetailImpl {
   /*
-   * Prints the results of all registered detailers to stderr.  Returns true if
-   * we had any registered detailers.
+   * Reads the most recently added message, and removes it from the
+   * list. Returns true if there was a message to read.
    */
-  static bool log();
-
+  static bool readAndRemove(std::string& msg);
 protected:
   explicit AssertDetailImpl(const char* name)
     : m_name(name)
@@ -129,7 +124,8 @@ protected:
   AssertDetailImpl& operator=(const AssertDetailImpl&) = delete;
 
 private:
-  static bool log_impl(const AssertDetailImpl*);
+  static std::pair<std::string,std::string>
+  log_one(const AssertDetailImpl* adi, const char* name);
   virtual std::string run() const = 0;
 
 private:
@@ -172,101 +168,46 @@ private:
 }
 
 #define SCOPE_ASSERT_DETAIL(name)           \
-  auto FB_ANONYMOUS_VARIABLE(SCOPE_ASSERT)  \
+  auto const FB_ANONYMOUS_VARIABLE(SCOPE_ASSERT)  \
   = ::HPHP::detail::AssertDetailScopeMaker(name) + [&]()
 
 ///////////////////////////////////////////////////////////////////////////////
 
-/*
- * Exception class for throwing assertions.
- */
-struct FailedAssertion : std::exception {
-  FailedAssertion(const char* msg, const char* file, unsigned line,
-                  const char* func)
-      : msg(msg)
-      , file(file)
-      , line(line)
-      , func(func)
-      , summary(makeSummary()) {}
-
-  const char* what() const noexcept override {
-    return summary.c_str();
-  }
-
-  void print() const {
-    fputs(summary.c_str(), stderr);
-    fputc('\n', stderr);
-  }
-
-  const char* const msg;
-  const char* const file;
-  unsigned const line;
-  const char* const func;
-  const std::string summary;
-
- private:
-  std::string makeSummary() const {
-    char buf[4096];
-    if (snprintf(buf, sizeof(buf), "Failed assertion '%s' in %s at %s:%u",
-                 msg, func, file, line) >= sizeof(buf)) {
-      buf[sizeof(buf)-1] = '\0';
-    }
-    return std::string(buf);
-  }
-};
-
-///////////////////////////////////////////////////////////////////////////////
-
+# if !defined __GNUC__ || defined __STRICT_ANSI__
 #define assert_impl(cond, fail) \
   ((cond) ? static_cast<void>(0) : ((fail), static_cast<void>(0)))
+#else
+/*
+ * This is preferred, because "cond" is not over-parenthesized, and
+ * thus -Wparentheses can warn about errors like "always_assert(a=1)".
+ * With -pedantic, we cannot use "({...})" statement expressions,
+ * so must resort to the old way, above.
+ */
+#define assert_impl(cond, fail) \
+  ({ if (cond) ; else { fail; } static_cast<void>(0); })
+#endif
 
 #define assert_fail_impl(e, msg) \
   ::HPHP::assert_fail(#e, __FILE__, __LINE__, __PRETTY_FUNCTION__, msg)
 
-#define assert_fail_impl_no_log(e, msg) \
-  ::HPHP::assert_fail_no_log(#e, __FILE__, __LINE__, __PRETTY_FUNCTION__, msg)
-
-#define assert_throw_fail_impl(e) \
-  throw ::HPHP::FailedAssertion(#e, __FILE__, __LINE__, __PRETTY_FUNCTION__)
-
 #define always_assert(e)            assert_impl(e, assert_fail_impl(e, ""))
-#define always_assert_no_log(e)    assert_impl(e, \
-                                        assert_fail_impl_no_log(e, ""))
 #define always_assert_log(e, l)     assert_impl(e, assert_fail_impl(e, l()))
 #define always_assert_flog(e, ...)  assert_impl(e, assert_fail_impl(e,        \
                                         ::folly::format(__VA_ARGS__).str()))
-#define always_assert_throw(e)      assert_impl(e, assert_throw_fail_impl(e))
-#define always_assert_throw_log(e, l)                   \
-  assert_impl(e, (::HPHP::assert_log_failure(#e, l()),  \
-                  assert_throw_fail_impl(e)))
 
 #undef assert
 
 #ifndef NDEBUG
 #define assert(e) always_assert(e)
 #define assertx(e) always_assert(e)
-#define assert_no_log(e) always_assert_no_log(e)
 #define assert_log(e, l) always_assert_log(e, l)
 #define assert_flog(e, ...) always_assert_flog(e, __VA_ARGS__)
-#define assert_throw(e) always_assert_throw(e)
-#define assert_throw_log(e, l) always_assert_throw_log(e, l)
 #else
 #define assert(e) static_cast<void>(0)
 #define assertx(e) static_cast<void>(0)
-#define assert_no_log(e) static_cast<void>(0)
 #define assert_log(e, l) static_cast<void>(0)
 #define assert_flog(e, ...) static_cast<void>(0)
-#define assert_throw(e) static_cast<void>(0)
-#define assert_throw_log(e, l) static_cast<void>(0)
 #endif
-
-const bool do_assert =
-#ifdef NDEBUG
-  false
-#else
-  true
-#endif
-  ;
 
 ///////////////////////////////////////////////////////////////////////////////
 

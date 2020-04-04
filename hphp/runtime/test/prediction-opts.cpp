@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,7 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include <gtest/gtest.h>
+#include <folly/portability/GTest.h>
 
 #include "hphp/runtime/vm/jit/block.h"
 #include "hphp/runtime/vm/jit/ir-opcode.h"
@@ -26,22 +26,22 @@
 namespace HPHP { namespace jit {
 
 TEST(PredictionOpts, basic) {
-  UNUSED BCMarker marker = BCMarker::Dummy();
+  UNUSED auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
   IRUnit unit{test_context};
 
   Block* entry = unit.entry();
   Block* taken = unit.defBlock();
   Block* end = unit.defBlock();
 
-  auto ptr = unit.gen(Conjure, marker, TPtrToGen);
-  auto ldm = unit.gen(LdMem, marker, TGen, ptr->dst());
-  auto inc = unit.gen(IncRef, marker, ldm->dst());
-  auto ckt = unit.gen(CheckType, marker, TInt, taken, ldm->dst());
+  auto ptr = unit.gen(Conjure, bcctx, TPtrToCell);
+  auto ldm = unit.gen(LdMem, bcctx, TCell, ptr->dst());
+  auto inc = unit.gen(IncRef, bcctx, ldm->dst());
+  auto ckt = unit.gen(CheckType, bcctx, TInt, taken, ldm->dst());
   ckt->setNext(end);
   entry->push_back({ptr, ldm, inc, ckt});
 
-  taken->push_back(unit.gen(Halt, marker));
-  end->push_back(unit.gen(Halt, marker));
+  taken->push_back(unit.gen(EndBlock, bcctx, ASSERT_REASON));
+  end->push_back(unit.gen(EndBlock, bcctx, ASSERT_REASON));
 
   optimizePredictions(unit);
 
@@ -58,7 +58,7 @@ TEST(PredictionOpts, basic) {
     auto takenIt = taken->begin();
     auto& ldmem = *takenIt;
     auto& incref = *(++takenIt);
-    EXPECT_MATCH(ldmem, LdMem, TGen, ptr->dst());
+    EXPECT_MATCH(ldmem, LdMem, TCell, ptr->dst());
     EXPECT_MATCH(incref, IncRef, ldmem.dst());
   }
 

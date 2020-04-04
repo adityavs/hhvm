@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   public $a = 'aaa';
@@ -11,9 +11,13 @@ class B extends A {
  return 'getB';
 }
 }
+
+<<__EntryPoint>>
+function main_749() {
 $obj = new A();
 var_dump($obj->a);
 var_dump($obj->b);
 $obj = new B();
 var_dump($obj->a);
 var_dump($obj->b);
+}

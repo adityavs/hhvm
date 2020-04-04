@@ -7,8 +7,8 @@
 class C {
   const type T as arraykey = arraykey;
 
+  /* HH_FIXME[4336] */
   public function get(): this::T {
-    // UNSAFE
   }
 
   public static function takesThis(this $c): void {}
@@ -93,6 +93,6 @@ class D extends C {
 function test_vec_unpack(): (int, int) {
   // Make sure list() assign still works even though new Vector()
   // produces a dependent type
-  list($x, $y) = new Vector();
+  list($x, $y) = new Vector(null);
   return tuple($x, $y);
 }

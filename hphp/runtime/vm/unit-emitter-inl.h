@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,19 @@
 #error "unit-emitter-inl.h should only be included by unit-emitter.h"
 #endif
 
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/vm/hhbc-codec.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // Basic info.
 
-inline const MD5& UnitEmitter::md5() const {
-  return m_md5;
+inline const SHA1& UnitEmitter::sha1() const {
+  return m_sha1;
+}
+
+inline const SHA1& UnitEmitter::bcSha1() const {
+  return m_bcSha1;
 }
 
 inline const unsigned char* UnitEmitter::bc() const {
@@ -36,14 +41,18 @@ inline Offset UnitEmitter::bcPos() const {
   return m_bclen;
 }
 
+inline Offset UnitEmitter::offsetOf(const unsigned char* pc) const {
+  return pc - m_bc;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // FuncEmitters.
 
-inline FuncEmitter* UnitEmitter::getMain() {
-  return m_fes[0];
+inline FuncEmitter* UnitEmitter::getMain() const {
+  return m_fes[0].get();
 }
 
-inline const std::vector<FuncEmitter*>& UnitEmitter::fevec() const {
+inline auto const& UnitEmitter::fevec() const {
   return m_fes;
 }
 
@@ -63,10 +72,32 @@ inline const PreClassEmitter* UnitEmitter::pce(Id preClassId) const {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// RecordEmitters.
+
+inline size_t UnitEmitter::numRecords() const {
+  return m_reVec.size();
+}
+
+inline RecordEmitter* UnitEmitter::re(Id recordId) {
+  return m_reVec[recordId];
+}
+
+inline const RecordEmitter* UnitEmitter::re(Id recordId) const {
+  return m_reVec[recordId];
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // Type aliases.
 
 inline const std::vector<TypeAlias>& UnitEmitter::typeAliases() const {
   return m_typeAliases;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Constants.
+
+inline const std::vector<Constant>& UnitEmitter::constants() const {
+  return m_constants;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -91,6 +122,10 @@ inline void UnitEmitter::emitByte(unsigned char n, int64_t pos) {
   emitImpl(n, pos);
 }
 
+inline void UnitEmitter::emitInt16(uint16_t n, int64_t pos) {
+  emitImpl(n, pos);
+}
+
 inline void UnitEmitter::emitInt32(int n, int64_t pos) {
   emitImpl(n, pos);
 }
@@ -103,19 +138,19 @@ inline void UnitEmitter::emitDouble(double n, int64_t pos) {
   emitImpl(n, pos);
 }
 
-template<>
-inline void UnitEmitter::emitIVA(bool n) {
-  emitByte(n << 1);
-}
-
 template<typename T>
 void UnitEmitter::emitIVA(T n) {
   if (LIKELY((n & 0x7f) == n)) {
-    emitByte((unsigned char)n << 1);
+    emitByte((unsigned char)n);
   } else {
-    assert((n & 0x7fffffff) == n);
-    emitInt32((n << 1) | 0x1);
+    assertx((n & 0x7fffffff) == n);
+    emitInt32((n & 0x7fffff80) << 1 | 0x80 | (n & 0x7f));
   }
+}
+
+inline void UnitEmitter::emitNamedLocal(NamedLocal loc) {
+  emitIVA(loc.name + 1);
+  emitIVA(loc.id);
 }
 
 template<class T>
@@ -130,7 +165,7 @@ void UnitEmitter::emitImpl(T n, int64_t pos) {
     memcpy(&m_bc[m_bclen], c, sizeof(T));
     m_bclen += sizeof(T);
   } else {
-    assert(pos + sizeof(T) <= m_bclen);
+    assertx(pos + sizeof(T) <= m_bclen);
     for (uint32_t i = 0; i < sizeof(T); ++i) {
       m_bc[pos + i] = c[i];
     }
@@ -141,10 +176,7 @@ void UnitEmitter::emitImpl(T n, int64_t pos) {
 // Other methods.
 
 inline bool UnitEmitter::isASystemLib() const {
-  static const char systemlib_prefix[] = "/:systemlib";
-  return !strncmp(m_filepath->data(),
-                  systemlib_prefix,
-                  sizeof systemlib_prefix - 1);
+  return FileUtil::isSystemName(m_filepath->slice());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

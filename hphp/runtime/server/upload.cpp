@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,16 +16,19 @@
 */
 
 #include "hphp/runtime/server/upload.h"
+
+#include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/request-local.h"
-#include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/php-globals.h"
-#include "hphp/runtime/ext/apc/ext_apc.h"
-#include "hphp/util/logger.h"
-#include "hphp/runtime/base/string-util.h"
-#include "hphp/util/text-util.h"
 #include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/runtime/ext/apc/ext_apc.h"
+
+#include "hphp/util/logger.h"
+#include "hphp/util/rds-local.h"
+#include "hphp/util/text-util.h"
+
 #include <folly/FileUtil.h>
 
 using std::set;
@@ -51,7 +54,6 @@ struct Rfc1867Data final : RequestEventHandler {
   void requestShutdown() override {
     if (!rfc1867UploadedFiles.empty()) destroy_uploaded_files();
   }
-  void vscan(IMarker&) const override {}
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(Rfc1867Data, s_rfc1867_data);
 
@@ -183,23 +185,23 @@ static void destroy_uploaded_files() {
   rfc1867UploadedFiles.clear();
 }
 
-
 /*
  *  Following code is based on apache_multipart_buffer.c from
  *  libapreq-0.33 package.
  *
  */
 
-#define FILLUNIT (1024 * 5)
+constexpr size_t FILLUNIT = 1024 * 5;
 
-typedef struct {
+namespace {
+struct multipart_buffer {
   Transport *transport;
 
   /* read buffer */
   char *buffer;
   char *buf_begin;
-  uint32_t  bufsize;
-  int64_t   bytes_in_buffer; // signed to catch underflow errors
+  size_t bufsize;
+  int64_t bytes_in_buffer; // signed to catch underflow errors
 
   /* boundary info */
   char *boundary;
@@ -212,9 +214,10 @@ typedef struct {
   uint64_t throw_size; // sum of all previously read chunks
   char *cursor;
   uint64_t read_post_bytes;
-} multipart_buffer;
+};
+}
 
-typedef std::list<std::pair<std::string, std::string> > header_list;
+using header_list = std::list<std::pair<std::string, std::string>>;
 
 static uint32_t read_post(multipart_buffer *self, char *buf,
                           uint32_t bytes_to_read) {
@@ -237,7 +240,7 @@ static uint32_t read_post(multipart_buffer *self, char *buf,
   always_assert(self->cursor == (char *)self->post_data +
                         (self->post_size - self->throw_size));
   while (bytes_to_read > 0 && self->transport->hasMorePostData()) {
-    int extra_byte_read = 0;
+    size_t extra_byte_read = 0;
     const void *extra = self->transport->getMorePostData(extra_byte_read);
     if (extra_byte_read == 0) break;
     if (RuntimeOption::AlwaysPopulateRawPostData) {
@@ -260,6 +263,7 @@ static uint32_t read_post(multipart_buffer *self, char *buf,
     memcpy(buf + bytes_read, self->cursor, extra_byte_read);
     bytes_to_read -= extra_byte_read;
     bytes_read += extra_byte_read;
+    self->cursor += extra_byte_read;
   }
   return bytes_read;
 }
@@ -318,13 +322,13 @@ static int multipart_buffer_eof(multipart_buffer *self) {
 
 /* create new multipart_buffer structure */
 static multipart_buffer *multipart_buffer_new(Transport *transport,
-                                              const char *data, int size,
+                                              const char *data, size_t size,
                                               std::string boundary) {
   multipart_buffer *self =
     (multipart_buffer *)calloc(1, sizeof(multipart_buffer));
 
   self->transport = transport;
-  int minsize = boundary.length() + 6;
+  auto minsize = boundary.length() + 6;
   if (minsize < FILLUNIT) minsize = FILLUNIT;
 
   self->buffer = (char *) calloc(1, minsize + 1);
@@ -706,14 +710,14 @@ static char *multipart_buffer_read_body(multipart_buffer *self,
 void rfc1867PostHandler(Transport* transport,
                         Array& post,
                         Array& files,
-                        int content_length,
-                        const void*& data, int& size,
+                        size_t content_length,
+                        const void*& data, size_t& size,
                         const std::string boundary) {
   char *s=nullptr, *start_arr=nullptr;
   std::string array_index, abuf;
   char *lbuf=nullptr;
   int total_bytes=0, cancel_upload=0, is_arr_upload=0, array_len=0;
-  int max_file_size=0, skip_upload=0, anonindex=0, is_anonymous;
+  int max_file_size=0, skip_upload=0, anonindex=0;
   std::set<std::string> &uploaded_files = s_rfc1867_data->rfc1867UploadedFiles;
   multipart_buffer *mbuff;
   int fd=-1;
@@ -854,16 +858,13 @@ void rfc1867PostHandler(Transport* transport,
       }
 
       if (!param) {
-        is_anonymous = 1;
         param = (char*)malloc(MAX_SIZE_ANONNAME);
         snprintf(param, MAX_SIZE_ANONNAME, "%u", anonindex++);
-      } else {
-        is_anonymous = 0;
       }
 
       /* New Rule: never repair potential malicious user input */
       if (!skip_upload) {
-        char *tmp = param;
+        tmp = param;
         long c = 0;
 
         while (*tmp) {
@@ -1066,17 +1067,6 @@ void rfc1867PostHandler(Transport* transport,
         s = tmp;
       }
 
-      Array globals = php_globals_as_array();
-      if (!is_anonymous) {
-        if (s) {
-          String val(s+1, strlen(s+1), CopyString);
-          safe_php_register_variable(lbuf, val, globals, 0);
-        } else {
-          String val(filename, strlen(filename), CopyString);
-          safe_php_register_variable(lbuf, val, globals, 0);
-        }
-      }
-
       /* Add $foo[name] */
       if (is_arr_upload) {
         snprintf(lbuf, llen, "%s[name][%s]",
@@ -1106,18 +1096,6 @@ void rfc1867PostHandler(Transport* transport,
         }
       }
 
-      /* Add $foo_type */
-      if (is_arr_upload) {
-        snprintf(lbuf, llen, "%s_type[%s]",
-                 abuf.c_str(), array_index.c_str());
-      } else {
-        snprintf(lbuf, llen, "%s_type", param);
-      }
-      if (!is_anonymous) {
-        String val(cd, strlen(cd), CopyString);
-        safe_php_register_variable(lbuf, val, globals, 0);
-      }
-
       /* Add $foo[type] */
       if (is_arr_upload) {
         snprintf(lbuf, llen, "%s[type][%s]",
@@ -1138,11 +1116,6 @@ void rfc1867PostHandler(Transport* transport,
       add_protected_variable(param);
 
       Variant tempFileName(temp_filename);
-
-      /* if param is of form xxx[.*] this will cut it to xxx */
-      if (!is_anonymous) {
-        safe_php_register_variable(param, tempFileName, globals, 1);
-      }
 
       /* Add $foo[tmp_name] */
       if (is_arr_upload) {
@@ -1172,17 +1145,6 @@ void rfc1867PostHandler(Transport* transport,
         snprintf(lbuf, llen, "%s[error]", param);
       }
       safe_php_register_variable(lbuf, error_type, files, 0);
-
-      /* Add $foo_size */
-      if (is_arr_upload) {
-        snprintf(lbuf, llen, "%s_size[%s]",
-                 abuf.c_str(), array_index.c_str());
-      } else {
-        snprintf(lbuf, llen, "%s_size", param);
-      }
-      if (!is_anonymous) {
-        safe_php_register_variable(lbuf, file_size, globals, 0);
-      }
 
       /* Add $foo[size] */
       if (is_arr_upload) {

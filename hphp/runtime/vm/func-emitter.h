@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,7 +18,6 @@
 #define incl_HPHP_VM_FUNC_EMITTER_H_
 
 #include "hphp/runtime/base/attr.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
@@ -28,6 +27,7 @@
 #include "hphp/runtime/vm/repo-helpers.h"
 #include "hphp/runtime/vm/type-constraint.h"
 #include "hphp/runtime/vm/unit.h"
+#include "hphp/runtime/vm/unit-emitter.h"
 
 #include <utility>
 #include <vector>
@@ -41,20 +41,9 @@ struct StringData;
 struct PreClassEmitter;
 struct UnitEmitter;
 
-///////////////////////////////////////////////////////////////////////////////
-
-struct EHEntEmitter {
-  EHEnt::Type m_type;
-  bool m_itRef;
-  Offset m_base;
-  Offset m_past;
-  int m_iterId;
-  int m_parentIndex;
-  Offset m_fault;
-  std::vector<std::pair<Id,Offset>> m_catches;
-
-  template<class SerDe> void serde(SerDe& sd);
-};
+namespace Native {
+struct NativeFunctionInfo;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -66,28 +55,23 @@ struct FuncEmitter {
   /////////////////////////////////////////////////////////////////////////////
   // Types.
 
+  using UpperBoundVec = CompactVector<TypeConstraint>;
   struct ParamInfo : public Func::ParamInfo {
-    ParamInfo()
-      : byRef(false)
-    {}
+    ParamInfo() {}
 
     template<class SerDe>
     void serde(SerDe& sd) {
       Func::ParamInfo* parent = this;
       parent->serde(sd);
-      sd(byRef);
+      sd(upperBounds);
     }
 
-    // Whether the parameter is passed by reference.  This field is absent from
-    // Func::ParamInfo because we store it in a bitfield on Func.
-    bool byRef;
+    UpperBoundVec upperBounds;
   };
 
   typedef std::vector<ParamInfo> ParamInfoVec;
   typedef std::vector<Func::SVInfo> SVInfoVec;
-  typedef std::vector<EHEntEmitter> EHEntVec;
-  typedef std::vector<FPIEnt> FPIEntVec;
-
+  typedef std::vector<EHEnt> EHEntVec;
 
   /////////////////////////////////////////////////////////////////////////////
   // Initialization and execution.
@@ -102,12 +86,12 @@ struct FuncEmitter {
    */
   void init(int l1, int l2, Offset base_, Attr attrs_, bool top_,
             const StringData* docComment_);
-  void finish(Offset past, bool load);
+  void finish(Offset past);
 
   /*
    * Commit this function to a repo.
    */
-  void commit(RepoTxn& txn) const;
+  void commit(RepoTxn& txn) const; // throws(RepoExc)
 
   /*
    * Instantiate a runtime Func*.
@@ -137,7 +121,7 @@ struct FuncEmitter {
    */
   void setIds(int sn, Id id);
 
-
+  bool useGlobalIds() const;
   /////////////////////////////////////////////////////////////////////////////
   // Locals, iterators, and parameters.
 
@@ -145,6 +129,7 @@ struct FuncEmitter {
    * Count things.
    */
   Id numLocals() const;
+  Id numNamedLocals() const;
   Id numIterators() const;
   Id numLiveIterators() const;
 
@@ -159,13 +144,12 @@ struct FuncEmitter {
    */
   bool hasVar(const StringData* name) const;
   Id lookupVarId(const StringData* name) const;
-  void allocVarId(const StringData* name);
+  void allocVarId(const StringData* name, bool slotless = false);
 
   /*
-   * Allocate and free unnamed locals.
+   * Allocate unnamed locals.
    */
   Id allocUnnamedLocal();
-  void freeUnnamedLocal(Id id);
 
   /*
    * Allocate and free iterators.
@@ -188,17 +172,15 @@ struct FuncEmitter {
   // Unit tables.
 
   /*
-   * Add entries to the EH and FPI tables, and return them by reference.
+   * Add entries to the EH table, and return them by reference.
    */
-  EHEntEmitter& addEHEnt();
-  FPIEnt& addFPIEnt();
+  EHEnt& addEHEnt();
 
 private:
   /*
    * Private table sort routines; called at finish()-time.
    */
   void sortEHTab();
-  void sortFPITab(bool load);
 
 public:
   /*
@@ -223,12 +205,12 @@ public:
    */
   std::pair<int,int> getLocation() const;
 
+  Native::NativeFunctionInfo getNativeInfo() const;
+  String nativeFullname() const;
 
   /////////////////////////////////////////////////////////////////////////////
   // Complex setters.
   //
-  // XXX: Some of these should be moved to the emitter (esp. the
-  // setBuiltinFunc() methods).
 
   /*
    * Shorthand for setting `line1' and `line2' because typing is hard.
@@ -244,18 +226,10 @@ public:
   int parseNativeAttributes(Attr& attrs_) const;
 
   /*
-   * Pull fields for builtin functions out of a MethodInfo object.
+   * Fix some attributes based on the current runtime options that may
+   * have been stored incorrectly in the repo.
    */
-  void setBuiltinFunc(const ClassInfo::MethodInfo* info,
-                      BuiltinFunction bif, BuiltinFunction nif,
-                      Offset base_);
-
-  /*
-   * Set some fields for builtin functions.
-   */
-  void setBuiltinFunc(BuiltinFunction bif, BuiltinFunction nif,
-                      Attr attrs_, Offset base_);
-
+  Attr fix_attrs(Attr a) const;
 
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
@@ -283,32 +257,42 @@ public:
   Attr attrs;
 
   ParamInfoVec params;
-  SVInfoVec staticVars;
   int maxStackCells;
 
-  MaybeDataType returnType;
+  MaybeDataType hniReturnType;
   TypeConstraint retTypeConstraint;
   LowStringPtr retUserType;
+  UpperBoundVec retUpperBounds;
 
   EHEntVec ehtab;
-  FPIEntVec fpitab;
 
-  bool isClosureBody;
-  bool isAsync;
-  bool isGenerator;
-  bool isPairGenerator;
-  bool isMemoizeImpl;
-  bool isMemoizeWrapper;
-  bool hasMemoizeSharedProp;
-  bool containsCalls;
+  union {
+    uint16_t m_repoBoolBitset{0};
+    struct {
+      bool isMemoizeWrapper    : 1;
+      bool isMemoizeWrapperLSB : 1;
+      bool isClosureBody       : 1;
+      bool isAsync             : 1;
+      bool containsCalls       : 1;
+      bool isNative            : 1;
+      bool isGenerator         : 1;
+      bool isPairGenerator     : 1;
+      bool isRxDisabled        : 1;
+      bool hasParamsWithMultiUBs : 1;
+      bool hasReturnWithMultiUBs : 1;
+    };
+  };
 
   LowStringPtr docComment;
   LowStringPtr originalFilename;
 
   UserAttributeMap userAttributes;
 
-  StringData *memoizePropName;
+  StringData* memoizePropName;
+  StringData* memoizeGuardPropName;
   int memoizeSharedPropIndex;
+  RepoAuthType repoReturnType;
+  RepoAuthType repoAwaitedReturnType;
 
 private:
   /*
@@ -317,14 +301,8 @@ private:
   Func::NamedLocalsMap::Builder m_localNames;
   Id m_numLocals;
   int m_numUnnamedLocals;
-  int m_activeUnnamedLocals;
   Id m_numIterators;
   Id m_nextFreeIterator;
-
-  const ClassInfo::MethodInfo* m_info;
-  BuiltinFunction m_builtinFuncPtr;
-  BuiltinFunction m_nativeFuncPtr;
-
   bool m_ehTabSorted;
 };
 
@@ -334,23 +312,23 @@ private:
  * Proxy for converting in-repo function representations into FuncEmitters.
  */
 struct FuncRepoProxy : public RepoProxy {
-  friend class Func;
-  friend class FuncEmitter;
+  friend struct Func;
+  friend struct FuncEmitter;
 
   explicit FuncRepoProxy(Repo& repo);
   ~FuncRepoProxy();
-  void createSchema(int repoId, RepoTxn& txn);
+  void createSchema(int repoId, RepoTxn& txn); // throws(RepoExc)
 
   struct InsertFuncStmt : public RepoProxy::Stmt {
     InsertFuncStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
     void insert(const FuncEmitter& fe,
                 RepoTxn& txn, int64_t unitSn, int funcSn, Id preClassId,
-                const StringData* name, bool top);
+                const StringData* name, bool top); // throws(RepoExc)
   };
 
   struct GetFuncsStmt : public RepoProxy::Stmt {
     GetFuncsStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void get(UnitEmitter& ue);
+    void get(UnitEmitter& ue); // throws(RepoExc)
   };
 
   InsertFuncStmt insertFunc[RepoIdCount];

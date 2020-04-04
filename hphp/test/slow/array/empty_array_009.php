@@ -1,8 +1,12 @@
-<?php
+<?hh
 
-function a() { return array(); }
+function a() { return varray[]; }
 function main() {
   $x = a();
-  return $x + array(1,2,3);
+  return $x + varray[1,2,3];
 }
+
+<<__EntryPoint>>
+function main_empty_array_009() {
 var_dump(main());
+}

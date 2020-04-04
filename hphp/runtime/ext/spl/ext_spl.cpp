@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -48,8 +48,9 @@ const StaticString
   s_current("current"),
   s_key("key"),
   s_getIterator("getIterator"),
-  s_directory_iterator("DirectoryIterator");
+  s_DirectoryIterator("DirectoryIterator");
 
+static Class* s_DirectoryIterator_class = nullptr;
 
 void throw_spl_exception(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
   ATTRIBUTE_PRINTF(1,2);
@@ -64,7 +65,7 @@ void throw_spl_exception(const char *fmt, ...) {
 }
 
 static bool s_inited = false;
-static int64_t s_hash_mask_handle = 0;
+static uint64_t s_hash_mask_handle = 0;
 static Mutex s_mutex;
 
 String HHVM_FUNCTION(spl_object_hash, const Object& obj) {
@@ -117,10 +118,11 @@ Variant HHVM_FUNCTION(class_implements, const Variant& obj,
     raise_warning("class_implements(): object or string expected");
     return false;
   }
-  Array ret(Array::Create());
+  Array ret(Array::CreateDArray());
   const Class::InterfaceMap& ifaces = cls->allInterfaces();
   for (int i = 0, size = ifaces.size(); i < size; i++) {
-    ret.set(ifaces[i]->nameStr(), VarNR(ifaces[i]->name()));
+    ret.set(ifaces[i]->nameStr(),
+            make_tv<KindOfPersistentString>(ifaces[i]->name()));
   }
   return ret;
 }
@@ -144,9 +146,9 @@ Variant HHVM_FUNCTION(class_parents, const Variant& obj,
     raise_warning("class_parents(): object or string expected");
     return false;
   }
-  Array ret(Array::Create());
+  Array ret(Array::CreateDArray());
   for (cls = cls->parent(); cls; cls = cls->parent()) {
-    ret.set(cls->nameStr(), VarNR(cls->name()));
+    ret.set(cls->nameStr(), make_tv<KindOfPersistentString>(cls->name()));
   }
   return ret;
 }
@@ -171,95 +173,16 @@ Variant HHVM_FUNCTION(class_uses, const Variant& obj,
     return false;
   }
   auto &usedTraits = cls->preClass()->usedTraits();
-  ArrayInit ret(usedTraits.size(), ArrayInit::Map{});
+  DArrayInit ret(usedTraits.size());
   for (auto const& traitName : usedTraits) {
-    ret.set(StrNR(traitName), VarNR(traitName));
+    ret.set(StrNR(traitName), VarNR(traitName).tv());
   }
   return ret.toArray();
 }
 
-#define CHECK_TRAVERSABLE_IMPL(obj, ret) \
-  if (!obj.isObject() || \
-      !obj.getObjectData()->instanceof(SystemLib::s_TraversableClass)) { \
-    raise_recoverable_error("Argument must implement interface Traversable"); \
-    return ret; \
-  }
-
-Object get_traversable_object_iterator(const Variant& obj) {
-  bool isIteratorAggregate;
-  Object itObj = obj.getObjectData()
-    ->iterableObject(isIteratorAggregate, true);
-
-  if (!isIteratorAggregate) {
-    if (!obj.getObjectData()->instanceof(
-        SystemLib::s_IteratorAggregateClass)) {
-      raise_error("Objects returned by getIterator() must be traversable or "
-                  "implement interface Iterator");
-    } else {
-      raise_error(
-        "Class %s must implement interface Traversable as part of either "
-        "Iterator or IteratorAggregate",
-        obj.toObject()->getClassName().data()
-      );
-    }
-  }
-
-  return itObj;
-}
-
-
-Variant HHVM_FUNCTION(iterator_apply, const Variant& obj, const Variant& func,
-                         const Array& params /* = null_array */) {
-  VMRegAnchor _;
-  CHECK_TRAVERSABLE_IMPL(obj, 0);
-  Object pobj = get_traversable_object_iterator(obj);
-  pobj->o_invoke_few_args(s_rewind, 0);
-  int64_t count = 0;
-  while (same(pobj->o_invoke_few_args(s_valid, 0), true)) {
-    if (!same(vm_call_user_func(func, params), true)) {
-      break;
-    }
-    ++count;
-    pobj->o_invoke_few_args(s_next, 0);
-  }
-  return count;
-}
-
-Variant HHVM_FUNCTION(iterator_count, const Variant& obj) {
-  VMRegAnchor _;
-  CHECK_TRAVERSABLE_IMPL(obj, 0);
-  Object pobj = get_traversable_object_iterator(obj);
-  pobj->o_invoke_few_args(s_rewind, 0);
-  int64_t count = 0;
-  while (same(pobj->o_invoke_few_args(s_valid, 0), true)) {
-    ++count;
-    pobj->o_invoke_few_args(s_next, 0);
-  }
-  return count;
-}
-
-Array HHVM_FUNCTION(iterator_to_array, const Variant& obj,
-                                         bool use_keys /* = true */) {
-  VMRegAnchor _;
-  Array ret(Array::Create());
-  CHECK_TRAVERSABLE_IMPL(obj, ret);
-  Object pobj = get_traversable_object_iterator(obj);
-  pobj->o_invoke_few_args(s_rewind, 0);
-  while (same(pobj->o_invoke_few_args(s_valid, 0), true)) {
-    Variant val = pobj->o_invoke_few_args(s_current, 0);
-    if (use_keys) {
-      Variant key = pobj->o_invoke_few_args(s_key, 0);
-      ret.set(key, val);
-    } else {
-      ret.append(val);
-    }
-    pobj->o_invoke_few_args(s_next, 0);
-  }
-  return ret;
-}
 
 bool HHVM_FUNCTION(spl_autoload_register,
-                   const Variant& autoload_function /* = null_variant */,
+                   const Variant& autoload_function /* = uninit_variant */,
                    bool throws /* = true */,
                    bool prepend /* = false */) {
   if (same(autoload_function, s_spl_autoload_call)) {
@@ -279,7 +202,8 @@ bool HHVM_FUNCTION(spl_autoload_register,
 }
 
 bool HHVM_FUNCTION(spl_autoload_unregister, const Variant& autoload_function) {
-  if (same(autoload_function, s_spl_autoload_call)) {
+  if (same(autoload_function, s_spl_autoload_call) &&
+      !AutoloadHandler::s_instance->isRunning()) {
     AutoloadHandler::s_instance->removeAllHandlers();
   } else {
     AutoloadHandler::s_instance->removeHandler(autoload_function);
@@ -292,7 +216,7 @@ Variant HHVM_FUNCTION(spl_autoload_functions) {
   if (handlers.isNull()) {
     return false;
   } else {
-    return handlers.values();
+    return handlers;
   }
 }
 
@@ -300,29 +224,24 @@ void HHVM_FUNCTION(spl_autoload_call, const String& class_name) {
   AutoloadHandler::s_instance->autoloadClass(class_name, true);
 }
 
-namespace {
 struct ExtensionList final : RequestEventHandler {
   void requestInit() override {
-    extensions = make_packed_array(String(".inc"), String(".php"));
+    extensions = make_vec_array(String(".inc"), String(".php"));
   }
   void requestShutdown() override {
     extensions.reset();
-  }
-  void vscan(IMarker& mark) const override {
-    mark(extensions);
   }
 
   Array extensions;
 };
 
 IMPLEMENT_STATIC_REQUEST_LOCAL(ExtensionList, s_extension_list);
-}
 
 String HHVM_FUNCTION(spl_autoload_extensions,
                      const String& file_extensions /* = null_string */) {
   if (!file_extensions.empty()) {
     s_extension_list->extensions = StringUtil::Explode(file_extensions, ",")
-                                   .toArray();
+                                   .toVecArray();
     return file_extensions;
   }
   return StringUtil::Implode(s_extension_list->extensions, ",");
@@ -330,19 +249,30 @@ String HHVM_FUNCTION(spl_autoload_extensions,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+const StaticString
+  s_dir("dir"),
+  s_dirName("dirName");
+
 template <class T>
 static req::ptr<T> getDir(const Object& dir_iter) {
   static_assert(std::is_base_of<Directory, T>::value,
                 "Only cast to directories");
-  return cast<T>(*dir_iter->o_realProp("dir", 0, s_directory_iterator));
+  assertx(s_DirectoryIterator_class);
+  auto const dir = dir_iter->getProp(
+    s_DirectoryIterator_class, s_dir.get()
+  );
+  assertx(dir.is_set());
+  assertx(dir.type() == KindOfResource);
+  return req::ptr<T>(static_cast<T*>(dir.val().pres->data()));
 }
 
 static Variant HHVM_METHOD(DirectoryIterator, hh_readdir) {
   auto dir = getDir<Directory>(ObjNR(this_).asObject());
 
   if (auto array_dir = dyn_cast<ArrayDirectory>(dir)) {
-    auto prop = this_->o_realProp("dirName", 0, s_directory_iterator);
-    *prop = array_dir->path();
+    auto const path = array_dir->path();
+    assertx(s_DirectoryIterator_class);
+    this_->setProp(s_DirectoryIterator_class, s_dirName.get(), path.asTypedValue());
   }
 
   return HHVM_FN(readdir)(Resource(dir));
@@ -354,12 +284,11 @@ static int64_t HHVM_METHOD(GlobIterator, count) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class SPLExtension final : public Extension {
-public:
+struct SPLExtension final : Extension {
   SPLExtension() : Extension("spl", "0.2") { }
-  void moduleLoad(const IniSetting::Map& ini, Hdf config) override {
-    HHVM_ME(DirectoryIterator, hh_readdir);
-    HHVM_ME(GlobIterator, count);
+  void moduleLoad(const IniSetting::Map& /*ini*/, Hdf /*config*/) override {
+    HHVM_SYS_ME(DirectoryIterator, hh_readdir);
+    HHVM_SYS_ME(GlobIterator, count);
   }
   void moduleInit() override {
     HHVM_FE(spl_object_hash);
@@ -368,9 +297,6 @@ public:
     HHVM_FE(class_implements);
     HHVM_FE(class_parents);
     HHVM_FE(class_uses);
-    HHVM_FE(iterator_apply);
-    HHVM_FE(iterator_count);
-    HHVM_FE(iterator_to_array);
     HHVM_FE(spl_autoload_call);
     HHVM_FE(spl_autoload_extensions);
     HHVM_FE(spl_autoload_functions);
@@ -378,6 +304,9 @@ public:
     HHVM_FE(spl_autoload_unregister);
 
     loadSystemlib();
+
+    s_DirectoryIterator_class = Unit::lookupClass(s_DirectoryIterator.get());
+    assertx(s_DirectoryIterator_class);
   }
 } s_SPL_extension;
 

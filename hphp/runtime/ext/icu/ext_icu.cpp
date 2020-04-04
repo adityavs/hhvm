@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -41,14 +41,18 @@ typedef tbb::concurrent_hash_map<const StringData*,const RegexPattern*,
 
 static PatternStringMap s_patternCacheMap;
 
-static Variant HHVM_FUNCTION(icu_match, const String& pattern,
-                                        const String& subject,
-                                        VRefParam matches /* = null */,
-                                        int64_t flags /* = 0 */) {
+static Variant icu_match_impl(const String& pattern,
+                              const String& subject,
+                              Array* matches,
+                              int64_t flags) {
   UErrorCode status = U_ZERO_ERROR;
 
-  Array matchesArr = Array::Create();
-  SCOPE_EXIT { matches.assignIfRef(matchesArr); };
+  Array matchesArr = Array::CreateVArray();
+  SCOPE_EXIT {
+    if (matches) {
+      *matches = matchesArr;
+    }
+  };
 
   // Create hash map key by concatenating pattern and flags.
   StringBuffer bpattern;
@@ -92,7 +96,7 @@ static Variant HHVM_FUNCTION(icu_match, const String& pattern,
   if (matcher->find()) {
     matched = 1;
 
-    if (matches.isReferenced()) {
+    if (matches) {
       int32_t count = matcher->groupCount();
 
       for (int32_t i = 0; i <= count; i++) {
@@ -116,7 +120,7 @@ static Variant HHVM_FUNCTION(icu_match, const String& pattern,
           }
 
           start = usubject.countChar32(0, start);
-          matchesArr.append(make_packed_array(match, start));
+          matchesArr.append(make_varray(match, start));
         } else {
           matchesArr.append(match);
         }
@@ -127,12 +131,25 @@ static Variant HHVM_FUNCTION(icu_match, const String& pattern,
   return matched;
 }
 
+static Variant HHVM_FUNCTION(icu_match,
+                             const String& pattern,
+                             const String& subject,
+                             int64_t flags /* = 0 */) {
+  return icu_match_impl(pattern, subject, nullptr, flags);
+}
+
+static Variant HHVM_FUNCTION(icu_match_with_matches,
+                             const String& pattern,
+                             const String& subject,
+                             Array& matches,
+                             int64_t flags /* = 0 */) {
+  return icu_match_impl(pattern, subject, &matches, flags);
+}
 
 // Need to have a valid installation of the transliteration data in /lib64.
 // Initialization will be taken care of by ext_array which also uses icu.
 
-class TransliteratorWrapper {
-public:
+struct TransliteratorWrapper {
   void initialize() {
     UnicodeString basicID("Any-Latin ; NFKD; [:nonspacing mark:] Remove");
     UnicodeString basicIDAccent("Any-Latin ; NFKC");
@@ -222,28 +239,25 @@ std::string icuStringToUTF8(const UnicodeString& ustr) {
 
 
 // Regex matchers for spaces and numbers.
-class SpaceMatcher : public ICUMatcher {
-public:
+struct SpaceMatcher : ICUMatcher {
   SpaceMatcher() { set("^\\s+$"); }
 };
 
-class NumMatcher : public ICUMatcher {
-public:
+struct NumMatcher : ICUMatcher {
   NumMatcher() { set("\\d"); }
 };
 
 
 // Transliterator to convert UnicodeStrings to lower case.
-class LowerCaseTransliterator : public ICUTransliterator {
-public:
+struct LowerCaseTransliterator : ICUTransliterator {
   LowerCaseTransliterator() { set("Upper; Lower;"); }
 };
 
 
-// Thread-local globals.
-IMPLEMENT_THREAD_LOCAL(SpaceMatcher, s_spaceMatcher);
-IMPLEMENT_THREAD_LOCAL(NumMatcher, s_numMatcher);
-IMPLEMENT_THREAD_LOCAL(LowerCaseTransliterator, s_lctranslit);
+// Request-local globals, contains internal variable of status
+RDS_LOCAL(SpaceMatcher, s_spaceMatcher);
+RDS_LOCAL(NumMatcher, s_numMatcher);
+RDS_LOCAL(LowerCaseTransliterator, s_lctranslit);
 
 
 /* Normalize a unicode string depending on its type.
@@ -328,8 +342,6 @@ static Array HHVM_FUNCTION(icu_tokenize, const String& text) {
 
 /////////////////////////////////////////////////////////////////////////////
 
-const StaticString s_UREGEX_OFFSET_CAPTURE("UREGEX_OFFSET_CAPTURE");
-
 void IntlExtension::initICU() {
   // We need this initialization to be done late
   // so that ICU's dynamic initializers have had
@@ -338,19 +350,16 @@ void IntlExtension::initICU() {
   s_transliterator.initialize();
 
   HHVM_FE(icu_match);
+  HHVM_FE(icu_match_with_matches);
   HHVM_FE(icu_transliterate);
   HHVM_FE(icu_tokenize);
 
-#define UREGEX_CONST(v) Native::registerConstant<KindOfInt64> \
-                          (makeStaticString("UREGEX_" #v), UREGEX_##v);
-  UREGEX_CONST(CASE_INSENSITIVE);
-  UREGEX_CONST(COMMENTS);
-  UREGEX_CONST(DOTALL);
-  UREGEX_CONST(MULTILINE);
-  UREGEX_CONST(UWORD);
-#undef UREGEX_CONST
-  Native::registerConstant<KindOfInt64>(s_UREGEX_OFFSET_CAPTURE.get(),
-                                        k_UREGEX_OFFSET_CAPTURE);
+  HHVM_RC_INT_SAME(UREGEX_CASE_INSENSITIVE);
+  HHVM_RC_INT_SAME(UREGEX_COMMENTS);
+  HHVM_RC_INT_SAME(UREGEX_DOTALL);
+  HHVM_RC_INT_SAME(UREGEX_MULTILINE);
+  HHVM_RC_INT_SAME(UREGEX_UWORD);
+  HHVM_RC_INT(UREGEX_OFFSET_CAPTURE, k_UREGEX_OFFSET_CAPTURE);
 
   loadSystemlib("icu");
 }

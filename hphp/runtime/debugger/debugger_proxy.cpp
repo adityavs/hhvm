@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,7 @@
 
 #include <folly/Conv.h>
 
+#include "hphp/runtime/debugger/cmd/cmd_auth.h"
 #include "hphp/runtime/debugger/cmd/cmd_interrupt.h"
 #include "hphp/runtime/debugger/cmd/cmd_flow_control.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
@@ -30,7 +31,7 @@
 #include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/debugger/dummy_sandbox.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
 #include "hphp/runtime/ext/sockets/ext_sockets.h"
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/vm-regs.h"
@@ -53,7 +54,7 @@ DebuggerProxy::DebuggerProxy(req::ptr<Socket> socket, bool local)
   Variant port;
   std::string clientDetails;
   if (!local) {
-    if (getClientConnectionInfo(ref(address), ref(port))) {
+    if (getClientConnectionInfo(address, port)) {
       clientDetails = folly::stringPrintf("From %s:%d",
                                           address.toString().data(),
                                           port.toInt32());
@@ -75,7 +76,7 @@ bool DebuggerProxy::cleanup(int timeout) {
   TRACE_RB(2, "DebuggerProxy::cleanup starting\n");
   // If we're not already marked as stopping then there may be other
   // threads still attempting to use this object!
-  assert(m_stopped);
+  assertx(m_stopped);
   // No more client operation is possible, so drop the connection.
   m_thrift.close();
   TRACE(2, "Stopping signal thread...\n");
@@ -151,10 +152,10 @@ void DebuggerProxy::getThreads(std::vector<DThreadInfoPtr> &threads) {
   TRACE(2, "DebuggerProxy::getThreads\n");
   Lock lock(this);
   auto& interrupts = RID().interrupts;
-  assert(!interrupts.empty());
+  assertx(!interrupts.empty());
   if (!interrupts.empty()) {
     CmdInterrupt *tint = (CmdInterrupt*)interrupts.top();
-    assert(tint);
+    assertx(tint);
     if (tint) {
       threads.push_back(createThreadInfo(tint->desc()));
     }
@@ -337,13 +338,13 @@ void DebuggerProxy::interrupt(CmdInterrupt &cmd) {
         disableSignalPolling();
         SCOPE_EXIT { enableSignalPolling(); };
         processInterrupt(cmd);
-      } catch (const DebuggerException &e) {
+      } catch (const DebuggerException& e) {
         TRACE(2, "DebuggerException from processInterrupt!\n");
         switchThreadMode(Normal);
         throw;
       } catch (...) {
         TRACE(2, "Unknown exception from processInterrupt!\n");
-        assert(false); // no other exceptions should be seen here
+        assertx(false); // no other exceptions should be seen here
         switchThreadMode(Normal);
         throw;
       }
@@ -485,8 +486,8 @@ void DebuggerProxy::pollSignal() {
 }
 
 // Grab the ip address and port of the client that is connected to this proxy.
-bool DebuggerProxy::getClientConnectionInfo(VRefParam address,
-                                            VRefParam port) {
+bool DebuggerProxy::getClientConnectionInfo(Variant& address,
+                                            Variant& port) {
   Resource s(m_thrift.getSocket().get());
   return HHVM_FN(socket_getpeername)(s, address, port);
 }
@@ -494,44 +495,52 @@ bool DebuggerProxy::getClientConnectionInfo(VRefParam address,
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
+namespace {
+
+// Passed to the ExecutionContext during Eval to add writes to stdout
+// to the output buffer string.
+struct DebuggerStdoutHook final : ExecutionContext::StdoutHook {
+  StringBuffer& sb;
+  explicit DebuggerStdoutHook(StringBuffer& sb) : sb(sb) {}
+  void operator()(const char* s, int len) override {
+    TRACE(2, "DebuggerProxy::append_stdout\n");
+    if (s_stdout_color) {
+      sb.append(s_stdout_color);
+    }
+    sb.append(s, len);
+    if (s_stdout_color) {
+      sb.append(ANSI_COLOR_END);
+    }
+  }
+};
+
+struct DebuggerLoggerHook final : LoggerHook {
+  StringBuffer& sb;
+  explicit DebuggerLoggerHook(StringBuffer& sb) : sb(sb) {}
+  void operator()(const char* /*hdr*/, const char* msg, const char* ending)
+       override {
+    TRACE(2, "DebuggerProxy::append_stderr\n");
+    if (s_stderr_color) {
+      sb.append(s_stderr_color);
+    }
+    sb.append(msg);
+    sb.append(ending);
+    if (s_stderr_color) {
+      sb.append(ANSI_COLOR_END);
+    }
+  }
+};
+
+}
+
 std::string DebuggerProxy::MakePHP(const std::string &php) {
   TRACE(2, "DebuggerProxy::MakePHP\n");
-  return "<?php " + php + ";";
+  return "<?hh " + php + ";";
 }
 
 std::string DebuggerProxy::MakePHPReturn(const std::string &php) {
   TRACE(2, "DebuggerProxy::MakePHPReturn\n");
-  return "<?php return " + php + ";";
-}
-
-// Passed to the ExecutionContext during Eval to add writes to stdout
-// to the output buffer string.
-static void append_stdout(const char *s, int len, void *data) {
-  TRACE(2, "DebuggerProxy::append_stdout\n");
-  StringBuffer *sb = (StringBuffer*)data;
-  if (s_stdout_color) {
-    sb->append(s_stdout_color);
-  }
-  sb->append(s, len);
-  if (s_stdout_color) {
-    sb->append(ANSI_COLOR_END);
-  }
-}
-
-// Passed to the ExecutionContext during Eval to add writes to stderr
-// to the output buffer string.
-static void append_stderr(const char *header, const char *msg,
-                          const char *ending, void *data) {
-  TRACE(2, "DebuggerProxy::append_stderr\n");
-  StringBuffer *sb = (StringBuffer*)data;
-  if (s_stderr_color) {
-    sb->append(s_stderr_color);
-  }
-  sb->append(msg);
-  sb->append(ending);
-  if (s_stderr_color) {
-    sb->append(ANSI_COLOR_END);
-  }
+  return "<?hh return " + php + ";";
 }
 
 // Record info about the current thread for the debugger client to use
@@ -738,8 +747,15 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
                            "Command receive failed");
         cmdFailure = true;
       }
-    } catch (const DebuggerException &e) {
+    } catch (const DebuggerException& e) {
       throw;
+    } catch (const Object &o) {
+      Logger::Warning(DEBUGGER_LOG_TAG
+                      "Cmd type %d onServer() threw a php exception %s",
+                      res->getType(), o->getVMClass()->name()->data());
+      Debugger::UsageLog("server", getSandboxId(), "ProxyError",
+                         "Command exception");
+      cmdFailure = true;
     } catch (const std::exception& e) {
       Logger::Warning(DEBUGGER_LOG_TAG
        "Cmd type %d onServer() threw exception %s", res->getType(), e.what());
@@ -760,18 +776,41 @@ void DebuggerProxy::processInterrupt(CmdInterrupt &cmd) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
-                                  int frame, bool &failed, int flags) {
+std::pair<bool,Variant>
+DebuggerProxy::ExecutePHP(const std::string &php, String &output,
+                          int frame, int flags) {
   TRACE(2, "DebuggerProxy::ExecutePHP\n");
-  Variant ret;
   // Wire up stdout and stderr to our own string buffer so we can pass
   // any output back to the client.
   StringBuffer sb;
   StringBuffer *save = g_context->swapOutputBuffer(nullptr);
-  g_context->setStdout(append_stdout, &sb);
-  if (flags & ExecutePHPFlagsLog) {
-    Logger::SetThreadHook(append_stderr, &sb);
+  DebuggerStdoutHook stdout_hook(sb);
+  DebuggerLoggerHook stderr_hook(sb);
+
+  auto const previousEvalOutputHook = m_evalOutputHook;
+  if (previousEvalOutputHook != nullptr) {
+    g_context->removeStdoutHook(previousEvalOutputHook);
   }
+
+  m_evalOutputHook = &stdout_hook;
+  g_context->addStdoutHook(&stdout_hook);
+
+  if (flags & ExecutePHPFlagsLog) {
+    Logger::SetThreadHook(&stderr_hook);
+  }
+  SCOPE_EXIT {
+    g_context->removeStdoutHook(&stdout_hook);
+    g_context->swapOutputBuffer(save);
+    if (flags & ExecutePHPFlagsLog) {
+      Logger::SetThreadHook(nullptr);
+    }
+
+    if (previousEvalOutputHook != nullptr) {
+      g_context->addStdoutHook(previousEvalOutputHook);
+    }
+
+    m_evalOutputHook = previousEvalOutputHook;
+  };
   String code(php.c_str(), php.size(), CopyString);
   // We're about to start executing more PHP. This is typically done
   // in response to commands from the client, and the client expects
@@ -785,7 +824,7 @@ Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
   // other threads which may hit interrupts while we're running,
   // since nested processInterrupt() calls would normally release
   // other threads on the way out.
-  assert(m_thread == (int64_t)Process::GetThreadId());
+  assertx(m_thread == (int64_t)Process::GetThreadId());
   ThreadMode origThreadMode = m_threadMode;
   switchThreadMode(Sticky, m_thread);
   if (flags & ExecutePHPFlagsAtInterrupt) enableSignalPolling();
@@ -793,14 +832,89 @@ Variant DebuggerProxy::ExecutePHP(const std::string &php, String &output,
     if (flags & ExecutePHPFlagsAtInterrupt) disableSignalPolling();
     switchThreadMode(origThreadMode, m_thread);
   };
-  failed = g_context->evalPHPDebugger((TypedValue*)&ret, code.get(), frame);
-  g_context->setStdout(nullptr, nullptr);
-  g_context->swapOutputBuffer(save);
-  if (flags & ExecutePHPFlagsLog) {
-    Logger::SetThreadHook(nullptr, nullptr);
-  }
+  auto const ret = g_context->evalPHPDebugger(code.get(), frame);
   output = sb.detach();
-  return ret;
+  return {ret.failed, ret.result};
+}
+
+std::string DebuggerProxy::requestAuthToken() {
+  Lock lock(m_signalMutex);
+  TRACE_RB(2, "DebuggerProxy::requestauthToken: sending auth request\n");
+
+  // Try to use the current sandbox's path, defaulting to the path from
+  // DebuggerDefaultSandboxPath if the current sandbox path is empty.
+  auto sandboxPath = getSandbox().m_path;
+  if (sandboxPath.empty()) {
+    sandboxPath = RuntimeOption::DebuggerDefaultSandboxPath;
+  }
+
+  CmdAuth cmd;
+  cmd.setSandboxPath(sandboxPath);
+  if (!cmd.onServer(*this)) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "Failed to send CmdAuth to client\n");
+    return "";
+  }
+
+  DebuggerCommandPtr res;
+  while (!DebuggerCommand::Receive(m_thrift, res,
+                                   "DebuggerProxy::requestAuthToken()")) {
+    checkStop();
+  }
+  if (!res) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "Failed to get CmdAuth back from client\n");
+    return "";
+  }
+
+  auto token = std::dynamic_pointer_cast<CmdAuth>(res);
+  if (!token) {
+    TRACE_RB(2, "DebuggerProxy::requestAuthToken: "
+             "bad response from token request: %d", res->getType());
+    return "";
+  }
+
+  return token->getToken();
+}
+
+std::string DebuggerProxy::requestSessionAuth() {
+  Lock lock(m_signalMutex);
+  TRACE_RB(2, "DebuggerProxy::requestSessionAuth: sending auth request\n");
+
+  // Try to use the current sandbox's path, defaulting to the path from
+  // DebuggerDefaultSandboxPath if the current sandbox path is empty.
+  auto sandboxPath = getSandbox().m_path;
+  if (sandboxPath.empty()) {
+    sandboxPath = RuntimeOption::DebuggerDefaultSandboxPath;
+  }
+
+  CmdAuth cmd;
+  cmd.setSandboxPath(sandboxPath);
+  if (!cmd.onServer(*this)) {
+    TRACE_RB(2, "DebuggerProxy::requestSessionAuth: "
+             "Failed to send CmdAuth to client\n");
+    return "";
+  }
+
+  DebuggerCommandPtr res;
+  while (!DebuggerCommand::Receive(m_thrift, res,
+                                   "DebuggerProxy::requestSessionAuth()")) {
+    checkStop();
+  }
+  if (!res) {
+    TRACE_RB(2, "DebuggerProxy::requestSessionAuth: "
+             "Failed to get CmdAuth back from client\n");
+    return "";
+  }
+
+  auto auth = std::dynamic_pointer_cast<CmdAuth>(res);
+  if (!auth) {
+    TRACE_RB(2, "DebuggerProxy::requestSessionAuth: "
+             "bad response from auth request: %d", res->getType());
+    return "";
+  }
+
+  return auth->getSession();
 }
 
 int DebuggerProxy::getRealStackDepth() {
@@ -811,7 +925,7 @@ int DebuggerProxy::getRealStackDepth() {
   if (!fp) return 0;
 
   while (fp != nullptr) {
-    fp = context->getPrevVMState(fp, nullptr, nullptr);
+    fp = context->getPrevVMState(fp);
     depth++;
   }
   return depth;

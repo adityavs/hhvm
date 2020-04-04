@@ -1,26 +1,29 @@
-<?php
+<?hh
 
 function a() {
-  $transport = array("foot", "bike", "car", "plane");
+  $transport = varray["foot", "bike", "car", "plane"];
   var_dump(current($transport));
-  var_dump(next($transport));
+  var_dump(next(inout $transport));
   var_dump(current($transport));
-  var_dump(prev($transport));
-  var_dump(end($transport));
+  var_dump(prev(inout $transport));
+  var_dump(end(inout $transport));
   var_dump(current($transport));
 }
 
 function b() {
-  $arr = array();
+  $arr = varray[];
   var_dump(current($arr));
-  var_dump(current(array()));
 }
 
 function c() {
-  $arr = array(array());
+  $arr = varray[varray[]];
   var_dump(current($arr));
 }
 
+
+<<__EntryPoint>>
+function main_current() {
 a();
 b();
 c();
+}

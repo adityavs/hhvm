@@ -1,14 +1,18 @@
-File "foreach_vector.php", line 21, characters 10-13:
+File "foreach_vector.php", line 21, characters 10-17:
 Typing error (Typing[4110])
 File "foreach_vector.php", line 21, characters 10-13:
-This is a num (int/float) because this is used in an arithmetic operation
+Expected num because this is used in an arithmetic operation
 File "foreach_vector.php", line 18, characters 19-21:
-It is incompatible with an object of type Foo
-File "builtins.hhi", line 15, characters 47-48:
+But got Foo
+File "collections/Vector.hhi", line 50, characters 50-51:
   via this generic Tv
-File "builtins.hhi", line 12, characters 55-56:
+File "collections/interfaces.hhi", line 585, characters 49-50:
   via this generic Tv
-File "builtins.hhi", line 9, characters 64-65:
+File "collections/interfaces.hhi", line 310, characters 61-62:
   via this generic Tv
-File "builtins.hhi", line 6, characters 58-59:
+File "rx/interfaces.hhi", line 389, characters 36-37:
+  via this generic Tv
+File "rx/interfaces.hhi", line 35, characters 33-34:
+  via this generic Tv
+File "rx/interfaces.hhi", line 26, characters 52-53:
   via this generic Tv

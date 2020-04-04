@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,44 +18,50 @@
 #define incl_HPHP_RUNTIME_VM_JIT_TIMER_H_
 
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #define JIT_TIMERS                              \
   TIMER_NAME(analyze)                           \
-  TIMER_NAME(codeGen)                           \
   TIMER_NAME(collectPostConditions)             \
+  TIMER_NAME(hhir_lower)                        \
   TIMER_NAME(optimize)                          \
   TIMER_NAME(optimize_dce)                      \
   TIMER_NAME(optimize_cleancfg)                 \
   TIMER_NAME(optimize_predictionOpts)           \
   TIMER_NAME(optimize_realxGuards)              \
   TIMER_NAME(optimize_refcountOpts)             \
-  TIMER_NAME(optimize_relaxGuards)              \
   TIMER_NAME(optimize_reoptimize)               \
-  TIMER_NAME(regalloc)                          \
+  TIMER_NAME(optimize_loads)                    \
+  TIMER_NAME(optimize_stores)                   \
+  TIMER_NAME(optimize_gvn)                      \
+  TIMER_NAME(optimize_phis)                     \
+  TIMER_NAME(optimize_licm)                     \
+  TIMER_NAME(hoist_type_checks)                 \
+  TIMER_NAME(partial_dce_DefInlineFP)           \
   TIMER_NAME(regionizeFunc)                     \
   TIMER_NAME(selectTracelet)                    \
-  TIMER_NAME(selectTracelet_relaxGuards)        \
-  TIMER_NAME(translate)                         \
-  TIMER_NAME(translateRegion)                   \
-  TIMER_NAME(translateRegion_irGeneration)      \
+  TIMER_NAME(mcg_translate)                     \
+  TIMER_NAME(mcg_finishTranslation)             \
+  TIMER_NAME(mcg_finishTranslation_metadata)    \
+  TIMER_NAME(irGenRegion)                       \
+  TIMER_NAME(irGenRegionAttempt)                \
   TIMER_NAME(translateTracelet)                 \
   TIMER_NAME(translateTracelet_irGeneration)    \
   TIMER_NAME(vasm_layout)                       \
-  TIMER_NAME(vasm_xls)                          \
-  TIMER_NAME(vasm_xls_spill)                    \
+  TIMER_NAME(vasm_reg_alloc)                    \
+  TIMER_NAME(vasm_reg_alloc_spill)              \
   TIMER_NAME(vasm_jumps)                        \
-  TIMER_NAME(vasm_gen)                          \
+  TIMER_NAME(vasm_bind_ptrs)                    \
+  TIMER_NAME(vasm_emit)                         \
   TIMER_NAME(vasm_lower)                        \
   TIMER_NAME(vasm_copy)                         \
   TIMER_NAME(vasm_optimize)                     \
-  TIMER_NAME(llvm)                              \
-  TIMER_NAME(llvm_irGeneration)                 \
-  TIMER_NAME(llvm_optimize)                     \
-  TIMER_NAME(llvm_codegen)                      \
+  TIMER_NAME(vasm_dce)                          \
+  TIMER_NAME(vasm_sf_peepholes)                 \
 
-namespace HPHP { namespace jit {
+namespace HPHP {
+struct StructuredLogEntry;
+namespace jit {
 
 /*
  * Timer is used to track how much CPU time we spend in the different stages of
@@ -87,13 +93,14 @@ struct Timer {
     int64_t total; // total CPU time, in nanoseconds
     int64_t count; // number of entries for this counter
     int64_t max;   // longest CPU time, in nanoseconds
+    int64_t wall_time_elapsed;   // Wall clock elapsed, in micros
 
     int64_t mean() const {
       return total / count;
     }
   };
 
-  explicit Timer(Name name);
+  explicit Timer(Name name, StructuredLogEntry* = nullptr);
   ~Timer();
 
   /*
@@ -111,8 +118,10 @@ struct Timer {
 
  private:
   Name m_name;
-  int64_t m_start;
   bool m_finished;
+  int64_t m_start;
+  int64_t m_start_wall;
+  StructuredLogEntry* m_log_entry;
 };
 
 } }

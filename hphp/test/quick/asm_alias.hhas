@@ -1,3 +1,4 @@
+.hh_file 1;
 # Test declaring type aliases
 
 .main {
@@ -7,108 +8,122 @@
   DefTypeAlias 2
   DefTypeAlias 3
 
-  FPushFuncD 1 "foo"
+  NullUninit
+  NullUninit
+  NullUninit
   Int 0
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "foo"
+  PopC
 
-  FPushFuncD 1 "foo"
+  NullUninit
+  NullUninit
+  NullUninit
   String "hi"
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "foo"
+  PopC
 
-  FPushCtorD 0 "C"
-  FCall 0
-  PopR
+  NewObjD "C"
+  Dup
+  NullUninit
+  NullUninit
+  FCallCtor <LockWhileUnwinding> 0 1 "" - "" ""
+  PopC
+  LockObj
   SetL $x
   PopC
 
-  FPushFuncD 1 "bar"
-  FPassL 0 $x
-  FCall 1
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  CGetL $x
+  FCallFuncD <> 1 1 "" - "" "bar"
+  PopC
 
-  FPushFuncD 1 "bar"
+  NullUninit
+  NullUninit
+  NullUninit
   String "hi"
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "bar"
+  PopC
 
-  FPushFuncD 1 "bar"
+  NullUninit
+  NullUninit
+  NullUninit
   Null
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "bar"
+  PopC
 
-  FPushFuncD 1 "baz"
-  FPassL 0 $x
-  FCall 1
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  CGetL $x
+  FCallFuncD <> 1 1 "" - "" "baz"
+  PopC
 
-  FPushFuncD 1 "baz"
+  NullUninit
+  NullUninit
+  NullUninit
   String "hi"
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "baz"
+  PopC
 
-  FPushFuncD 1 "baz"
+  NullUninit
+  NullUninit
+  NullUninit
   Null
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "baz"
+  PopC
 
-  FPushFuncD 1 "quux"
-  FPassL 0 $x
-  FCall 1
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  CGetL $x
+  FCallFuncD <> 1 1 "" - "" "quux"
+  PopC
 
-  FPushFuncD 1 "quux"
+  NullUninit
+  NullUninit
+  NullUninit
   String "hi"
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "quux"
+  PopC
 
-  FPushFuncD 1 "quux"
+  NullUninit
+  NullUninit
+  NullUninit
   Null
-  FPassCE 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "quux"
+  PopC
 
   Int 1
   RetC
 }
 
-.function [mayusevv] foo(<"@Foo" "Foo" hh_type extended_hint soft > $x) {
+.function foo(<"@Foo" "Foo" extended_hint soft > $x) {
   VerifyParamType $x
   Null
   RetC
 }
 
-.function [mayusevv] bar(<"@Bar" "Bar" hh_type extended_hint soft > $x) {
+.function bar(<"@Bar" "Bar" extended_hint soft > $x) {
   VerifyParamType $x
   Null
   RetC
 }
 
-.function [mayusevv] baz(<"@Baz" "Baz" hh_type extended_hint soft > $x) {
+.function baz(<"@Baz" "Baz" extended_hint soft > $x) {
   VerifyParamType $x
   Null
   RetC
 }
 
-.function [mayusevv] quux(<"@Quux" "Quux" hh_type extended_hint soft > $x) {
+.function quux(<"@Quux" "Quux" extended_hint soft > $x) {
   VerifyParamType $x
   Null
   RetC
 }
 
 .class C {
-  .method [public mayusevv] 86ctor() {
-    Null
-    RetC
-  }
 }
 
 .alias Foo = <"HH\\int">;

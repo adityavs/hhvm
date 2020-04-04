@@ -1,10 +1,10 @@
-<?php
+<?hh
 
 // Warning: line numbers are sensitive, do not change
 
 class :fb:my:thing {
 
-  function doIt() {
+  static function doIt() {
     echo "doing my thing\n";
   }
 }

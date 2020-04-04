@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,30 +16,32 @@
 #ifndef incl_HPHP_HHIR_OPT_H_
 #define incl_HPHP_HHIR_OPT_H_
 
+#include "hphp/runtime/vm/jit/id-set.h"
+#include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/types.h"
 
 namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
-struct IRBuilder;
 struct IRUnit;
 struct IRInstruction;
-struct FrameStateMgr;
 
 //////////////////////////////////////////////////////////////////////
 
 /*
  * The main optimization passes.
  */
-void optimizeRefcounts2(IRUnit&);
+void optimizeInlineReturns(IRUnit&);
+void optimizeRefcounts(IRUnit&);
+void selectiveWeakenDecRefs(IRUnit&);
 void optimizePredictions(IRUnit&);
-void hoistTypeChecks(IRUnit&);
 void gvn(IRUnit&);
 void optimizeLoads(IRUnit&);
 void optimizeStores(IRUnit&);
 void optimizeLoopInvariantCode(IRUnit&);
 void cleanCfg(IRUnit&);
+bool optimizePhis(IRUnit&);
 
 /*
  * For debugging, we can run this pass, which inserts various sanity checking
@@ -50,7 +52,10 @@ void insertAsserts(IRUnit&);
 /*
  * Run all the optimization passes.
  */
-void optimize(IRUnit& unit, IRBuilder& builder, TransKind kind);
+void optimize(IRUnit& unit, TransKind kind);
+
+using SSATmpSet = IdSet<SSATmp>;
+folly::Optional<int32_t> findSPOffset(const IRUnit&, const SSATmp*, SSATmpSet&);
 
 //////////////////////////////////////////////////////////////////////
 

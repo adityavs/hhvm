@@ -1,9 +1,8 @@
+#!/usr/bin/env python3
+
 """
 GDB commands for asio information and stacktraces.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
@@ -14,7 +13,6 @@ import re
 from gdbutils import *
 import frame
 import idx
-from nameof import nameof
 from sizeof import sizeof
 
 
@@ -112,6 +110,8 @@ class WaitHandle(object):
             if not wh.finished() and wh['m_contextIdx'] == ctx_idx:
                 return wh
 
+            blockable = wh['m_parentChain']['m_firstParent']
+
         return None
 
     def chain(self):
@@ -134,32 +134,32 @@ class WaitHandle(object):
         # The remaining bits point to the next blockable in the chain.
         kind = (bits & 0x7).cast(T(kind_str))
 
-        m = re.match(kind_str + '::(\w+)WaitHandle', str(kind))
+        m = re.match(kind_str + r'::(\w+)WaitHandle\w*', str(kind))
         if m is None:
             return None
 
         wh_name = m.group(1)
 
-        if wh_name == 'AsyncGenerator':
-            offset = 48
-        elif wh_name.startswith('Gen'):
-            # GenArray, GenMap, and GenVector wait handles.
-            offset = 56
-        else:
-            # AsyncFunction, AwaitAll, and Condition wait handles.
+        if wh_name == 'AsyncFunction':
             offset = 40
+        elif wh_name == 'AsyncGenerator':
+            offset = 56
+        elif wh_name == 'AwaitAll':
+            offset = 48
+        elif wh_name == 'Condition':
+            offset = 48
+        else:
+            return None
 
         wh_ptype = T('HPHP::c_' + wh_name + 'WaitHandle').pointer()
         wh = (blockable.cast(T('char').pointer()) - offset).cast(wh_ptype)
 
-        # AsyncFunctionWaitHandles have a slightly different layout.
         try:
             if blockable != wh['m_blockable'].address:
                 return None
         except:
             if blockable != wh['m_children'][0]['m_blockable'].address:
                 return None
-
 
         return WaitHandle(wh)
 
@@ -242,6 +242,7 @@ The format used is the same as that used by `walkstk'.
         for s in frame.stringify_stacktrace(stacktrace):
             print(s)
 
+
 AsyncStkCommand()
 
 
@@ -281,11 +282,11 @@ class InfoAsioCommand(gdb.Command):
         wh_ptype = T('HPHP::c_WaitableWaitHandle').pointer()
 
         # Find the most recent join().
-        for i, fp in izip(count(), frame.gen_php(vmfp)):
-            if nameof(fp['m_func']) == 'HH\WaitHandle::join':
+        for _i, fp in izip(count(), frame.gen_php(vmfp)):
+            if nameof(fp['m_func']) == r'HH\WaitHandle::join':
                 break
 
-        if nameof(fp['m_func']) != 'HH\WaitHandle::join':
+        if nameof(fp['m_func']) != r'HH\WaitHandle::join':
             print("...but couldn't find join().  Something is wrong.\n")
             return
 
@@ -338,5 +339,6 @@ class InfoAsioCommand(gdb.Command):
                     for s in stacktrace:
                         print('    %s' % s)
         print('')
+
 
 InfoAsioCommand()

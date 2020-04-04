@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class C1 {
 }
@@ -13,7 +13,7 @@ class C2 {
 ";
     $this->_p[ $what ] = $value;
   }
-  private $_p = array();
+  private $_p = varray[];
 }
 class C3 {
   public function __get( $what ) {
@@ -26,16 +26,15 @@ class C3 {
 ";
     $this->_p[ $what ] = $value;
   }
-  private $_p = array();
+  private $_p = varray[];
 }
-function assign_ref(&$v) {
-  $v = 22;
-}
+
+<<__EntryPoint>>
+function main_793() {
 $c3 = new C3();
 $c3->p3 = new C2();
 $c3->p3->p2 = new C1();
 $c3->p3->p2->a = 1;
 $c3->p3->p2->a .= 1;
 print $c3->p3->p2->a;
-assign_ref($c3->p3->p2->a);
-print $c3->p3->p2->a;
+}

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function ut_main()
 {
@@ -11,6 +11,6 @@ function ut_main()
 }
 
 include_once( 'ut_common.inc' );
+<<__EntryPoint>> function main_entry(): void {
 ut_run();
-
-?>
+}

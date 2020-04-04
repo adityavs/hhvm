@@ -12,8 +12,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlBreakIterator, s_IntlCodePointBreakIterator;
 
-class IntlBreakIterator : public IntlError {
- public:
+struct IntlBreakIterator : IntlError {
   IntlBreakIterator() {}
   IntlBreakIterator(const IntlBreakIterator&) = delete;
   IntlBreakIterator& operator=(const IntlBreakIterator& src) {
@@ -40,7 +39,7 @@ class IntlBreakIterator : public IntlError {
   static Object newInstance(icu::BreakIterator* bi = nullptr) {
     if (!c_IntlBreakIterator) {
       c_IntlBreakIterator = Unit::lookupClass(s_IntlBreakIterator.get());
-      assert(c_IntlBreakIterator);
+      assertx(c_IntlBreakIterator);
     }
     Object obj{c_IntlBreakIterator};
     if (bi) {
@@ -53,7 +52,7 @@ class IntlBreakIterator : public IntlError {
     if (!c_IntlCodePointBreakIterator) {
       c_IntlCodePointBreakIterator =
         Unit::lookupClass(s_IntlCodePointBreakIterator.get());
-      assert(c_IntlCodePointBreakIterator);
+      assertx(c_IntlCodePointBreakIterator);
     }
     Object obj{c_IntlCodePointBreakIterator};
     if (bi) {
@@ -78,7 +77,7 @@ class IntlBreakIterator : public IntlError {
   }
 
   bool setText(const String& str) {
-    assert(isValid());
+    assertx(isValid());
     m_text = str.toCppString();
     UErrorCode error = U_ZERO_ERROR;
     m_uText = utext_openUTF8(m_uText, m_text.c_str(), m_text.size(), &error);

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,65 +17,84 @@
 #define incl_HPHP_VM_TREAD_HASH_MAP_H_
 
 #include <atomic>
-#include <boost/noncopyable.hpp>
-#include <boost/iterator/iterator_facade.hpp>
 #include <type_traits>
-#include <utility>
+
+#include <boost/iterator/iterator_facade.hpp>
+
 #include <folly/Bits.h>
-#include "hphp/util/atomic.h"
+
+#include "hphp/runtime/vm/treadmill.h"
+#include "hphp/util/assertions.h"
 
 namespace HPHP {
 
-//////////////////////////////////////////////////////////////////////
-
-namespace Treadmill { void deferredFree(void*); }
-
-//////////////////////////////////////////////////////////////////////
+extern uint64_t g_emptyTable;
 
 /*
- * A hashtable safe for multiple concurrent readers, even while writes
- * are happening, but with at most one concurrent writer.  Reads and
- * writes both are wait-free, but that there is only at most one
- * writer will generally require synchronization outside of this
- * class.  (E.g. the translator write lease.)
+ * A hashtable safe for multiple concurrent readers, even while writes are
+ * happening, but with at most one concurrent writer.  Reads and writes both
+ * are wait-free, but that there is only at most one writer will generally
+ * require synchronization outside of this class.  (E.g. the translator write
+ * lease.)
  *
- * Key must be an atomically loadable/storable type.  The Value must
- * be a trivially copyable and assignable type, and it must be legal
- * to copy from it without synchronization (this table may do this
- * during a rehash).  Also, assumes Key == 0 is invalid (i.e. the
- * empty key).
+ * Key must be an atomically loadable/storable type.  The Value must be a
+ * trivially copyable and assignable type, and it must be legal to copy from it
+ * without synchronization (this table may do this during a rehash).  Also,
+ * assumes Key == 0 is invalid (i.e. the empty key).
  *
- * Insertions must be unique.  It is an error to insert the same key
- * more than once.
+ * Insertions must be unique.  It is an error to insert the same key more than
+ * once.
  *
  * Uses the treadmill to collect garbage.
  */
-template<class Key, class Val, class HashFunc>
-struct TreadHashMap : private boost::noncopyable {
-  typedef std::pair<std::atomic<Key>,Val> value_type;
+
+template<class Key, class Val,
+         class HashFunc = std::hash<Key>,
+         class Alloc = std::allocator<char>>
+struct TreadHashMap : private HashFunc,
+                      private Alloc::template rebind<char>::other {
+  using Allocator = typename Alloc::template rebind<char>::other;
+  using value_type = std::pair<std::atomic<Key>,Val>;
+  static_assert(
+    std::is_trivially_destructible<Key>::value &&
+    std::is_trivially_destructible<Val>::value,
+    "TreadHashMap only supports trivially destructible keys and values"
+  );
 
 private:
   struct Table {
-    size_t capac;
-    size_t size;
+    uint32_t capac;
+    uint32_t size;
     value_type entries[0];
   };
 
+  Table* staticEmptyTable() {
+    static_assert(sizeof(Table) == sizeof(g_emptyTable), "");
+    return reinterpret_cast<Table*>(&g_emptyTable);
+  }
+
 public:
-  explicit TreadHashMap(size_t initialCapacity)
-    : m_table(allocTable(initialCapacity))
+  explicit TreadHashMap(uint32_t initialCapacity)
+    : m_table(staticEmptyTable())
+    , m_initialSize(folly::nextPowTwo(initialCapacity))
   {}
 
   ~TreadHashMap() {
-    free(m_table);
+    auto t = m_table.load(std::memory_order_acquire);
+    if (t != staticEmptyTable()) {
+      freeTable(t);
+    }
   }
+
+  TreadHashMap(const TreadHashMap&) = delete;
+  TreadHashMap& operator=(const TreadHashMap&) = delete;
 
   template<class IterVal>
   struct thm_iterator
     : boost::iterator_facade<thm_iterator<IterVal>,IterVal,
                              boost::forward_traversal_tag>
   {
-    explicit thm_iterator() : m_table(0) {}
+    explicit thm_iterator() : m_table(nullptr) {}
 
     // Conversion constructor for interoperability between iterator
     // and const_iterator.  The enable_if<> magic prevents the
@@ -98,7 +117,7 @@ public:
     }
 
   private:
-    friend class TreadHashMap;
+    friend struct TreadHashMap;
     friend class boost::iterator_core_access;
 
     void increment() {
@@ -130,6 +149,10 @@ public:
   typedef thm_iterator<value_type> iterator;
   typedef thm_iterator<const value_type> const_iterator;
 
+  size_t size() const {
+    return m_table.load(std::memory_order_acquire)->size;
+  }
+
   iterator begin() {
     return iterator(m_table.load(std::memory_order_acquire), 0);
   }
@@ -147,38 +170,49 @@ public:
   }
 
   Val* insert(Key key, Val val) {
-    assert(key != 0);
+    assertx(key != 0);
     return insertImpl(acquireAndGrowIfNeeded(), key, val);
   }
 
   Val* find(Key key) const {
-    assert(key != 0);
+    assertx(key != 0);
 
-    auto tab = m_table.load(std::memory_order_consume);
-    assert(tab->capac > tab->size);
+    auto tab = m_table.load(std::memory_order_acquire);
+    if (tab->size == 0) return nullptr; // empty
+    assertx(tab->capac > tab->size);
     auto idx = project(tab, key);
     for (;;) {
       auto& entry = tab->entries[idx];
       Key currentProbe = entry.first.load(std::memory_order_acquire);
       if (currentProbe == key) return &entry.second;
-      if (currentProbe == 0) return 0;
+      if (currentProbe == 0) return nullptr;
       if (++idx == tab->capac) idx = 0;
     }
+  }
+
+  template<typename F> void filter_keys(F fn) {
+    auto const old = m_table.load(std::memory_order_acquire);
+    if (UNLIKELY(old == staticEmptyTable())) return;
+
+    Table* newTable = allocTable(old->capac);
+    for (auto i = uint32_t{}; i < old->capac; ++i) {
+      auto const ent = &old->entries[i];
+      auto const key = ent->first.load(std::memory_order_acquire);
+      if (key && !fn(key)) insertImpl(newTable, key, ent->second);
+    }
+    Treadmill::enqueue([this, old] { freeTable(old); });
+    m_table.store(newTable, std::memory_order_release);
   }
 
 private:
   Val* insertImpl(Table* const tab, Key newKey, Val newValue) {
     auto probe = &tab->entries[project(tab, newKey)];
-    assert(size_t(probe - tab->entries) < tab->capac);
+    assertx(size_t(probe - tab->entries) < tab->capac);
 
-    // Since we're the only thread allowed to write, we're allowed to
-    // do a relaxed load here.  (No need for an acquire/release
-    // handshake with ourselves.)
-    while (Key currentProbe = probe->first) {
-      assert(currentProbe != newKey); // insertions must be unique
-      assert(probe <= (tab->entries + tab->capac));
-      // can't loop forever; acquireAndGrowIfNeeded ensures there's
-      // some slack.
+    while (Key currentProbe = probe->first.load(std::memory_order_acquire)) {
+      assertx(currentProbe != newKey); // insertions must be unique
+      assertx(probe <= (tab->entries + tab->capac));
+      // acquireAndGrowIfNeeded ensures there's at least one empty slot.
       (void)currentProbe;
       if (++probe == (tab->entries + tab->capac)) probe = tab->entries;
     }
@@ -197,49 +231,55 @@ private:
   }
 
   Table* acquireAndGrowIfNeeded() {
-    // Relaxed load is ok---there's only one writer thread.
-    auto old = m_table.load(std::memory_order_relaxed);
+    auto old = m_table.load(std::memory_order_acquire);
 
-    // 75% occupancy, avoiding the FPU.
-    if (LIKELY((old->size) < (old->capac / 4 + old->capac / 2))) {
+    // 50% occupancy, avoiding the FPU.
+    if (LIKELY((old->size) < (old->capac / 2))) {
       return old;
     }
 
-    // Rehash from old to new.
-    auto newTable = allocTable(old->capac * 2);
-    for (auto i = 0; i < old->capac; ++i) {
-      value_type* ent = old->entries + i;
-#ifdef MSVC_NO_NONVOID_ATOMIC_IF
-      if (ent->first.load()) {
-#else
-      if (ent->first) {
-#endif
-        insertImpl(newTable, ent->first, ent->second);
+    Table* newTable;
+    if (UNLIKELY(old == staticEmptyTable())) {
+      newTable = allocTable(m_initialSize);
+    } else {
+      newTable = allocTable(old->capac * 2);
+      for (uint32_t i = 0; i < old->capac; ++i) {
+        auto const ent = old->entries + i;
+        auto const key = ent->first.load(std::memory_order_acquire);
+        if (key) insertImpl(newTable, key, ent->second);
       }
+      Treadmill::enqueue([this, old] { freeTable(old); });
     }
-    assert(newTable->capac == old->capac * 2);
-    assert(newTable->size == old->size); // only one writer thread
+    assertx(newTable->size == old->size); // only one writer thread
     m_table.store(newTable, std::memory_order_release);
-    Treadmill::deferredFree(old);
     return newTable;
   }
 
   size_t project(Table* tab, Key key) const {
-    assert(folly::isPowTwo(tab->capac));
-    return m_hash(key) & (tab->capac - 1);
+    assertx(folly::isPowTwo(tab->capac));
+    return HashFunc::operator()(key) & (tab->capac - 1);
   }
 
-  static Table* allocTable(size_t capacity) {
-    auto ret = static_cast<Table*>(
-      calloc(1, capacity * sizeof(value_type) + sizeof(Table)));
+  constexpr size_t allocSize(uint32_t cap) {
+    return cap * sizeof(value_type) + sizeof(Table);
+  }
+
+  Table* allocTable(uint32_t capacity) {
+    auto size = allocSize(capacity);
+    auto ret = reinterpret_cast<Table*>(Allocator::allocate(size));
+    memset(ret, 0, size);
     ret->capac = capacity;
     ret->size = 0;
     return ret;
   }
 
+  void freeTable(Table* t) {
+    Allocator::deallocate(reinterpret_cast<char*>(t), allocSize(t->capac));
+  }
+
 private:
-  HashFunc m_hash;
   std::atomic<Table*> m_table;
+  uint32_t m_initialSize;
 };
 
 //////////////////////////////////////////////////////////////////////

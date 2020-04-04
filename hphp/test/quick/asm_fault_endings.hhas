@@ -1,46 +1,45 @@
-# Test case for two fault regions with the same ending offset.
-
+.hh_file 1;
 .main {
-  .try_catch (Exception ex) {
-    FPushFuncD 0 "main"
-    FCall 0
-    UnboxR
+  .try {
+    NullUninit
+    NullUninit
+    NullUninit
+    FCallFuncD <> 0 1 "" - "" "main"
+    RetC
+  } .catch {
     PopC
+    String "Finished!\n"
+    Print
+    RetC
   }
-
-ex:
-  Catch
-  PopC
-  String "Finished!\n"
-  Print
-  RetC
 }
 
 .function main {
-  .try_fault fault1 {
+  .try {
     String "foo\n"
     Print
     PopC
 
-    .try_fault fault2 {
-      FPushCtorD 1 "Exception"
+    .try {
+      NewObjD "Exception"
+      Dup
+      NullUninit
+      NullUninit
       String "ex"
-      FPassC 0
-      FCall 1
-      PopR
+      FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+      PopC
+      LockObj
+      Throw
+    } .catch {
+      String "handler2\n"
+      Print
+      PopC
       Throw
     }
+  } .catch {
+    String "handler1\n"
+    Print
+    PopC
+    Throw
   }
-
-fault1:
-  String "fault1\n"
-  Print
-  PopC
-  Unwind
-
-fault2:
-  String "fault2\n"
-  Print
-  PopC
-  Unwind
 }

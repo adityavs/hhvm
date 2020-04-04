@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Foo {
   public static $z = 0;
@@ -11,9 +11,8 @@ class Foo {
     return Foo::$z;
   }
 }
+<<__EntryPoint>> function main(): void {
+Foo::setZ(4);
 
-$a = new Foo();
-
-$a->setZ(4);
-
-var_dump($a->getZ());
+var_dump(Foo::getZ());
+}

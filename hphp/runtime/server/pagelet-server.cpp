@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,18 +16,18 @@
 
 #include "hphp/runtime/server/pagelet-server.h"
 
-#include <folly/Singleton.h>
-
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/upload.h"
 #include "hphp/runtime/server/job-queue-vm-stack.h"
 #include "hphp/runtime/server/host-health-monitor.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/ext/server/ext_server.h"
-#include "hphp/util/boot_timer.h"
+#include "hphp/util/boot-stats.h"
 #include "hphp/util/compatibility.h"
 #include "hphp/util/job-queue.h"
 #include "hphp/util/lock.h"
@@ -58,8 +58,8 @@ PageletTransport::PageletTransport(
   m_remoteHost.append(remoteHost.data(), remoteHost.size());
 
   for (ArrayIter iter(headers); iter; ++iter) {
-    Variant key = iter.first();
-    String header = iter.second();
+    auto const key = iter.first();
+    auto const header = iter.second().toString();
     if (key.isString() && !key.toString().empty()) {
       m_requestHeaders[key.toString().data()].push_back(header.data());
     } else {
@@ -98,7 +98,7 @@ uint16_t PageletTransport::getRemotePort() {
   return 0;
 }
 
-const void *PageletTransport::getPostData(int &size) {
+const void *PageletTransport::getPostData(size_t &size) {
   size = m_postData.size();
   return m_postData.data();
 }
@@ -108,7 +108,7 @@ Transport::Method PageletTransport::getMethod() {
 }
 
 std::string PageletTransport::getHeader(const char *name) {
-  assert(name && *name);
+  assertx(name && *name);
   HeaderMap::const_iterator iter = m_requestHeaders.find(name);
   if (iter != m_requestHeaders.end()) {
     return iter->second[0];
@@ -116,23 +116,23 @@ std::string PageletTransport::getHeader(const char *name) {
   return "";
 }
 
-void PageletTransport::getHeaders(HeaderMap &headers) {
-  headers = m_requestHeaders;
+const HeaderMap& PageletTransport::getHeaders() {
+  return m_requestHeaders;
 }
 
 void PageletTransport::addHeaderImpl(const char *name, const char *value) {
-  assert(name && *name);
-  assert(value);
+  assertx(name && *name);
+  assertx(value);
   m_responseHeaders[name].push_back(value);
 }
 
 void PageletTransport::removeHeaderImpl(const char *name) {
-  assert(name && *name);
+  assertx(name && *name);
   m_responseHeaders.erase(name);
 }
 
-void PageletTransport::sendImpl(const void *data, int size, int code,
-                                bool chunked, bool eom) {
+void PageletTransport::sendImpl(const void* data, int size, int code,
+                                bool /*chunked*/, bool eom) {
   m_response.append((const char*)data, size);
   if (code) {
     m_code = code;
@@ -146,7 +146,9 @@ void PageletTransport::onSendEndImpl() {
   Lock lock(this);
   m_done = true;
   if (m_event) {
+    constexpr uintptr_t kTrashedEvent = 0xfeeefeeef001f001;
     m_event->finish();
+    m_event = reinterpret_cast<PageletServerTaskEvent*>(kTrashedEvent);
   }
   notify();
 }
@@ -166,6 +168,9 @@ bool PageletTransport::isDone() {
 }
 
 void PageletTransport::addToPipeline(const std::string &s) {
+  // the output buffer is already closed; nothing to do
+  if (m_done) return;
+
   Lock lock(this);
   m_pipeline.push_back(s);
   if (m_event) {
@@ -180,29 +185,40 @@ bool PageletTransport::isPipelineEmpty() {
   return m_pipeline.empty();
 }
 
-bool PageletTransport::getResults(
-  Array &results,
-  PageletServerTaskEvent* next_event
-) {
+Array PageletTransport::getAsyncResults(bool allow_empty) {
+  auto results = Array::CreateVArray();
+  PageletServerTaskEvent* next_event = nullptr;
+  int code = 0;
+
   {
     Lock lock(this);
-    assert(m_done || !m_pipeline.empty());
+    assertx(m_done || !m_pipeline.empty() || allow_empty);
     while (!m_pipeline.empty()) {
       std::string &str = m_pipeline.front();
       String response(str.c_str(), str.size(), CopyString);
       results.append(response);
       m_pipeline.pop_front();
     }
+
+
     if (m_done) {
+      code = m_code;
       String response(m_response.c_str(), m_response.size(), CopyString);
       results.append(response);
-      return true;
     } else {
+      next_event = new PageletServerTaskEvent();
       m_event = next_event;
       m_event->setJob(this);
-      return false;
     }
   }
+
+  return VArrayInit(3)
+    .append(results)
+    .append(next_event
+      ? make_tv<KindOfObject>(next_event->getWaitHandle())
+      : make_tv<KindOfNull>())
+    .append(make_tv<KindOfInt64>(code))
+    .toArray();
 }
 
 String PageletTransport::getResults(
@@ -256,7 +272,7 @@ void PageletTransport::incRefCount() {
 }
 
 void PageletTransport::decRefCount() {
-  assert(m_refCount.load() > 0);
+  assertx(m_refCount.load() > 0);
   if (--m_refCount == 0) {
     delete this;
   }
@@ -283,7 +299,7 @@ static int64_t to_ms(const timespec& ts) {
 struct PageletWorker
   : JobQueueWorker<PageletTransport*,Server*,true,false,JobQueueDropVMStack>
 {
-  virtual void doJob(PageletTransport *job) {
+  void doJob(PageletTransport *job) override {
     try {
       job->onRequestStart(job->getStartTimer());
       int timeout = job->getTimeoutSeconds();
@@ -310,8 +326,7 @@ struct PageletWorker
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class PageletTask : public SweepableResourceData {
-public:
+struct PageletTask : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(PageletTask)
 
   PageletTask(const String& url, const Array& headers, const String& post_data,
@@ -323,7 +338,7 @@ public:
     m_job->incRefCount();
   }
 
-  ~PageletTask() {
+  ~PageletTask() override {
     m_job->decRefCount();
   }
 
@@ -343,6 +358,12 @@ IMPLEMENT_RESOURCE_ALLOCATION(PageletTask)
 
 static JobQueueDispatcher<PageletWorker> *s_dispatcher;
 static Mutex s_dispatchMutex;
+static ServiceData::CounterCallback s_counters(
+  [](std::map<std::string, int64_t>& counters) {
+    counters["pagelet_inflight_requests"] = PageletServer::GetActiveWorker();
+    counters["pagelet_queued_requests"] = PageletServer::GetQueuedJobs();
+  }
+);
 
 bool PageletServer::Enabled() {
   return s_dispatcher;
@@ -355,27 +376,25 @@ void PageletServer::Restart() {
       Lock l(s_dispatchMutex);
       s_dispatcher = new JobQueueDispatcher<PageletWorker>
         (RuntimeOption::PageletServerThreadCount,
-         RuntimeOption::PageletServerThreadRoundRobin,
+         RuntimeOption::PageletServerThreadCount,
          RuntimeOption::PageletServerThreadDropCacheTimeoutSeconds,
          RuntimeOption::PageletServerThreadDropStack,
          nullptr);
-
+      s_dispatcher->setHugePageConfig(
+        RuntimeOption::PageletServerHugeThreadCount,
+        RuntimeOption::ServerHugeStackKb);
       auto monitor = getSingleton<HostHealthMonitor>();
-
       monitor->subscribe(s_dispatcher);
-      monitor->start();
     }
     s_dispatcher->start();
-    BootTimer::mark("pagelet server started");
+    BootStats::mark("pagelet server started");
   }
 }
 
 void PageletServer::Stop() {
   if (s_dispatcher) {
-
     auto monitor = getSingleton<HostHealthMonitor>();
-
-    monitor->stop();
+    monitor->unsubscribe(s_dispatcher);
     s_dispatcher->stop();
     Lock l(s_dispatchMutex);
     delete s_dispatcher;
@@ -392,7 +411,7 @@ Resource PageletServer::TaskStart(
   PageletServerTaskEvent *event /* = nullptr*/
 ) {
   static auto pageletOverflowCounter =
-    ServiceData::createTimeseries("pagelet_overflow",
+    ServiceData::createTimeSeries("pagelet_overflow",
                                   { ServiceData::StatsType::COUNT });
   {
     Lock l(s_dispatchMutex);
@@ -443,11 +462,16 @@ String PageletServer::TaskResult(const Resource& task, Array &headers, int &code
   return ptask->getJob()->getResults(headers, code, timeout_ms);
 }
 
+Array PageletServer::AsyncTaskResult(const Resource& task) {
+  auto ptask = cast<PageletTask>(task);
+  return ptask->getJob()->getAsyncResults(true);
+}
+
 void PageletServer::AddToPipeline(const std::string &s) {
-  assert(!s.empty());
+  assertx(!s.empty());
   PageletTransport *job =
     dynamic_cast<PageletTransport *>(g_context->getTransport());
-  assert(job);
+  assertx(job);
   job->addToPipeline(s);
 }
 

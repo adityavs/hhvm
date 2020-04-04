@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,8 +14,6 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/arch.h"
-
 #include "hphp/runtime/vm/jit/abi.h"
 #include "hphp/runtime/vm/jit/arg-group.h"
 #include "hphp/runtime/vm/jit/fixup.h"
@@ -24,6 +22,7 @@
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
+#include "hphp/util/arch.h"
 #include "hphp/util/safe-cast.h"
 #include "hphp/util/thread-local.h"
 
@@ -33,8 +32,28 @@ namespace HPHP { namespace jit {
 
 template<typename T>
 inline Vptr emitTLSAddr(Vout& v, TLSDatum<T> datum) {
-  if (arch() != Arch::X64) not_implemented();
-  return x64::detail::emitTLSAddr(v, datum);
+  switch (arch()) {
+    case Arch::X64:
+      return x64::detail::emitTLSAddr(v, datum);
+    case Arch::ARM:
+      return arm::detail::emitTLSAddr(v, datum);
+    case Arch::PPC64:
+      return ppc64::detail::emitTLSAddr(v, datum);
+  }
+  not_reached();
+}
+
+template<typename T>
+inline Vreg emitTLSLea(Vout& v, TLSDatum<T> datum, int offset) {
+  switch (arch()) {
+    case Arch::X64:
+      return x64::detail::emitTLSLea(v, datum, offset);
+    case Arch::ARM:
+      return arm::detail::emitTLSLea(v, datum, offset);
+    case Arch::PPC64:
+      return ppc64::detail::emitTLSLea(v, datum, offset);
+  }
+  not_reached();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -44,8 +63,7 @@ inline Vptr emitTLSAddr(Vout& v, TLSDatum<T> datum) {
 template<typename T>
 inline void
 emitTLSLoad(Vout& v, TLSDatum<ThreadLocalNoCheck<T>> datum, Vreg d) {
-  auto const off = offsetof(ThreadLocalNoCheck<T>, m_node) +
-                   offsetof(decltype(ThreadLocalNoCheck<T>::m_node), m_p);
+  auto const off = ThreadLocalNoCheck<T>::node_ptr_offset();
   v << load{emitTLSAddr(v, datum) + safe_cast<int32_t>(off), d};
 }
 

@@ -1,22 +1,42 @@
+#!/usr/bin/env python3
+
 """
 Helpers for collecting and printing frame data.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
-import os
-import gdb
 import bisect
+import gdb
+import itertools
+import os
 import sqlite3
 import struct
 
 from gdbutils import *
 import idx as idxs
-from nameof import nameof
 import repo
+
+
+#------------------------------------------------------------------------------
+# Frame sniffing.
+
+def is_jitted(fp, ip):
+    # Get the value of `s_code', the global CodeCache pointer.
+    s_code = K('HPHP::jit::tc::g_code')
+
+    # Set the bounds of the TC.
+    try:
+        tc_base = s_code['m_base']
+        tc_end = tc_base + s_code['m_codeSize']
+    except:
+        # We can't access `s_code' for whatever reason---maybe it's gotten
+        # corrupted somehow.  Assume that the TC is above the data section,
+        # but restricted to low memory.
+        tc_base = s_code.address.cast(T('uintptr_t'))
+        tc_end = 0x100000000
+
+    return ip >= tc_base and ip < tc_end
 
 
 #------------------------------------------------------------------------------
@@ -56,7 +76,7 @@ def php_line_number_from_repo(func, pc):
     decoder = repo.Decoder(buf)
     size = decoder.decode()
 
-    for i in xrange(size):
+    for _i in xrange(size):
         line_table.append({
             'm_pastOffset': decoder.decode(),
             'm_val':        decoder.decode(),
@@ -81,24 +101,31 @@ def php_line_number_from_repo(func, pc):
 def php_line_number(func, pc):
     unit = func['m_unit']
 
-    line_info = V('HPHP::(anonymous namespace)::s_lineInfo')
-    line_map = idxs.tbb_chm_at(line_info, unit)
+    line_map = unit['m_lineMap']['val']
 
     if line_map is not None:
-        line = idxs.boost_flat_map_at(line_map, pc)
-        if line is not None:
-            return line
+        i = 0
+        while True:
+            r = idxs.compact_vector_at(line_map, i)
+            if r is None:
+                break
+            if r['first']['base'] <= pc and r['first']['past'] > pc:
+                return r['second']
+            i += 1
 
     return php_line_number_from_repo(func, pc)
-
 
 #------------------------------------------------------------------------------
 # Frame builders.
 
-def create_native(idx, fp, rip, native_frame=None):
+
+def create_native(idx, fp, rip, native_frame=None, name=None):
     # Try to get the function name.
     if native_frame is None:
-        func_name = '<unknown>'
+        if name is None:
+            func_name = '<unknown>'
+        else:
+            func_name = name
     else:
         try:
             func_name = native_frame.name() + '()'
@@ -120,14 +147,7 @@ def create_native(idx, fp, rip, native_frame=None):
 
     # Munge and print the code location if we have one.
     if loc is not None and loc.symtab is not None:
-        filename = loc.symtab.filename
-
-        if 'hphp' in filename:
-            head, base = os.path.split(filename)
-            _, basedir = os.path.split(head)
-            filename = 'hphp/.../' + basedir + '/' + base
-
-        frame['file'] = filename
+        frame['file'] = loc.symtab.filename
         frame['line'] = loc.line
 
     return frame
@@ -145,7 +165,7 @@ def create_php(idx, ar, rip='0x????????', pc=None):
     if not shared['m_isClosureBody']:
         func_name = nameof(func)
     else:
-        func_name = nameof(func['m_baseCls'])
+        func_name = nameof(func['m_baseCls'].cast(T('HPHP::Class').pointer()))
         func_name = func_name[:func_name.find(';')]
 
     if len(func_name) == 0:
@@ -158,23 +178,15 @@ def create_php(idx, ar, rip='0x????????', pc=None):
         'func': '[PHP] %s()' % func_name,
     }
 
-    attrs = idxs.atomic_get(func['m_attrs']['m_attrs'])
+    attrs = atomic_get(func['m_attrs']['m_attrs'])
 
     if attrs & V('HPHP::AttrBuiltin'):
         # Builtins don't have source files.
         return frame
 
-    # Pull the PC from Func::base() and ar->m_soff if necessary.
+    # Pull the PC from Func::base() and ar->m_callOff if necessary.
     if pc is None:
-        pc = shared['m_base'] + ar['m_soff']
-
-    # Adjust it for calls.
-    op_ptype = T('HPHP::Op').pointer()
-    op = (func['m_unit']['m_bc'] + pc).cast(op_ptype).dereference()
-
-    if op in [V('HPHP::Op::' + x) for x in
-              ['PopR', 'UnboxR', 'UnboxRNop']]:
-        pc -= 1
+        pc = shared['m_base'] + (ar['m_callOffAndFlags'] >> 2)
 
     frame['file'] = php_filename(func)
     frame['line'] = php_line_number(func, pc)
@@ -187,7 +199,7 @@ def create_resumable(idx, resumable):
         idx=idx,
         ar=resumable['m_actRec'].address,
         rip='{suspended}',
-        pc=resumable['m_resumeOffset'])
+        pc=resumable['m_suspendOffset'])
 
 
 #------------------------------------------------------------------------------
@@ -245,3 +257,135 @@ def _format_rip(rip):
         rip = str(rip)
 
     return rip
+
+
+class SymValueWrapper():
+
+    def __init__(self, symbol, value):
+        self.sym = symbol
+        self.val = value
+
+    def value(self):
+        return self.val
+
+    def symbol(self):
+        return self.sym
+
+
+class JittedFrameDecorator(gdb.FrameDecorator.FrameDecorator):
+
+    def __init__(self, fobj, regs):
+        super(JittedFrameDecorator, self).__init__(fobj)
+        self.regs = regs
+        frame = self.inferior_frame()
+        self.ar = frame.read_register(self.regs['fp']).cast(T('HPHP::ActRec').pointer())
+        self.args = []
+        try:
+            func = self.ar['m_func']
+            shared = rawptr(func['m_shared'])
+            argptr = self.ar.cast(T('HPHP::TypedValue').pointer())
+            nargs = func['m_paramCounts'] >> 1
+            if nargs > 64:
+                return None
+            args = []
+            i = 0
+            while i < nargs:
+                argptr -= 1
+                try:
+                    name = idxs.indexed_string_map_at(shared['m_localNames'], i)
+                    name = strinfo(name)['data']
+                except:
+                    name = "arg_" + str(i)
+                i += 1
+                args.append(SymValueWrapper(name, argptr.dereference()))
+            self.args = args
+        except:
+            pass
+
+    def function(self):
+        try:
+            func = self.ar['m_func']
+            shared = rawptr(func['m_shared'])
+
+            if not shared['m_isClosureBody']:
+                func_name = nameof(func)
+            else:
+                func_name = nameof(func['m_baseCls'].cast(T('HPHP::Class').pointer()))
+                func_name = func_name[:func_name.find(';')]
+
+            func_name = ("[PHP] " + func_name + "("
+                         + ", ".join([arg.symbol() for arg in self.args])
+                         + ")")
+            return func_name
+
+        except:
+            return "??"
+
+    def filename(self):
+        try:
+            return php_filename(self.ar['m_func'])
+        except:
+            return None
+
+    def line(self):
+        try:
+            inner = self.inferior_frame().newer()
+            inner_ar = inner.read_register(self.regs['fp']).cast(
+                T('HPHP::ActRec').pointer())
+            shared = rawptr(self.ar['m_func']['m_shared'])
+            pc = shared['m_base'] + (inner_ar['m_callOffAndFlags'] >> 2)
+            return php_line_number(self.ar['m_func'], pc)
+        except:
+            return None
+
+    def frame_args(self):
+        return self.args
+
+    def frame_locals(self):
+        try:
+            func = self.ar['m_func']
+            argptr = self.ar.cast(T('HPHP::TypedValue').pointer())
+            nargs = func['m_paramCounts'] >> 1
+            shared = rawptr(func['m_shared'])
+            num_loc = shared['m_numLocals']
+            if num_loc < nargs or num_loc - nargs > 64:
+                return None
+            argptr -= nargs
+            locals = []
+            i = nargs
+            while i < num_loc:
+                argptr -= 1
+                try:
+                    name = idxs.indexed_string_map_at(shared['m_localNames'], i)
+                    name = strinfo(name)['data']
+                except:
+                    name = "unnamed_" + str(i)
+                i += 1
+                locals.append(SymValueWrapper(name, argptr.dereference()))
+            return locals
+        except:
+            return None
+
+
+class JittedFrameFilter():
+
+    def __init__(self):
+        self.name = "JittedFrameFilter"
+        self.priority = 100
+        self.enabled = True
+        self.regs = arch_regs()
+        gdb.frame_filters[self.name] = self
+
+    def filter(self, frame_iter):
+        self.stackBase = int(TL('HPHP::s_stackLimit'))
+        self.stackTop = self.stackBase + int(TL('HPHP::s_stackSize'))
+        return (self.map_decorator(x) for x in frame_iter)
+
+    def map_decorator(self, frame_decorator):
+        frame = frame_decorator.inferior_frame()
+        fp = frame.read_register(self.regs['fp'])
+        ip = frame.read_register(self.regs['ip'])
+        if is_jitted(fp, ip) and (fp < self.stackBase or fp >= self.stackTop):
+            return JittedFrameDecorator(frame_decorator, self.regs)
+        else:
+            return frame_decorator

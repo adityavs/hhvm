@@ -1,7 +1,7 @@
 <?hh
 function main() {
-  $g = $GLOBALS;
-  foreach (array_keys($GLOBALS) as $k) {
+  $g = $GLOBALS['GLOBALS'];
+  foreach (HH\global_keys() as $k) {
     unset($GLOBALS[$k]);
   }
 
@@ -9,4 +9,8 @@ function main() {
   var_dump((bool)$g);
 }
 
+
+<<__EntryPoint>>
+function main_empty_globals() {
 main();
+}

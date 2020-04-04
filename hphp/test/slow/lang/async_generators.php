@@ -1,4 +1,4 @@
-<?hh
+<?hh // decl
 
 class Logger {
   public static function attach($obj) {
@@ -10,10 +10,6 @@ class Logger {
   private function __construct($what) {
     $this->what = $what;
     echo "constructing {$this->what}\n";
-  }
-
-  private function __destruct() {
-    echo "destructing {$this->what}\n";
   }
 }
 
@@ -43,7 +39,7 @@ async function foo() {
 
 async function bar() {
   echo "bar before\n";
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
   echo "bar after\n";
   return 47;
 }
@@ -110,18 +106,19 @@ async function main($exit_type) {
   } while ($res);
 }
 
-function my_join(WaitHandle $awaitable) {
-  return $awaitable->join();
-}
 
+<<__EntryPoint>>
+function main_async_generators() {
+Exception::setTraceOptions(DEBUG_BACKTRACE_IGNORE_ARGS);
 echo "start\n";
 for ($exit_type = 0; $exit_type < 4; ++$exit_type) {
   echo "--------------------testing $exit_type--------------------\n";
   try {
-    main($exit_type)->join();
+    \HH\Asio\join(main($exit_type));
   } catch (Exception $e) {
     echo "exception: ".$e->getMessage()."\n";
     $e = null;
   }
 }
 echo "end\n";
+}

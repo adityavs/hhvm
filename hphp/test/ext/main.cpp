@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,6 @@
 #include "hphp/test/ext/test.h"
 #include "hphp/util/logger.h"
 #include "hphp/runtime/base/program-functions.h"
-#include <dlfcn.h>
 
 #include "hphp/hhvm/process-init.h"
 
@@ -53,6 +52,9 @@ int main(int argc, char **argv) {
     Test::logger.log_url = argv[5];
   }
 
+  rds::local::init();
+  SCOPE_EXIT { rds::local::fini(); };
+
   // Initialize the runtime options with their default values
   {
     IniSetting::Map ini = IniSetting::Map::object;
@@ -63,10 +65,9 @@ int main(int argc, char **argv) {
   }
 
   // Initialize compiler state
-  compile_file(0, 0, MD5(), 0);
+  hphp_compiler_init();
   hphp_process_init();
+  SCOPE_EXIT { hphp_process_exit(); };
   Test test;
-  auto ret = test.RunTests(suite, which, set) ? 0 : -1;
-  hphp_process_exit();
-  return ret;
+  return test.RunTests(suite, which, set) ? 0 : -1;
 }

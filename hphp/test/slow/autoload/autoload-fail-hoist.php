@@ -1,8 +1,8 @@
-<?php
+<?hh
 
 function fail($t, $n, $e) {
   var_dump($t, $n);
-  if ($e instanceof Exception) {
+  if ($e is Exception) {
     var_dump($e->getMessage(), $e->getTrace());
   } else {
     var_dump($e);
@@ -11,12 +11,12 @@ function fail($t, $n, $e) {
 }
 
 \HH\autoload_set_paths(
-  array('class' => array(//
+  darray['class' => darray[//
           'i1' => 'autoload-fail-e.inc',
           'i2' => 'autoload-fail-e.inc',
-        ),
+        ],
         'failure' => 'fail',
-       ),
+       ],
   __DIR__ . '/'
 );
 

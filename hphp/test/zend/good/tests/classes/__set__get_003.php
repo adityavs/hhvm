@@ -1,7 +1,6 @@
-<?php
+<?hh
 class Test {
-	function __set() {
-	}
+    function __set() {
+    }
 }
 
-?>

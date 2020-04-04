@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,24 +18,24 @@
 #define incl_HPHP_APC_HANDLE_DEFS_H_
 
 #include "hphp/runtime/base/apc-handle.h"
-#include "hphp/runtime/base/apc-typed-value.h"
 #include "hphp/runtime/base/execution-context.h"
 
 namespace HPHP {
 
-inline void APCHandle::reference() const {
+inline void APCHandle::referenceNonRoot() const {
   if (!isUncounted()) {
     atomicIncRef();
   }
 }
 
-inline void APCHandle::unreference() const {
+inline void APCHandle::unreferenceNonRoot() const {
   if (!isUncounted()) {
     atomicDecRef();
   }
 }
 
 inline void APCHandle::unreferenceRoot(size_t size) {
+  assertx(isSingletonKind() || m_unref_root_count++ == 0);
   if (!isUncounted()) {
     atomicDecRef();
   } else {
@@ -43,17 +43,23 @@ inline void APCHandle::unreferenceRoot(size_t size) {
   }
 }
 
+inline bool APCHandle::isAtomicCounted() const {
+  assertx(m_kind < APCKind::SharedString || m_type == kInvalidDataType);
+  return m_kind >= APCKind::SharedString;
+}
+
 inline void APCHandle::atomicIncRef() const {
-  assert(isRefcountedType(m_type));
+  assertx(isAtomicCounted());
   ++m_count;
 }
 
 inline void APCHandle::atomicDecRef() const {
-  assert(m_count.load() > 0);
+  assertx(m_count.load() > 0);
   if (m_count > 1) {
-    assert(isRefcountedType(m_type));
+    assertx(isAtomicCounted());
     if (--m_count) return;
   }
+  assertx(isSingletonKind() || m_unref_root_count == 1);
   const_cast<APCHandle*>(this)->deleteShared();
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -70,26 +70,6 @@ bool match_bindjmp(const Vunit& unit, Vlabel b, Vptr* addr) {
   return false;
 }
 
-/*
- * determine whether block t0 and t1 both end with bindjmp and are compatible
- * enough to fold jcc{cc, f, {t0, t1}} => bindjcc1st{cc,f}. t0 and t1 must
- * pass the match_bindjmp test, have compatible stack pointer adjustments,
- * and be for the same function.
- */
-bool match_bindjcc1st(const Vunit& unit, Vlabel t0, Vlabel t1) {
-  Vptr addr0, addr1; // adjusted stk addresses (sp+offset on each path)
-  if (match_bindjmp(unit, t0, &addr0) &&
-      match_bindjmp(unit, t1, &addr1)) {
-    const auto& bj0 = unit.blocks[t0].code.back().bindjmp_;
-    const auto& bj1 = unit.blocks[t1].code.back().bindjmp_;
-    return addr0 == addr1 &&
-           bj0.target.resumed() == bj1.target.resumed() &&
-           bj0.target.funcID() == bj1.target.funcID() &&
-           bj0.spOff == bj1.spOff;
-  }
-  return false;
-}
-
 }
 
 /*
@@ -109,7 +89,7 @@ bool match_bindjcc1st(const Vunit& unit, Vlabel t0, Vlabel t1) {
  * a normal exit, then convert the jcc to a bindexit with the jcc's condition
  * and the original bindjmp's dest.
  */
-void optimizeExits(Vunit& unit) {
+void optimizeExits(Vunit& unit, MaybeVinstrId clobber) {
   auto const pred_counts = count_predecessors(unit);
 
   PostorderWalker{unit}.dfs([&](Vlabel b) {
@@ -122,6 +102,7 @@ void optimizeExits(Vunit& unit) {
     auto const t1 = ijcc.targets[1];
     if (t0 == t1) {
       code.back() = jmp{t0};
+      if (clobber) code.back().id = *clobber;
       return;
     }
     if (pred_counts[t0] != 1 || pred_counts[t1] != 1) return;
@@ -134,34 +115,27 @@ void optimizeExits(Vunit& unit) {
                   tcode.begin(), std::prev(tcode.end()));
     };
 
-    if (match_bindjcc1st(unit, t0, t1)) {
-      // hoist the sync instructions from t0 to before the jcc,
-      // and replace the jcc with bindjcc1st.
-      const auto& bj0 = unit.blocks[t0].code.back().bindjmp_;
-      const auto& bj1 = unit.blocks[t1].code.back().bindjmp_;
-      hoist_sync(t0);
-      code.back() = bindjcc1st{ijcc.cc, ijcc.sf, {{bj0.target, bj1.target}},
-                               bj0.spOff,
-                               bj0.args | bj1.args};
-      return;
-    }
-
     auto fold_exit = [&](ConditionCode cc, Vlabel exit, Vlabel next) {
       const auto& bj = unit.blocks[exit].code.back().bindjmp_;
-      auto origin = code.back().origin;
+      auto const irctx = code.back().irctx();
       hoist_sync(exit);
       code.back() = bindjcc{cc, ijcc.sf, bj.target, bj.spOff,
                             bj.trflags, bj.args};
-      code.emplace_back(jmp{next});
-      code.back().origin = origin;
+      if (clobber) code.back().id = *clobber;
+      code.emplace_back(jmp{next}, irctx);
+    };
+
+    auto const is_colder = [&] (Vlabel succ) {
+      return unit.blocks[b].area_idx < unit.blocks[succ].area_idx;
     };
 
     // Try to replace jcc to normal exit with bindexit followed by jmp,
     // as long as the sp adjustment is harmless to hoist (disp==0)
     Vptr sp;
-    if (match_bindjmp(unit, t1, &sp) && sp == sp.base[0]) {
+    if (match_bindjmp(unit, t1, &sp) && sp == sp.base[0] && !is_colder(t0)) {
       fold_exit(ijcc.cc, t1, t0);
-    } else if (match_bindjmp(unit, t0, &sp) && sp == sp.base[0]) {
+    } else if (match_bindjmp(unit, t0, &sp) && sp == sp.base[0] &&
+               !is_colder(t1)) {
       fold_exit(ccNegate(ijcc.cc), t0, t1);
     }
   });

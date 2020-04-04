@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,15 +26,14 @@
 #include "hphp/util/portability.h"
 #include "hphp/util/exception.h"
 #include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/req-root.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-struct String;
-struct IMarker;
-
-//////////////////////////////////////////////////////////////////////
+struct c_WaitableWaitHandle;
 
 /*
  * ExtendedException is the exception type for C++ exceptions that carry PHP
@@ -57,7 +56,6 @@ struct ExtendedException : Exception {
     ATTRIBUTE_PRINTF(2,3);
   ExtendedException(const ExtendedException& other);
   ExtendedException(ExtendedException&& other) noexcept;
-  ~ExtendedException();
 
   ExtendedException& operator=(const ExtendedException& other);
   ExtendedException& operator=(ExtendedException&& other) noexcept;
@@ -71,21 +69,15 @@ struct ExtendedException : Exception {
   // a silent exception does not have its exception message logged
   bool isSilent() const { return m_silent; }
   void setSilent(bool s = true) { m_silent = s; }
+  void recomputeBacktraceFromWH(c_WaitableWaitHandle* wh);
 
-  virtual void vscan(IMarker&) const;
-  template<class F> void scan(F& mark) const;
 protected:
   ExtendedException(const std::string& msg, ArrayData* backTrace);
-
-private:
   void computeBacktrace(bool skipFrame = false);
 
 private:
-  Array m_btp;
+  req::root<Array> m_btp;
   bool m_silent{false};
-  MemoryManager::ExceptionRootKey m_key;
-
-  friend class MemoryManager;
 };
 
 struct FatalErrorException : ExtendedException {
@@ -104,6 +96,11 @@ struct FatalErrorException : ExtendedException {
 private:
   bool m_recoverable{false};
 };
+
+[[noreturn]]
+void raise_fatal_error(const char* msg, const Array& bt = null_array,
+                       bool recoverable = false, bool silent = false,
+                       bool throws = true);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -136,27 +133,48 @@ struct RequestMemoryExceededException : ResourceExceededException {
   EXCEPTION_COMMON_IMPL(RequestMemoryExceededException);
 };
 
+struct RequestOOMKilledException : ResourceExceededException {
+  explicit RequestOOMKilledException(size_t usedBytes)
+    : ResourceExceededException(
+        folly::sformat("request aborted due to memory pressure, "
+                       "used {} bytes", usedBytes),
+        empty_varray())
+  {}
+  EXCEPTION_COMMON_IMPL(RequestOOMKilledException);
+};
+
 //////////////////////////////////////////////////////////////////////
 
-class ExitException : public ExtendedException {
-public:
-  static std::atomic<int> ExitCode; // XXX should not be static
+extern RDS_LOCAL(int, rl_exit_code);
 
+struct ExitException : ExtendedException {
   explicit ExitException(int exitCode) {
-    ExitCode = exitCode;
+    *rl_exit_code = exitCode;
   }
   EXCEPTION_COMMON_IMPL(ExitException);
 };
 
-class PhpFileDoesNotExistException : public ExtendedException {
-public:
-  explicit PhpFileDoesNotExistException(const char *file)
-    : ExtendedException("File could not be loaded: %s", file) {}
-  explicit PhpFileDoesNotExistException(const char *msg, bool empty_file)
-    : ExtendedException("%s", msg) {
-      assert(empty_file);
-    }
+struct PhpFileDoesNotExistException : ExtendedException {
+  explicit PhpFileDoesNotExistException(const char* file)
+      : ExtendedException("File could not be loaded: %s", file) {}
+  explicit PhpFileDoesNotExistException(const char* msg,
+                                        DEBUG_ONLY bool empty_file)
+      : ExtendedException("%s", msg) {
+    assertx(empty_file);
+  }
   EXCEPTION_COMMON_IMPL(PhpFileDoesNotExistException);
+};
+
+struct PhpNotSupportedException : ExtendedException {
+  explicit PhpNotSupportedException(const char* file)
+    : ExtendedException("HHVM 4+ does not support PHP: %s", file) {}
+  EXCEPTION_COMMON_IMPL(PhpNotSupportedException);
+};
+
+struct TopLevelCodeBannedException : ExtendedException {
+  explicit TopLevelCodeBannedException(const char* file)
+    : ExtendedException("Found top-level code in %s", file) {}
+  EXCEPTION_COMMON_IMPL(TopLevelCodeBannedException);
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -167,11 +185,32 @@ public:
  *
  * In newer code you'll generally want to use raise_error.
  */
-ATTRIBUTE_NORETURN void throw_null_pointer_exception();
-ATTRIBUTE_NORETURN void throw_invalid_object_type(const char* clsName);
-ATTRIBUTE_NORETURN void throw_not_implemented(const char* feature);
-ATTRIBUTE_NORETURN
+[[noreturn]] void throw_null_pointer_exception();
+[[noreturn]] void throw_invalid_object_type(const char* clsName);
+[[noreturn]] void throw_not_implemented(const char* feature);
+[[noreturn]]
 void throw_not_supported(const char* feature, const char* reason);
+[[noreturn]] void throw_stack_overflow();
+
+/*
+ * Initialize Throwable's file name and line number assuming the stack trace
+ * was already initialized and the current vmfp() is a built-in.
+ */
+void throwable_init_file_and_line_from_builtin(ObjectData* throwable);
+
+/*
+ * Initialize Throwable's stack trace, file name and line number.
+ */
+void throwable_init(ObjectData* throwable);
+
+/*
+ * Reinitialize Throwable's stack trace, file name and line number based on wait
+ * handle.
+ */
+void throwable_recompute_backtrace_from_wh(ObjectData* throwable,
+                                           c_WaitableWaitHandle* wh);
+
+String throwable_to_string(ObjectData* throwable);
 
 //////////////////////////////////////////////////////////////////////
 

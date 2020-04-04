@@ -1,8 +1,7 @@
-<?php
+<?hh
 
 class Test {
-	function __call() {
-	}
+    function __call() {
+    }
 }
 
-?>

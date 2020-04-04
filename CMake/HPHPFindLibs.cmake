@@ -27,19 +27,6 @@ if (LIBDL_INCLUDE_DIRS)
   endif()
 endif()
 
-# boost checks
-find_package(Boost 1.51.0 COMPONENTS system program_options filesystem context REQUIRED)
-include_directories(${Boost_INCLUDE_DIRS})
-link_directories(${Boost_LIBRARY_DIRS})
-add_definitions("-DHAVE_BOOST1_49")
-
-
-# features.h
-FIND_PATH(FEATURES_HEADER features.h)
-if (FEATURES_HEADER)
-  add_definitions("-DHAVE_FEATURES_H=1")
-endif()
-
 # google-glog
 find_package(Glog REQUIRED)
 if (LIBGLOG_STATIC)
@@ -53,29 +40,17 @@ if (LIBINOTIFY_INCLUDE_DIR)
   include_directories(${LIBINOTIFY_INCLUDE_DIR})
 endif()
 
-# iconv checks
-find_package(Libiconv REQUIRED)
-include_directories(${LIBICONV_INCLUDE_DIR})
-if (LIBICONV_CONST)
-  message(STATUS "Using const for input to iconv() call")
-  add_definitions("-DICONV_CONST=const")
-endif()
-
-# mysql checks - if we're using async mysql, we use webscalesqlclient from
+# mysql checks - if we're using async mysql, we use fbmysqlclient from
 # third-party/ instead
 if (ENABLE_ASYNC_MYSQL)
   include_directories(
-    ${TP_DIR}/re2/src/
+    ${RE2_INCLUDE_DIR}
     ${TP_DIR}/squangle/src/
-    ${TP_DIR}/webscalesqlclient/src/include/
+    ${TP_DIR}/fb-mysql/src/include/
   )
-  set(MYSQL_CLIENT_LIB_DIR ${TP_DIR}/webscalesqlclient/src/)
-  # Unlike the .so, the static library intentionally does not link against
-  # yassl, despite building it :/
+  set(MYSQL_CLIENT_LIB_DIR ${TP_DIR}/fb-mysql/src/)
   set(MYSQL_CLIENT_LIBS
-    ${MYSQL_CLIENT_LIB_DIR}/libmysql/libwebscalesqlclient_r.a
-    ${MYSQL_CLIENT_LIB_DIR}/extra/yassl/libyassl.a
-    ${MYSQL_CLIENT_LIB_DIR}/extra/yassl/taocrypt/libtaocrypt.a
+    ${MYSQL_CLIENT_LIB_DIR}/libmysql/libfbmysqlclient_r.a
   )
 else()
   find_package(MySQL REQUIRED)
@@ -106,10 +81,14 @@ endif()
 set(CMAKE_REQUIRED_LIBRARIES)
 
 # libXed
-find_package(LibXed)
-if (LibXed_INCLUDE_DIR AND LibXed_LIBRARY)
-  include_directories(${LibXed_INCLUDE_DIR})
+if (ENABLE_XED)
+  find_package(LibXed)
+  if (LibXed_FOUND)
+    include_directories(${LibXed_INCLUDE_DIR})
+  endif()
   add_definitions("-DHAVE_LIBXED")
+else()
+  message(STATUS "XED is disabled")
 endif()
 
 # CURL checks
@@ -137,8 +116,8 @@ add_definitions(${LIBXML2_DEFINITIONS})
 
 # libsqlite3
 find_package(LibSQLite)
-if (LIBSQLITE_INCLUDE_DIR)
-  include_directories(${LIBSQLITE_INCLUDE_DIR})
+if (LIBSQLITE3_INCLUDE_DIR)
+  include_directories(${LIBSQLITE3_INCLUDE_DIR})
 endif ()
 
 # libdouble-conversion
@@ -149,7 +128,7 @@ endif ()
 
 # liblz4
 find_package(LZ4)
-if (LZ4_INCLUDE_DIR)
+if (LZ4_FOUND)
   include_directories(${LZ4_INCLUDE_DIR})
 endif()
 
@@ -157,23 +136,6 @@ endif()
 find_package(FastLZ)
 if (FASTLZ_INCLUDE_DIR)
   include_directories(${FASTLZ_INCLUDE_DIR})
-endif()
-
-# libzip
-find_package(LibZip)
-if (LIBZIP_INCLUDE_DIR_ZIP AND LIBZIP_INCLUDE_DIR_ZIPCONF)
-  if (LIBZIP_VERSION VERSION_LESS "0.11")
-    unset(LIBZIP_FOUND CACHE)
-    unset(LIBZIP_LIBRARY CACHE)
-    unset(LIBZIP_INCLUDE_DIR_ZIP CACHE)
-    unset(LIBZIP_INCLUDE_DIR_ZIPCONF CACHE)
-    message(STATUS "libzip is too old, found ${LIBZIP_VERSION} and we need 0.11+, using third-party bundled libzip")
-  else ()
-    include_directories(${LIBZIP_INCLUDE_DIR_ZIP} ${LIBZIP_INCLUDE_DIR_ZIPCONF})
-    message(STATUS "Found libzip: ${LIBZIP_LIBRARY} ${LIBZIP_VERSION}")
-  endif ()
-else ()
-  message(STATUS "Using third-party bundled libzip")
 endif()
 
 # ICU
@@ -190,6 +152,10 @@ if (ICU_FOUND)
     add_definitions("-DU_EXPORT=")
     add_definitions("-DU_IMPORT=")
   endif()
+  # Everything is either in the `icu61` namespace or `icu` namespace, depending
+  # on another definition. There's an implicit `using namespace WHATEVER;` in
+  # ICU4c < 61.1, but now that's opt-in rather than opt-out.
+  add_definitions("-DU_USING_ICU_NAMESPACE=1")
 endif (ICU_FOUND)
 
 # jemalloc/tmalloc and profiler
@@ -220,34 +186,11 @@ if (USE_GOOGLE_HEAP_PROFILER AND GOOGLE_PROFILER_LIB)
   endif()
 endif()
 
-if (USE_JEMALLOC AND NOT GOOGLE_TCMALLOC_ENABLED)
-  FIND_LIBRARY(JEMALLOC_LIB NAMES jemalloc)
-  FIND_PATH(JEMALLOC_INCLUDE_DIR NAMES jemalloc/jemalloc.h)
-
-  if (JEMALLOC_INCLUDE_DIR AND JEMALLOC_LIB)
-    include_directories(${JEMALLOC_INCLUDE_DIR})
-
-    set (CMAKE_REQUIRED_INCLUDES ${JEMALLOC_INCLUDE_DIR})
-    INCLUDE(CheckCXXSourceCompiles)
-    CHECK_CXX_SOURCE_COMPILES("
-#include <jemalloc/jemalloc.h>
-
-#define JEMALLOC_VERSION_NUMERIC ((JEMALLOC_VERSION_MAJOR << 24) | (JEMALLOC_VERSION_MINOR << 16) | (JEMALLOC_VERSION_BUGFIX << 8) | JEMALLOC_VERSION_NDEV)
-
-#if JEMALLOC_VERSION_NUMERIC < 0x03050100
-# error jemalloc version >= 3.5.1 required
-#endif
-
-int main(void) { return 0; }" JEMALLOC_VERSION_MINIMUM)
-    set (CMAKE_REQUIRED_INCLUDES)
-
-    if (JEMALLOC_VERSION_MINIMUM)
-      message(STATUS "Found jemalloc: ${JEMALLOC_LIB}")
-      set(JEMALLOC_ENABLED 1)
-    else()
-      message(STATUS "Found jemalloc, but it was too old")
-    endif()
-  endif()
+if(USE_JEMALLOC AND NOT GOOGLE_TCMALLOC_ENABLED)
+  add_definitions(-DUSE_JEMALLOC=1)
+  set(JEMALLOC_ENABLED 1)
+else()
+  add_definitions(-DNO_JEMALLOC=1)
 endif()
 
 if (USE_TCMALLOC AND NOT JEMALLOC_ENABLED AND NOT GOOGLE_TCMALLOC_ENABLED)
@@ -260,11 +203,6 @@ if (USE_TCMALLOC AND NOT JEMALLOC_ENABLED AND NOT GOOGLE_TCMALLOC_ENABLED)
   endif()
 endif()
 
-if (JEMALLOC_ENABLED)
-  add_definitions(-DUSE_JEMALLOC=1)
-else()
-  add_definitions(-DNO_JEMALLOC=1)
-endif()
 if (GOOGLE_TCMALLOC_ENABLED)
   add_definitions(-DGOOGLE_TCMALLOC=1)
 else()
@@ -275,6 +213,11 @@ if (GOOGLE_HEAP_PROFILER_ENABLED)
 endif()
 if (GOOGLE_CPU_PROFILER_ENABLED)
   add_definitions(-DGOOGLE_CPU_PROFILER=1)
+endif()
+
+# HHProf
+if (JEMALLOC_ENABLED AND ENABLE_HHPROF)
+  add_definitions(-DENABLE_HHPROF=1)
 endif()
 
 # tbb libs
@@ -293,6 +236,7 @@ find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
 # LibreSSL explicitly refuses to support RAND_egd()
+SET(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
 SET(CMAKE_REQUIRED_LIBRARIES ${OPENSSL_LIBRARIES})
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES("#include <openssl/rand.h>
@@ -302,6 +246,12 @@ int main() {
 if (NOT OPENSSL_HAVE_RAND_EGD)
   add_definitions("-DOPENSSL_NO_RAND_EGD")
 endif()
+CHECK_CXX_SOURCE_COMPILES("#include <openssl/ssl.h>
+int main() {
+  return SSL_set_alpn_protos(nullptr, nullptr, 0);
+}" OPENSSL_HAVE_ALPN)
+SET(CMAKE_REQUIRED_INCLUDES)
+SET(CMAKE_REQUIRED_LIBRARIES)
 
 
 # ZLIB
@@ -322,17 +272,28 @@ if (LIBPTHREAD_STATIC)
   add_definitions("-DPTW32_STATIC_LIB")
 endif()
 
+OPTION(
+  NON_DISTRIBUTABLE_BUILD
+  "Use libraries which may result in a binary that can not be legally distributed"
+  OFF
+)
+
 # Either Readline or Editline (for hphpd)
-find_package(Readline)
-find_package(Editline)
-if (EDITLINE_INCLUDE_DIRS)
-  add_definitions("-DUSE_EDITLINE")
-  include_directories(${EDITLINE_INCLUDE_DIRS})
-elseif (READLINE_INCLUDE_DIR)
+if(NON_DISTRIBUTABLE_BUILD)
+  find_package(Readline)
+endif()
+if (NOT READLINE_INCLUDE_DIR)
+  find_package(Editline)
+endif()
+
+if (NON_DISTRIBUTABLE_BUILD AND READLINE_INCLUDE_DIR)
   if (READLINE_STATIC)
     add_definitions("-DREADLINE_STATIC")
   endif()
   include_directories(${READLINE_INCLUDE_DIR})
+elseif (EDITLINE_INCLUDE_DIRS)
+  add_definitions("-DUSE_EDITLINE")
+  include_directories(${EDITLINE_INCLUDE_DIRS})
 else()
   message(FATAL_ERROR "Could not find Readline or Editline")
 endif()
@@ -353,13 +314,6 @@ if (NOT WINDOWS)
     add_definitions("-DHAVE_ELF_GETSHDRSTRNDX")
   endif()
 endif()
-
-# LLVM. Disabled in OSS for now: t5056266
-# find_package(LLVM)
-# if (LIBLLVM_INCLUDE_DIR)
-#   include_directories(LIBLLVM_INCLUDE_DIR)
-#   add_definitions("-DUSE_LLVM")
-# endif()
 
 FIND_LIBRARY(CRYPT_LIB NAMES xcrypt crypt crypto)
 if (LINUX OR FREEBSD)
@@ -387,10 +341,6 @@ if (FREEBSD)
 endif()
 
 if (APPLE)
-  find_library(LIBINTL_LIBRARIES NAMES intl libintl)
-  if (LIBINTL_INCLUDE_DIR)
-    include_directories(${LIBINTL_INCLUDE_DIR})
-  endif()
   find_library(KERBEROS_LIB NAMES gssapi_krb5)
 
   # This is required by Homebrew's libc. See
@@ -441,12 +391,13 @@ macro(hphp_link target)
     target_link_libraries(${target} ${LIBDL_LIBRARIES})
   endif ()
 
+  if (JEMALLOC_ENABLED)
+    target_link_libraries(${target} jemalloc)
+    add_dependencies(${target} jemalloc)
+  endif ()
+
   if (GOOGLE_HEAP_PROFILER_ENABLED OR GOOGLE_CPU_PROFILER_ENABLED)
     target_link_libraries(${target} ${GOOGLE_PROFILER_LIB})
-  endif()
-
-  if (JEMALLOC_ENABLED)
-    target_link_libraries(${target} ${JEMALLOC_LIB})
   endif()
 
   if (GOOGLE_HEAP_PROFILER_ENABLED)
@@ -455,7 +406,11 @@ macro(hphp_link target)
     target_link_libraries(${target} ${GOOGLE_TCMALLOC_MIN_LIB})
   endif()
 
-  target_link_libraries(${target} ${Boost_LIBRARIES})
+  add_dependencies(${target} boostMaybeBuild)
+  target_link_libraries(${target} boost)
+  add_dependencies(${target} libsodiumMaybeBuild)
+  target_link_libraries(${target} libsodium)
+
   target_link_libraries(${target} ${MYSQL_CLIENT_LIBS})
   if (ENABLE_ASYNC_MYSQL)
     target_link_libraries(${target} squangle)
@@ -469,16 +424,8 @@ macro(hphp_link target)
     target_link_libraries(${target} ${LIBJSONC_LIBRARY})
   endif()
 
-  if (LibXed_LIBRARY)
-    target_link_libraries(${target} ${LibXed_LIBRARY})
-  endif()
-
   if (LIBINOTIFY_LIBRARY)
     target_link_libraries(${target} ${LIBINOTIFY_LIBRARY})
-  endif()
-
-  if (LIBICONV_LIBRARY)
-    target_link_libraries(${target} ${LIBICONV_LIBRARY})
   endif()
 
   if (LINUX)
@@ -529,23 +476,21 @@ macro(hphp_link target)
     target_link_libraries(${target} sqlite3)
   endif()
 
-  if (DOUBLE_CONVERSION_LIBRARY)
+  if (DOUBLE_CONVERSION_FOUND)
     target_link_libraries(${target} ${DOUBLE_CONVERSION_LIBRARY})
   else()
     target_link_libraries(${target} double-conversion)
   endif()
 
-  if (LZ4_LIBRARY)
+  if (LZ4_FOUND)
     target_link_libraries(${target} ${LZ4_LIBRARY})
   else()
     target_link_libraries(${target} lz4)
   endif()
+  # The syntax used for these warnings is unparsable by Apple's Clang
+  add_definitions("-DLZ4_DISABLE_DEPRECATE_WARNINGS=1")
 
-  if (LIBZIP_LIBRARY)
-    target_link_libraries(${target} ${LIBZIP_LIBRARY})
-  else()
-    target_link_libraries(${target} zip_static)
-  endif()
+  target_link_libraries(${target} libzip)
 
   if (PCRE_LIBRARY)
     target_link_libraries(${target} ${PCRE_LIBRARY})
@@ -562,6 +507,9 @@ macro(hphp_link target)
   target_link_libraries(${target} timelib)
   target_link_libraries(${target} folly)
   target_link_libraries(${target} wangle)
+  target_link_libraries(${target} brotlienc)
+  target_link_libraries(${target} brotlidec)
+  target_link_libraries(${target} brotlicommon)
 
   if (ENABLE_MCROUTER)
     target_link_libraries(${target} mcrouter)
@@ -583,15 +531,47 @@ macro(hphp_link target)
     target_link_libraries(${target} ${LIBELF_LIBRARIES})
   endif()
 
-  if (LIBLLVM_LIBRARY)
-    target_link_libraries(${target} ${LIBLLVM_LIBRARY})
-  endif()
-
   if (LINUX)
-    target_link_libraries(${target} -Wl,--wrap=pthread_create -Wl,--wrap=pthread_exit -Wl,--wrap=pthread_join)
+    target_link_libraries(${target})
   endif()
 
   if (MSVC)
     target_link_libraries(${target} dbghelp.lib dnsapi.lib)
+  endif()
+
+# Check whether atomic operations require -latomic or not
+# See https://github.com/facebook/hhvm/issues/5217
+  include(CheckCXXSourceCompiles)
+  set(OLD_CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+  set(CMAKE_REQUIRED_FLAGS "-std=c++1y")
+  CHECK_CXX_SOURCE_COMPILES("
+#include <atomic>
+#include <iostream>
+#include <stdint.h>
+int main() {
+    struct Test { int64_t val1; int64_t val2; };
+    std::atomic<Test> s;
+    // Do this to stop modern compilers from optimizing away the libatomic
+    // calls in release builds, making this test always pass in release builds,
+    // and incorrectly think that HHVM doesn't need linking against libatomic.
+    bool (std::atomic<Test>::* volatile x)(void) const =
+      &std::atomic<Test>::is_lock_free;
+    std::cout << (s.*x)() << std::endl;
+}
+  " NOT_REQUIRE_ATOMIC_LINKER_FLAG)
+
+  if(NOT "${NOT_REQUIRE_ATOMIC_LINKER_FLAG}")
+      message(STATUS "-latomic is required to link hhvm")
+      find_library(ATOMIC_LIBRARY NAMES atomic libatomic.so.1)
+      target_link_libraries(${target} ${ATOMIC_LIBRARY})
+  endif()
+  set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
+
+  if (ENABLE_XED)
+    if (LibXed_FOUND)
+        target_link_libraries(${target} ${LibXed_LIBRARY})
+    else()
+        target_link_libraries(${target} xed)
+    endif()
   endif()
 endmacro()

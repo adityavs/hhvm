@@ -4,17 +4,17 @@
 newtype FormatString<T> = string;
 
 //// printf.php
-<?hh // decl
-interface PlainSprintf {
+<?hh // partial
+interface MyPlainSprintf {
 }
 
-function sprintf(FormatString<PlainSprintf> $f, ...): string;
+function my_sprintf(FormatString<PlainSprintf> $f, ...$_): string;
 
 //// use.php
 <?hh // strict
 
 final class Foo {
   public function f(FormatString $s): void {
-    sprintf($s);
+    my_sprintf($s);
   }
 }

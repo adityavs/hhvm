@@ -1,19 +1,24 @@
-<?php
+<?hh
+
+
 
 class c {
- function f(&$a, $b) {
- $a = $b;
- }
- }
+ function f(inout $a, $b, $c) { $a[$b] = $c; }
+}
 function setNullVariantHelper($f, $value) {
-  $a = array();
+  $a = darray[];
   $obj = new c;
-  $obj->$f($a[$obj] = 1, $value);
+  $a[$obj] = 1;
+  $obj->$f(inout $a, $obj, $value);
   var_dump($a[$obj] = 1);
 }
 function setNullVariant($value) {
   setNullVariantHelper('f', $value);
 }
+
+<<__EntryPoint>>
+function main_513() {
 setNullVariant('Surprise!');
 $b = null;
 var_dump($b[1]);
+}

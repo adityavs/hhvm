@@ -1,9 +1,8 @@
+#!/usr/bin/env python3
+
 """
 GDB commands for various HHVM ID lookups.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
@@ -22,6 +21,7 @@ class LookupCommand(gdb.Command):
     def __init__(self):
         super(LookupCommand, self).__init__('lookup', gdb.COMMAND_DATA,
                                             gdb.COMPLETE_NONE, True)
+
 
 LookupCommand()
 
@@ -69,14 +69,21 @@ LookupFuncFunction()
 # `lookup litstr' command.
 
 def lookup_litstr(litstr_id, u):
-    table = None
-    gloff = V('HPHP::kGlobalLitstrOffset')
+    uloff = V('HPHP::kUnitLitstrOffset')
 
-    if litstr_id >= gloff:
-        litstr_id -= gloff
+    if litstr_id < uloff:
         u = V('HPHP::LitstrTable::s_litstrTable')
+    else:
+        litstr_id -= uloff
+        u = u.cast(T('HPHP::UnitExtended').pointer())
 
-    return idx.vector_at(u['m_namedInfo'], litstr_id)['first']
+    val = u['m_namedInfo']
+    # get the base type
+    ty = val.type.fields()[0].type
+    val = val.address.cast(ty.pointer()).dereference()
+    elm = idx.compact_vector_at(val, litstr_id)
+    ty = elm.type.template_argument(0)
+    return elm.address.cast(ty.pointer()).dereference()
 
 
 class LookupLitstrCommand(gdb.Command):
@@ -107,5 +114,6 @@ If no Unit is given, the current unit (set by `unit') is used.
 
         litstr = lookup_litstr(litstr_id, u)
         gdbprint(litstr)
+
 
 LookupLitstrCommand()

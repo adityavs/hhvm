@@ -1,7 +1,7 @@
-<?php
-
-$int_variation = array( "%d", "%-d", "%+d", "%7.2d", "%-7.2d", "%07.2d", "%-07.2d", "%'#7.2d" );
-$int_numbers = array( 0, 1, -1, 2.7, -2.7, 23333333, -23333333, "1234" );
+<?hh
+<<__EntryPoint>> function main(): void {
+$int_variation = varray[ "%d", "%-d", "%+d", "%7.2d", "%-7.2d", "%07.2d", "%-07.2d", "%'#7.2d" ];
+$int_numbers = varray[ 0, 1, -1, 2.7, -2.7, 23333333, -23333333, "1234" ];
 
 /* creating dumping file */
 $data_file = dirname(__FILE__) . '/fprintf_variation_008_64bit.phpt.txt';
@@ -21,5 +21,4 @@ print_r(file_get_contents($data_file));
 echo "\nDone";
 
 unlink($data_file);
-
-?>
+}

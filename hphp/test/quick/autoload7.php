@@ -1,15 +1,13 @@
-<?php
+<?hh
 
 function __autoload($a) {
   var_dump($a);
   if ($a == 'A') {
-    class A {};
+    include 'autoload7-1.inc';
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $a = '\\A';
   new $a;
 }
-
-main();

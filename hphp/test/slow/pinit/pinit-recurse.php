@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function __autoload($cls) {
   echo "__autoloading $cls\n";
@@ -20,4 +20,8 @@ function test() {
   }
 }
 
+
+<<__EntryPoint>>
+function main_pinit_recurse() {
 test();
+}

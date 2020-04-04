@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,7 +26,9 @@
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/ext/imagick/constants.h"
 #include "hphp/util/string-vsnprintf.h"
 
@@ -34,22 +36,27 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////////////
 // ImagickExtension
-class ImagickExtension final : public Extension {
- public:
+struct ImagickExtension final : Extension {
   ImagickExtension();
   void moduleInit() override;
+  void moduleShutdown() override;
   void threadInit() override;
 
   static bool hasLocaleFix();
   static bool hasProgressMonitor();
 
  private:
+  void loadImagickClass();
+  void loadImagickDrawClass();
+  void loadImagickPixelClass();
+  void loadImagickPixelIteratorClass();
+
   struct ImagickIniSetting {
     bool m_locale_fix;
     bool m_progress_monitor;
   };
 
-  static DECLARE_THREAD_LOCAL(ImagickIniSetting, s_ini_setting);
+  static RDS_LOCAL(ImagickIniSetting, s_ini_setting);
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -66,11 +73,10 @@ class ImagickExtension final : public Extension {
     \
     static Object allocObject(const Variant& arg) { \
       Object ret = allocObject(); \
-      TypedValue dummy; \
-      g_context->invokeFunc(&dummy, \
-                              cls->getCtor(), \
-                              make_packed_array(arg), \
-                              ret.get()); \
+      tvDecRefGen(\
+        g_context->invokeFunc(cls->getCtor(), make_vec_array(arg), \
+                              ret.get()) \
+      );\
       return ret; \
     } \
     \
@@ -99,33 +105,41 @@ IMAGICK_DEFINE_CLASS(ImagickPixelIterator)
 #undef IMAGICK_DEFINE_CLASS
 
 template<typename T>
-ATTRIBUTE_NORETURN
+[[noreturn]]
 void imagickThrow(ATTRIBUTE_PRINTF_STRING const char* fmt, ...)
   ATTRIBUTE_PRINTF(1, 2);
 
 template<typename T>
+[[noreturn]]
 void imagickThrow(const char* fmt, ...) {
   va_list ap;
   std::string msg;
   va_start(ap, fmt);
   string_vsnprintf(msg, fmt, ap);
   va_end(ap);
-  throw T::allocObject(msg);
+  throw_object(T::allocObject(msg));
 }
 
 //////////////////////////////////////////////////////////////////////////////
 // WandResource
 template<typename Wand>
-class WandResource : public SweepableResourceData {
+struct WandResource : SweepableResourceData {
+
+private:
   DECLARE_RESOURCE_ALLOCATION(WandResource<Wand>);
 
- public:
+public:
   explicit WandResource(Wand* wand, bool owner = true) :
       m_wand(wand), m_owner(owner) {
   }
 
   ~WandResource() {
     clear();
+  }
+
+  CLASSNAME_IS("WandResource");
+  const String& o_getClassNameHook() const override {
+    return classnameof();
   }
 
   void clear() {
@@ -148,7 +162,7 @@ class WandResource : public SweepableResourceData {
     return w;
   }
 
- private:
+private:
   void destroyWand();
   Wand* m_wand;
   bool m_owner;
@@ -212,10 +226,9 @@ req::ptr<WandResource<Wand>> getWandResource(const StaticString& className,
                                              const std::string& msg) {
   auto ret = getWandResource<Wand>(className, obj);
   if (ret == nullptr || ret->getWand() == nullptr) {
-    throw T::allocObject(msg);
-  } else {
-    return ret;
+    throw_object(T::allocObject(msg));
   }
+  return ret;
 }
 
 ALWAYS_INLINE
@@ -235,7 +248,7 @@ req::ptr<WandResource<DrawingWand>> getDrawingWandResource(const Object& obj) {
 ALWAYS_INLINE
 req::ptr<WandResource<PixelWand>> getPixelWandResource(const Object& obj) {
   auto ret = getWandResource<PixelWand>(s_ImagickPixel, obj);
-  assert(ret != nullptr && ret->getWand() != nullptr);
+  assertx(ret != nullptr && ret->getWand() != nullptr);
   return ret;
 }
 
@@ -297,10 +310,13 @@ String convertMagickData(size_t size, unsigned char* &data);
 
 template<typename T>
 ALWAYS_INLINE
-Array convertArray(size_t num, const T* arr) {
-  PackedArrayInit ret(num);
+typename std::enable_if<
+  std::is_scalar<typename std::remove_pointer<T>::type>::value,
+  Array
+>::type convertArray(size_t num, const T* arr) {
+  VArrayInit ret(num);
   for (size_t i = 0; i < num; ++i) {
-    ret.appendWithRef(arr[i]);
+    ret.append(arr[i]);
   }
   return ret.toArray();
 }

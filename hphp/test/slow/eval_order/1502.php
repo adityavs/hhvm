@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 class MyIterator implements Iterator{
-  private $var = array();
+  private $var = varray[];
   public function __construct($array) {
     echo "constructing
 ";
@@ -12,22 +12,30 @@ class MyIterator implements Iterator{
   public function rewind() {
     echo "rewinding
 ";
-    reset($this->var);
+    $__var = $this->var;
+    reset(inout $__var);
+    $this->var = $__var;
   }
   public function current() {
-    $var = current($this->var);
+    $__var = $this->var;
+    $var = current($__var);
+    $this->var = $__var;
     echo "current: $var
 ";
     return $var;
   }
   public function key() {
-    $var = key($this->var);
+    $__var = $this->var;
+    $var = key($__var);
+    $this->var = $__var;
     echo "key: $var
 ";
     return $var;
   }
   public function next() {
-    $var = next($this->var);
+    $__var = $this->var;
+    $var = next(inout $__var);
+    $this->var = $__var;
     echo "next: $var
 ";
     return $var;
@@ -49,10 +57,14 @@ function g() {
  return 0;
  }
 
-$a = array(1, 2);
-$values = array('a' => 1, 'b' => 2, 'c' => 3);
+
+<<__EntryPoint>>
+function main_1502() {
+$a = varray[1, 2];
+$values = darray['a' => 1, 'b' => 2, 'c' => 3];
 $it = new MyIterator($values);
 foreach ($it as $a[f()] => $a[g()]) {
-  print "$a[0]
-";
+  echo $a[0];
+  echo "\n";
+}
 }

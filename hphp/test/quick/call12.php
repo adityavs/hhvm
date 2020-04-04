@@ -1,4 +1,4 @@
-<?php
+<?hh
 class A {
   public function __call($fn, $args) {
     var_dump($fn, $args);
@@ -13,9 +13,7 @@ class B {
 class C extends B {
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $obj = new C;
   $obj->test();
 }
-main();
-

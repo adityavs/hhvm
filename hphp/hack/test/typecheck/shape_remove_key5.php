@@ -1,7 +1,7 @@
 <?hh //strict
 
 /**
- * removeKey allows to unset any key, but it still must be statically
+ * removeKey allows unsetting any key, but it still must be statically
  * known
  */
 type s = shape(
@@ -10,5 +10,5 @@ type s = shape(
 );
 
 function test(s $s, string $k): void {
-  Shapes::removeKey($s, $k);
+  Shapes::removeKey(inout $s, $k);
 }

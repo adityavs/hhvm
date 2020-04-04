@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,19 +17,34 @@
 #define incl_HPHP_JIT_IRGEN_INLINING_H_
 
 namespace HPHP { namespace jit {
+
+struct SSATmp;
+
+namespace irgen {
+
 struct IRGS;
-struct Type;
-}}
 
-namespace HPHP { namespace jit { namespace irgen {
+///////////////////////////////////////////////////////////////////////////////
 
-//////////////////////////////////////////////////////////////////////
+/*
+ * Return control from an inlined callee to the caller.
+ *
+ * This also does bookkeeping for `env' to pop the current inlined frame.
+ */
+void implInlineReturn(IRGS& env);
 
-void endInlining(IRGS&);
-void endInlinedCommon(IRGS&);
+/*
+ * Emit a return from an inlined function.
+ */
 void retFromInlined(IRGS&);
 
-//////////////////////////////////////////////////////////////////////
+/*
+ * Exit the (now suspended) inline frame. The frame must no longer be live, and
+ * its contents must now reside in waithandle.
+ */
+void suspendFromInlined(IRGS&, SSATmp* waithandle);
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}}
 

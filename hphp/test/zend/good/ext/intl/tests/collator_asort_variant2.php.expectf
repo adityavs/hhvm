@@ -1,0 +1,105 @@
+Test 1.162b81ac12878b817fc39063097e45b5:
+array (
+  'c' => 'i',
+  'a' => 'k',
+  'd' => 'y',
+)
+ Result: true
+
+Test 2.93d96e22f692d8a281b0a389f01f8d1e:
+array (
+  'a' => 'a',
+  'c' => 'aa',
+  'b' => 'aaa',
+)
+ Result: true
+
+Test 3.9f25de4482bc7b58de508e278113317c:
+array (
+  'aa' => 'a',
+  'aaa' => 'a',
+  'a' => 'a',
+)
+ Result: true
+
+Test 4.a053a7559d5aa4510bdb22d87aece31e:
+array (
+  '7' => '',
+  '2' => NULL,
+  '5' => '!',
+  '1' => 'abc',
+)
+ Result: true
+
+Test 5.e47c72919429698285fa33d0f1da29bd:
+array (
+  '2' => '25',
+  '3' => '36',
+  '1' => '100',
+)
+ Result: true
+
+Test 6.229a0cb6fe7924033b482f820d627643:
+array (
+  '3' => 2,
+  '1' => 5,
+  '2' => '30',
+)
+ Result: true
+
+Test 7.38071f1abfc721d5efb210f2e6835cec:
+array (
+  '1' => '100',
+  '2' => '25',
+  '3' => '36',
+)
+ Result: true
+
+Test 8.cf580913f6f2e2e50b7f5058902e382f:
+array (
+  '3' => 2,
+  '2' => '30',
+  '1' => 5,
+)
+ Result: true
+
+Test 9.e221a15f45e4ccf57b506336c7357c9f:
+array (
+  '2' => '',
+  '3' => ' a',
+  '1' => 'd',
+)
+ Result: true
+
+Test 10.75c201c940cceda1609eed96e8c4c6a1:
+array (
+  '3' => 'i',
+  '2' => 'k',
+  '1' => 'y',
+)
+ Result: true
+
+Test 11.153d9b11d1e5936afc917a94a4e11f34:
+array (
+  'е' => 'а',
+  'б' => 'в',
+  'п' => 'у',
+)
+ Result: true
+
+Test 12.2292e701f6ebaf92659b48b913606902:
+array (
+  '4' => '',
+  '1' => 'п',
+  '2' => 'пп',
+  '7' => 'd',
+)
+ Result: true
+
+Test 13.8800d48abb960a59002eef77f1d73ae0:
+array (
+  'c' => 'i',
+  'd' => 'y',
+  'a' => 'k',
+)
+ Result: true

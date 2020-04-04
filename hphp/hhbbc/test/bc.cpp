@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,30 +28,18 @@ std::vector<Bytecode> samples {
   bc::True {},
   bc::Int { 52 },
   bc::False {},
-  bc::FPassC { 0 },
-  bc::FPushFunc { 2 },
-  bc::CGetM {
-    MVector { LocationCode::LC,
-              nullptr,
-              { MElem { MemberCode::MPC } }
-            }
-  },
-  bc::CGetM {
-    MVector { LocationCode::LH,
-              nullptr,
-              { MElem { MemberCode::MPC },
-                MElem { MemberCode::MEC } }
-            }
-  },
+  bc::FCallFunc { FCallArgs(2) },
 };
 
 TEST(Bytecode, EqualityComparable) {
   Bytecode x = bc::Nop {};
-  Bytecode y = bc::FPassC { 1 };
+  Bytecode y = bc::Int { 42 };
   EXPECT_FALSE(x == y);
   EXPECT_TRUE(bc::Nop {} == x);
-  EXPECT_FALSE(bc::FPassC { 2 } == y);
-  EXPECT_TRUE(y == bc::FPassC { 1 });
+  Bytecode q = bc::Int { 47 };
+  EXPECT_FALSE(q == y);
+  Bytecode r = bc::Int { 42 };
+  EXPECT_TRUE(y == r);
 
   for (auto& b : samples) EXPECT_EQ(b, b);
   EXPECT_EQ(std::unique(begin(samples), end(samples)), end(samples));
@@ -69,15 +57,17 @@ TEST(Bytecode, Hash) {
     size_t operator()(const Bytecode& b) const { return hash(b); }
   };
 
-  std::unordered_map<Bytecode,Bytecode,bc_hash> map {
+  hphp_fast_map<Bytecode,Bytecode,bc_hash> map {
     { bc::Nop {}, bc::Int { 3 } },
-    { bc::FPassC { 0 }, bc::Int { 4 } },
-    { bc::FPassC { 1 }, bc::Int { 5 } },
+    { bc::Int { 42 }, bc::Int { 4 } },
+    { bc::Int { 47 }, bc::Int { 5 } },
   };
 
+  Bytecode b1 = bc::Int { 42 };
+  Bytecode b2 = bc::Int { 47 };
   EXPECT_EQ(map[bc::Nop{}], bc::Int { 3 });
-  EXPECT_EQ(map[bc::FPassC { 0 }], bc::Int { 4 });
-  EXPECT_EQ(map[bc::FPassC { 1 }], bc::Int { 5 });
+  EXPECT_EQ(map[b1], bc::Int { 4 });
+  EXPECT_EQ(map[b2], bc::Int { 5 });
 }
 
 }}

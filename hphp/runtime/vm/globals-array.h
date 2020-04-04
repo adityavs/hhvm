@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,10 @@
 #ifndef incl_HPHP_RUNTIME_VM_GLOBALS_ARRAY_H
 #define incl_HPHP_RUNTIME_VM_GLOBALS_ARRAY_H
 
-#include "hphp/runtime/vm/name-value-table.h"
-#include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/array-common.h"
+#include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/base/tv-val.h"
+#include "hphp/runtime/vm/name-value-table.h"
 
 namespace HPHP {
 
@@ -39,7 +40,7 @@ namespace HPHP {
  *   - Non-string keys are not really supported.  (Integers are converted to
  *     strings.)
  *
- *   - size() is an O(N) operation.  (This is because of kNamedLocalDataType
+ *   - keys(),size() are O(N) operation. (This is because of kNamedLocalDataType
  *     support in the underlying NameValueTable.)
  *
  *   - Append/prepend operations are not supported.
@@ -52,54 +53,45 @@ namespace HPHP {
  * to outlast the lifetime of the GlobalsArray.  (The wrapper is
  * refcounted, as required by ArrayData, but the table pointed to is not.)
  */
-struct GlobalsArray : ArrayData {
+struct GlobalsArray final : ArrayData,
+                            type_scan::MarkCollectable<GlobalsArray> {
   explicit GlobalsArray(NameValueTable* tab);
-  ~GlobalsArray() {}
-
-  // We only allow explicit conversions to ArrayData.  Generally you
-  // should not be talking to the GlobalsArray directly (see
-  // php-globals.h).
-  ArrayData* asArrayData() { return this; }
-  const ArrayData* asArrayData() const { return this; }
+  ~GlobalsArray() = delete;
 
 public:
+  ArrayData* keys();
+  bool keyExists(const StringData*);
+
   static void Release(ArrayData*) {}
   static ArrayData* Copy(const ArrayData* ad) {
     return const_cast<ArrayData*>(ad);
   }
   static size_t Vsize(const ArrayData*);
-  static void NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos);
-  static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
+  static TypedValue GetPosKey(const ArrayData* ad, ssize_t pos);
+  static TypedValue GetPosVal(const ArrayData* ad, ssize_t pos);
 
   static bool ExistsInt(const ArrayData* ad, int64_t k);
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
 
-  static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
-  static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
+  static tv_rval NvGetInt(const ArrayData*, int64_t k);
+  static tv_rval NvGetStr(const ArrayData*, const StringData* k);
 
-  static ArrayData* LvalInt(ArrayData*, int64_t k, Variant*& ret, bool copy);
-  static ArrayData* LvalStr(ArrayData*, StringData* k, Variant*& ret,
-                            bool copy);
-  static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
+  static ssize_t NvGetIntPos(const ArrayData*, int64_t k);
+  static ssize_t NvGetStrPos(const ArrayData*, const StringData* k);
 
-  static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
-  static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
-  static ArrayData* SetRefStr(ArrayData*, StringData* k, Variant& v,
-                              bool copy);
-  static constexpr auto AddInt = &SetInt;
-  static constexpr auto AddStr = &SetStr;
-  static ArrayData* RemoveInt(ArrayData*, int64_t k, bool copy);
-  static ArrayData* RemoveStr(ArrayData*, const StringData* k, bool copy);
+  static arr_lval LvalInt(ArrayData*, int64_t k, bool copy);
+  static arr_lval LvalStr(ArrayData*, StringData* k, bool copy);
 
-  static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
-  static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
-  static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
-
+  static ArrayData* SetInt(ArrayData*, int64_t k, TypedValue v);
+  static ArrayData* SetIntMove(ArrayData*, int64_t k, TypedValue v);
+  static ArrayData* SetStr(ArrayData*, StringData* k, TypedValue v);
+  static ArrayData* SetStrMove(ArrayData*, StringData* k, TypedValue v);
+  static ArrayData* RemoveInt(ArrayData*, int64_t k);
+  static ArrayData* RemoveStr(ArrayData*, const StringData* k);
+  static ArrayData* Append(ArrayData*, TypedValue v);
   static ArrayData* PlusEq(ArrayData*, const ArrayData* elems);
   static ArrayData* Merge(ArrayData*, const ArrayData* elems);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
-  static ArrayData* CopyWithStrongIterators(const ArrayData*);
+  static ArrayData* Prepend(ArrayData*, TypedValue v);
 
   static ssize_t IterBegin(const ArrayData*);
   static ssize_t IterLast(const ArrayData*);
@@ -107,8 +99,6 @@ public:
   static ssize_t IterAdvance(const ArrayData*, ssize_t prev);
   static ssize_t IterRewind(const ArrayData*, ssize_t prev);
 
-  static bool ValidMArrayIter(const ArrayData*, const MArrayIter & fp);
-  static bool AdvanceMArrayIter(ArrayData*, MArrayIter&);
   static bool IsVectorData(const ArrayData*);
   static ArrayData* CopyStatic(const ArrayData*);
   static constexpr auto Pop = &ArrayCommon::Pop;
@@ -124,17 +114,23 @@ public:
   static bool Usort(ArrayData*, const Variant& cmp_function);
   static bool Uasort(ArrayData*, const Variant& cmp_function);
 
-  static ArrayData* Escalate(const ArrayData* ad) {
-    return const_cast<ArrayData*>(ad);
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
   }
+  static constexpr auto ToPHPArrayIntishCast = &ToPHPArray;
+  static constexpr auto ToVec = &ArrayCommon::ToVec;
+  static constexpr auto ToDict = &ArrayCommon::ToDict;
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
+  static constexpr auto ToVArray = &ArrayCommon::ToVArray;
+  static constexpr auto ToDArray = &ArrayCommon::ToDArray;
 
 private:
   static GlobalsArray* asGlobals(ArrayData* ad);
   static const GlobalsArray* asGlobals(const ArrayData* ad);
 
 public:
-  template<class F> void scan(F& mark) const {
-    mark(m_tab);
+  void scan(type_scan::Scanner& scanner) const {
+    scanner.scan(m_tab);
   }
 
 private:
@@ -142,6 +138,11 @@ private:
 };
 
 //////////////////////////////////////////////////////////////////////
+
+/*
+ * Gets our request-local global variables array.
+ */
+GlobalsArray* get_global_variables();
 
 }
 

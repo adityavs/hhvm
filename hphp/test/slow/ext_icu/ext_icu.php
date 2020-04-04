@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function VS($x, $y) {
   var_dump($x === $y);
@@ -41,16 +41,24 @@ function test_icu_match() {
   VERIFY(icu_match("(\\bPHP\\b)", $subject) != false);
   VERIFY(icu_match("(\\bPHP\\b))", $subject) == false);
 
+  $matches = null;
   // Test returning matches functionality.
-  VERIFY(icu_match("(PHP) is", $subject, $matches) != false);
+  VERIFY(icu_match_with_matches("(PHP) is", $subject, inout $matches) != false);
   VS(print_r($matches, true),
     "Array\n".
     "(\n".
     "    [0] => PHP is\n".
     "    [1] => PHP\n".
     ")\n");
-  VERIFY(icu_match("is (a)", $subject, $matches,
-                     UREGEX_OFFSET_CAPTURE) != false);
+  VERIFY(
+    icu_match_with_matches(
+      "is (a)",
+      $subject,
+      inout $matches,
+      UREGEX_OFFSET_CAPTURE,
+    ) !=
+      false,
+  );
   VS(print_r($matches, true),
      "Array\n".
      "(\n".
@@ -67,8 +75,15 @@ function test_icu_match() {
      "        )\n".
      "\n".
      ")\n");
-  VERIFY(icu_match("\\. \xef\xba\xb0", $subject, $matches,
-                     UREGEX_OFFSET_CAPTURE) != false);
+  VERIFY(
+    icu_match_with_matches(
+      "\\. \xef\xba\xb0",
+      $subject,
+      inout $matches,
+      UREGEX_OFFSET_CAPTURE,
+    ) !=
+      false,
+  );
   VS(print_r($matches, true),
     "Array\n".
     "(\n".
@@ -81,8 +96,15 @@ function test_icu_match() {
     ")\n");
   $junk1="\xef\xbb\xa9\xef\xbb\xad";
   $junk2="\xef\xba\x8e\xef\xbb\xa0\xef\xbb\xa8\xef\xba\xbb";
-  VERIFY(icu_match("$junk1 ($junk2)",
-                     $subject_ar, $matches, UREGEX_OFFSET_CAPTURE) != false);
+  VERIFY(
+    icu_match_with_matches(
+      "$junk1 ($junk2)",
+      $subject_ar,
+      inout $matches,
+      UREGEX_OFFSET_CAPTURE,
+    ) !=
+      false,
+  );
   VS(print_r($matches, true),
     "Array\n".
     "(\n".
@@ -101,7 +123,7 @@ function test_icu_match() {
     ")\n");
 
   // Test match for 32-bit code points.
-  VERIFY(icu_match(".*", $subject_32, $matches) != false);
+  VERIFY(icu_match_with_matches(".*", $subject_32, inout $matches) != false);
   $expected="\xf0\x90\xa4\x85\xf0\x90\xa4\x85\xf0\x90\xa4".
     "\x85\xf0\x90\xa4\x85\xf0\x90\xa4\x85\xf0\x90\xa4\x85";
   VS(print_r($matches, true),
@@ -111,7 +133,14 @@ function test_icu_match() {
     ")\n");
 
   // Test regex caching functionality.
-  VERIFY(icu_match("(php)", $subject, $ignore, UREGEX_CASE_INSENSITIVE) != false);
+  VERIFY(
+    icu_match(
+      "(php)",
+      $subject,
+      UREGEX_CASE_INSENSITIVE,
+    ) !=
+      false,
+  );
   VERIFY(icu_match("(php)", $subject) == false);
 
   // Test ICU specific (ie bidi) functionality.
@@ -232,8 +261,29 @@ function test_icu_tokenize() {
      "    [12] => sein\n".
      "    [13] => _E_\n".
      ")\n");
+
+  $input_hebrew = "היום יום רביעי, וזה ממש טוב.";
+  $output_hebrew = icu_tokenize($input_hebrew);
+  VS(print_r($output_hebrew, true),
+     "Array\n".
+     "(\n".
+     "    [0] => _B_\n".
+     "    [1] => היום\n".
+     "    [2] => יום\n".
+     "    [3] => רביעי\n".
+     "    [4] => ,\n".
+     "    [5] => וזה\n".
+     "    [6] => ממש\n".
+     "    [7] => טוב\n".
+     "    [8] => .\n".
+     "    [9] => _E_\n".
+     ")\n");
 }
 
+
+<<__EntryPoint>>
+function main_ext_icu() {
 test_icu_match();
 test_icu_transliterate();
 test_icu_tokenize();
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,7 +26,9 @@
 #include "hphp/parser/scanner.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/functional.h"
-#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/hash-map.h"
+
+#include <folly/String.h>
 
 #define IMPLEMENT_XHP_ATTRIBUTES                \
   Token m_xhpAttributes;                        \
@@ -81,8 +83,7 @@ enum ObjPropType {
 
 typedef void* TStatementPtr;
 
-class ParserBase {
-public:
+struct ParserBase {
   enum NameKind {
     StringName,
     VarName,
@@ -91,8 +92,28 @@ public:
     StaticName
   };
 
-  static bool IsClosureName                (const std::string &name);
+  enum class LabelScopeKind {
+    Invalid,
+    LoopSwitch,
+    Finally,
+    Using,
+  };
+
+  static bool IsClosureName(const std::string &name);
+  /*
+   * Is this the name of an anonymous class (either a closure,
+   * or a ClassExpression).
+   */
+  static bool IsAnonymousClassName(folly::StringPiece name);
+
+  static const char* labelScopeName(LabelScopeKind kind);
+
   std::string newClosureName(
+      const std::string &namespaceName,
+      const std::string &className,
+      const std::string &funcName);
+  std::string newAnonClassName(
+      const std::string &prefix,
       const std::string &namespaceName,
       const std::string &className,
       const std::string &funcName);
@@ -138,8 +159,8 @@ public:
   void setRuleLocation(Location *loc) {
     m_loc = *loc;
   }
-  virtual void fatal(const Location* loc, const char* msg) {}
-  virtual void parseFatal(const Location* loc, const char* msg) {}
+  virtual void fatal(const Location* /*loc*/, const char* /*msg*/) {}
+  virtual void parseFatal(const Location* /*loc*/, const char* /*msg*/) {}
 
   void pushFuncLocation();
   Location::Range popFuncLocation();
@@ -156,7 +177,7 @@ public:
 
   // for goto syntax checking
   void pushLabelInfo();
-  void pushLabelScope();
+  void pushLabelScope(LabelScopeKind kind);
   void popLabelScope();
   void addLabel(const std::string &label, const Location::Range& loc,
                 ScannerToken *stmt);
@@ -169,9 +190,6 @@ public:
     InvalidBlock,
   };
 
-  virtual void invalidateGoto(TStatementPtr expr, GotoError error) = 0;
-  virtual void invalidateLabel(TStatementPtr expr) = 0;
-
   virtual TStatementPtr extractStatement(ScannerToken *stmt) = 0;
 
 protected:
@@ -183,11 +201,18 @@ protected:
   std::vector<bool> m_classes; // used to determine if we are currently
                                // inside a regular class or an XHP class
 
+  struct LabelScopeInfo {
+    LabelScopeInfo(LabelScopeKind kind, int id) : kind(kind), id(id) {}
+
+    LabelScopeKind kind;
+    int id;
+  };
+
   struct LabelStmtInfo {
-    int scopeId;
     TStatementPtr stmt;
-    bool inTryCatchBlock;
+    LabelScopeInfo scopeInfo;
     Location::Range loc;
+    bool inTryCatchBlock;
   };
   typedef std::map<std::string, LabelStmtInfo> LabelMap;
     // name => LabelStmtInfo
@@ -198,7 +223,7 @@ protected:
   TypevarScopeStack m_typeScopes;
 
   // for goto syntax checking
-  typedef std::vector<int> LabelScopes;
+  using LabelScopes = std::vector<LabelScopeInfo>;
   struct GotoInfo {
     std::string label;
     LabelScopes scopes;
@@ -206,8 +231,7 @@ protected:
     TStatementPtr stmt;
   };
 
-  class LabelInfo {
-  public:
+  struct LabelInfo {
     LabelInfo() : scopeId(0) {}
     int scopeId;
     LabelScopes scopes;
@@ -227,7 +251,7 @@ protected:
   bool m_nsFileScope;
   std::string m_namespace; // current namespace
   hphp_string_imap<std::string> m_aliases;
-  hphp_string_imap<int> m_seenClosures;
+  hphp_string_imap<int> m_seenAnonClasses;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

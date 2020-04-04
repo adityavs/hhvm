@@ -1,5 +1,6 @@
 #include "hphp/runtime/ext/icu/icu.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/vm/vm-regs.h"
 
 #include <unicode/uchar.h>
@@ -97,17 +98,17 @@ static UBool enumCharType_callback(CallCtx* ctx,
   args[0].m_data.num = start;
   args[1].m_data.num = limit;
   args[2].m_data.num = type;
-  Variant retval;
-  g_context->invokeFuncFew(retval.asTypedValue(), *ctx, 3, args);
+  tvDecRefGen(
+    g_context->invokeFuncFew(*ctx, 3, args)
+  );
   return true;
 }
 
 void HHVM_STATIC_METHOD(IntlChar, enumCharTypes, const Variant& callback) {
   CallCtx ctx;
-  CallerFrame cf;
   ctx.func = nullptr;
   if (!callback.isNull()) {
-    vm_decode_function(callback, cf(), false, ctx);
+    vm_decode_function(callback, ctx);
   }
   if (!ctx.func) {
     s_intl_error->setError(U_INTERNAL_PROGRAM_ERROR,
@@ -164,8 +165,9 @@ static UBool enumCharNames_callback(CallCtx *ctx,
   Variant charName = String(name, length, CopyString);
   tvCopy(*charName.asTypedValue(), args[2]);
 
-  Variant retval;
-  g_context->invokeFuncFew(retval.asTypedValue(), *ctx, 3, args);
+  tvDecRefGen(
+    g_context->invokeFuncFew(*ctx, 3, args)
+  );
   return true;
 }
 
@@ -175,10 +177,9 @@ void HHVM_STATIC_METHOD(IntlChar, enumCharNames,
   GETCP_VOID(vStart, start);
   GETCP_VOID(vLimit, limit);
   CallCtx ctx;
-  CallerFrame cf;
   ctx.func = nullptr;
   if (!callback.isNull()) {
-    vm_decode_function(callback, cf(), false, ctx);
+    vm_decode_function(callback, ctx);
   }
   if (!ctx.func) {
     s_intl_error->setError(U_INTERNAL_PROGRAM_ERROR,
@@ -318,15 +319,15 @@ IC_INT_METHOD_CHAR(charDigitValue)
 #undef IC_INT_METHOD_CHAR
 
 /* All methods which take one UChar32 argument and return bool */
-template<UBool (*T)(UChar32)>
-Variant uchar_method(const Class* self_, const Variant& arg) {
+template <UBool (*T)(UChar32)>
+Variant uchar_method(const Class* /*self_*/, const Variant& arg) {
   GETCP(arg, cp);
   return (bool)T(cp);
 }
 
 /* All methods which take one UChar32 argument and return same */
-template<UChar32 (*T)(UChar32)>
-Variant uchar_method(const Class* self_, const Variant& arg) {
+template <UChar32 (*T)(UChar32)>
+Variant uchar_method(const Class* /*self_*/, const Variant& arg) {
   GETCP(arg, cp);
   auto ret = T(cp);
   if (arg.isString()) {
@@ -342,51 +343,43 @@ Variant uchar_method(const Class* self_, const Variant& arg) {
   }
 }
 
-const StaticString
-  s_IntlChar("IntlChar"),
-  s_UNICODE_VERSION("UNICODE_VERSION"),
-  s_UNICODE_VERSION_value(U_UNICODE_VERSION);
+const StaticString s_IntlChar("IntlChar");
 
 void IntlExtension::initUChar() {
-  Native::registerClassConstant<KindOfStaticString>
-    (s_IntlChar.get(), s_UNICODE_VERSION.get(), s_UNICODE_VERSION_value.get());
+  HHVM_RCC_STR(IntlChar, UNICODE_VERSION, U_UNICODE_VERSION);
 
-#define IC_CONSTL(name, val) Native::registerClassConstant<KindOfInt64> \
-                               (s_IntlChar.get(), makeStaticString(name), val);
-  IC_CONSTL("CODEPOINT_MIN", UCHAR_MIN_VALUE)
-  IC_CONSTL("CODEPOINT_MAX", UCHAR_MAX_VALUE)
-  IC_CONSTL("FOLD_CASE_DEFAULT", U_FOLD_CASE_DEFAULT)
-  IC_CONSTL("FOLD_CASE_EXCLUDE_SPECIAL_I", U_FOLD_CASE_EXCLUDE_SPECIAL_I)
-  Native::registerClassConstant<KindOfDouble>
-  (s_IntlChar.get(), makeStaticString("NO_NUMERIC_VALUE"), U_NO_NUMERIC_VALUE);
+  HHVM_RCC_INT(IntlChar, CODEPOINT_MIN, UCHAR_MIN_VALUE);
+  HHVM_RCC_INT(IntlChar, CODEPOINT_MAX, UCHAR_MAX_VALUE);
+  HHVM_RCC_INT(IntlChar, FOLD_CASE_DEFAULT, U_FOLD_CASE_DEFAULT);
+  HHVM_RCC_INT(IntlChar, FOLD_CASE_EXCLUDE_SPECIAL_I,
+               U_FOLD_CASE_EXCLUDE_SPECIAL_I);
+  HHVM_RCC_DBL(IntlChar, NO_NUMERIC_VALUE, U_NO_NUMERIC_VALUE);
 
-  /* All enums used by the uchar APIs.  There are a LOT of them,
-   * so they're separated out into include files,
-   * leaving this source file for actual implementation.
-   *
-   * Note that these includes are shared between PHP and HHVM
-   */
-#define UPROPERTY(name) IC_CONSTL("PROPERTY_" #name, UCHAR_##name)
+/* All enums used by the uchar APIs.  There are a LOT of them,
+  * so they're separated out into include files,
+  * leaving this source file for actual implementation.
+  *
+  * Note that these includes are shared between PHP and HHVM
+  */
+#define IC_CONSTL(name, val) HHVM_RCC_INT(IntlChar, name, val);
+#define UPROPERTY(name) IC_CONSTL(PROPERTY_##name, UCHAR_##name)
+#define UCHARCATEGORY(name) IC_CONSTL(CHAR_CATEGORY_##name, U_##name)
+#define UCHARDIRECTION(name) IC_CONSTL(CHAR_DIRECTION_##name, U_##name)
+#define UBLOCKCODE(name) IC_CONSTL(BLOCK_CODE_##name, UBLOCK_##name)
+#define UOTHER(name) IC_CONSTL(name, U_##name)
+
 #include "hphp/runtime/ext/icu/uproperty-enum.h"
-#undef UPROPERTY
-
-#define UCHARCATEGORY(name) IC_CONSTL("CHAR_CATEGORY_" #name, U_##name)
 #include "hphp/runtime/ext/icu/ucharcategory-enum.h"
-#undef UCHARCATEGORY
-
-#define UCHARDIRECTION(name) IC_CONSTL("CHAR_DIRECTION_" #name, U_##name)
 #include "hphp/runtime/ext/icu/uchardirection-enum.h"
-#undef UCHARDIRECTION
-
-#define UBLOCKCODE(name) IC_CONSTL("BLOCK_CODE_" #name, UBLOCK_##name)
 #include "hphp/runtime/ext/icu/ublockcode-enum.h"
-#undef UBLOCKCODE
-
   /* Smaller, self-destribing enums */
-#define UOTHER(name) IC_CONSTL(#name, U_##name)
 #include "hphp/runtime/ext/icu/uother-enum.h"
-#undef UOTHER
 
+#undef UPROPERTY
+#undef UCHARCATEGORY
+#undef UCHARDIRECTION
+#undef UBLOCKCODE
+#undef UOTHER
 #undef IC_CONSTL
 
 // Methods returning bool/UChar32 and taking a single UChar32 argument

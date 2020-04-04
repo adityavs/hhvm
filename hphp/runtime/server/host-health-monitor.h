@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,58 +17,58 @@
 #ifndef incl_HPHP_SERVER_MEMORY_PROTECTOR_H_
 #define incl_HPHP_SERVER_MEMORY_PROTECTOR_H_
 
-#include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <memory>
-#include <thread>
-#include <time.h>
-#include <vector>
 #include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <boost/container/flat_set.hpp>
 
-#include "hphp/runtime/server/health-metrics.h"
-#include "hphp/runtime/base/config.h"
-#include "hphp/util/async-func.h"
-#include "hphp/util/logger.h"
-#include "hphp/util/timer.h"
+#include "hphp/util/assertions.h"
+#include "hphp/util/health-monitor-types.h"
+#include "hphp/util/service-data.h"
 
 namespace HPHP {
 
+// This class must be used as a singleton.
 struct HostHealthMonitor {
-  HostHealthMonitor();
-
   void subscribe(IHostHealthObserver* observer) {
-    assert(observer != nullptr);
-    m_observers.push_back(observer);
+    assertx(observer);
+    std::lock_guard<std::mutex> g(m_lock);
+    m_observers.insert(observer);
   }
+  bool unsubscribe(IHostHealthObserver* observer) {
+    std::lock_guard<std::mutex> g(m_lock);
+    return !!m_observers.erase(observer);
+  }
+  void addMetric(IHealthMonitorMetric* metric);
 
   void start();
-  void stop() {
-    {
-      std::unique_lock<std::mutex> guard(m_stopped_lock);
-      m_stopped = true;
-      m_condition.notify_one();
-    }
-    m_monitor_func->waitForEnd();
-  }
+  void stop();
+  void waitForEnd();
 
  private:
   HealthLevel evaluate();
+  // true if the monitoring thread should wake up immediately, used with the
+  // condition variable.
+  bool shouldWakeup() const {
+    return m_stopped.load(std::memory_order_acquire);
+  }
   void notifyObservers(HealthLevel newStatus);
-  void loadMetrics();
   void monitor();
 
-  void registerMetric(IHealthMonitorMetric* metric) {
-    assert(metric != nullptr);
-    m_metrics.push_back(metric);
-  }
-
   std::vector<IHealthMonitorMetric*> m_metrics;
-  std::vector<IHostHealthObserver*> m_observers;
-  HealthLevel m_status;
-  std::mutex m_stopped_lock;
+  boost::container::flat_set<IHostHealthObserver*> m_observers;
+  std::mutex m_lock;                    // protects metrics/observers
+  HealthLevel m_status{HealthLevel::Bold};
+  std::chrono::steady_clock::time_point m_statusTime;
+  ServiceData::ExportedTimeSeries* m_healthLevelCounter{nullptr};
+  std::mutex m_condvar_lock;
   std::condition_variable m_condition;
-  bool m_stopped;
-  std::unique_ptr<AsyncFunc<HostHealthMonitor>> m_monitor_func;
+  std::atomic_bool m_stopped{true};
+  std::unique_ptr<std::thread> m_monitor_thread;
 };
 
 }

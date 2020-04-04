@@ -1,24 +1,27 @@
-<?php
+<?hh
 
-$rait = new RecursiveArrayIterator([
+
+<<__EntryPoint>>
+function main_rtit_key() {
+$rait = new RecursiveArrayIterator(darray[
   'a' => 0,
-  1,
-  'b' => array(
-    2,
-    3,
-    'c'=>array(
+  0 => 1,
+  'b' => darray[
+    0 => 2,
+    1 => 3,
+    'c'=>darray[
       'd'=>4,
-      5
-    ),
-    6,
-    7
-  ),
-  8,
-  9,
-  array(
+      0 => 5
+    ],
+    2 => 6,
+    3 => 7
+  ],
+  1 => 8,
+  2 => 9,
+  3 => varray[
     0,
     1
-  )
+  ]
 ]
 );
 
@@ -32,4 +35,5 @@ foreach($rtit as $key=>$val) {
 
 foreach($rtit_bypass as $key=>$val) {
   var_dump($rtit_bypass->key());
+}
 }

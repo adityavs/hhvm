@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,12 +17,12 @@
 
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/ext/simplexml/ext_simplexml.h"
 #include "hphp/runtime/ext/domdocument/ext_domdocument.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/libxml/ext_libxml.h"
 #include "hphp/util/string-vsnprintf.h"
 
@@ -45,7 +45,9 @@ const int64_t k_XSL_SECPREF_WRITE_FILE        = 4;
 const int64_t k_XSL_SECPREF_CREATE_DIRECTORY  = 8;
 const int64_t k_XSL_SECPREF_READ_NETWORK      = 16;
 const int64_t k_XSL_SECPREF_WRITE_NETWORK     = 32;
-const int64_t k_XSL_SECPREF_DEFAULT           = 44;
+const int64_t k_XSL_SECPREF_DEFAULT = k_XSL_SECPREF_WRITE_FILE |
+                                      k_XSL_SECPREF_CREATE_DIRECTORY |
+                                      k_XSL_SECPREF_WRITE_NETWORK;
 
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
@@ -193,8 +195,8 @@ xmlDocPtr XSLTProcessorData::apply_stylesheet() {
   );
 
   for (ArrayIter iter(m_params); iter; ++iter) {
-    assert(iter.first().isString());
-    assert(iter.second().isString());
+    assertx(iter.first().isString());
+    assertx(iter.second().isString());
 
     xmlChar *value = xslt_string_to_xpathexpr(iter.second().toString().c_str());
     if (value) {
@@ -212,7 +214,7 @@ xmlDocPtr XSLTProcessorData::apply_stylesheet() {
     profile = fopen(m_profile.data(), "w");
   }
 
-  assert(m_usedElements.empty());
+  assertx(m_usedElements.empty());
   xmlDocPtr res = xsltApplyStylesheetUser(m_stylesheet,
                                           doc(),
                                           nullptr,
@@ -311,6 +313,10 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   for (int i = nargs - 2; i >= 0; i--) {
     Variant arg;
     obj = valuePop(ctxt);
+    if (obj == nullptr) {
+      args.prepend(init_null());
+      continue;
+    }
     switch (obj->type) {
     case XPATH_STRING:
       arg = String((char*)obj->stringval, CopyString);
@@ -336,23 +342,23 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
             if (node->type == XML_ELEMENT_NODE) {
               Object element = newNode(s_DOMElement,
                                        xmlCopyNode(node, /*extended*/ 1));
-              arg.toArrRef().append(element);
+              arg.asArrRef().append(element);
             } else if (node->type == XML_ATTRIBUTE_NODE) {
               Object attribute =
                 newNode(s_DOMAttr,
                         (xmlNodePtr)xmlCopyProp(nullptr, (xmlAttrPtr)node));
-              arg.toArrRef().append(attribute);
+              arg.asArrRef().append(attribute);
             } else if (node->type == XML_TEXT_NODE) {
               Object text =
                 newNode(s_DOMText,
                         (xmlNodePtr)xmlNewText(xmlNodeGetContent(node)));
-              arg.toArrRef().append(text);
+              arg.asArrRef().append(text);
             } else {
               raise_warning("Unhandled node type '%d'", node->type);
               // Use a generic DOMNode as fallback for now.
               Object nodeobj = newNode(s_DOMNode,
                                        xmlCopyNode(node, /*extended*/ 1));
-              arg.toArrRef().append(nodeobj);
+              arg.asArrRef().append(nodeobj);
             }
           }
         }
@@ -366,7 +372,7 @@ static void xslt_ext_function_php(xmlXPathParserContextPtr ctxt,
   }
 
   obj = valuePop(ctxt);
-  if (obj->stringval == nullptr) {
+  if ((obj == nullptr) || (obj->stringval == nullptr)) {
     raise_warning("Handler name must be a string");
     xmlXPathFreeObject(obj);
     // Push an empty string to get an xslt result.
@@ -416,8 +422,7 @@ static void xslt_ext_function_object_php(xmlXPathParserContextPtr ctxt,
   xslt_ext_function_php(ctxt, nargs, 2);
 }
 
-static void xslt_ext_error_handler(void *ctx,
-                                   const char *fmt, ...) {
+static void xslt_ext_error_handler(void* /*ctx*/, const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
   try {
@@ -437,14 +442,14 @@ static void xslt_ext_error_handler(void *ctx,
 ///////////////////////////////////////////////////////////////////////////////
 // methods
 
-static Variant HHVM_METHOD(XSLTProcessor, getParameter,
-                        const Variant& namespaceURI,
-                        const String& localName) {
+static Variant
+HHVM_METHOD(XSLTProcessor, getParameter, const Variant& /*namespaceURI*/,
+            const String& localName) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
   // namespaceURI argument is unused in PHP5 XSL extension.
   if (data->m_params.exists(localName)) {
-    assert(data->m_params[localName].isString());
+    assertx(data->m_params[localName].isString());
     return data->m_params[localName].toString();
   }
 
@@ -493,14 +498,14 @@ static void HHVM_METHOD(XSLTProcessor, importStylesheet,
   }
 }
 
-static bool HHVM_METHOD(XSLTProcessor, removeParameter,
-                        const Variant& namespaceURI,
-                        const String& localName) {
+static bool
+HHVM_METHOD(XSLTProcessor, removeParameter, const Variant& /*namespaceURI*/,
+            const String& localName) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
   // namespaceURI argument is unused in PHP5 XSL extension.
   if (data->m_params.exists(localName)) {
-    assert(data->m_params[localName].isString());
+    assertx(data->m_params[localName].isString());
     data->m_params.remove(localName);
 
     return true;
@@ -510,7 +515,7 @@ static bool HHVM_METHOD(XSLTProcessor, removeParameter,
 }
 
 static void HHVM_METHOD(XSLTProcessor, registerPHPFunctions,
-                        const Variant& funcs /*= null_variant*/) {
+                        const Variant& funcs /*= uninit_variant*/) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
   if (funcs.isNull()) {
@@ -536,30 +541,21 @@ static void HHVM_METHOD(XSLTProcessor, registerPHPFunctions,
   }
 }
 
-static bool HHVM_METHOD(XSLTProcessor, setParameter,
-                        const Variant& namespaceURI,
-                        const Variant& localName,
-                        const Variant& value /*= null_variant*/) {
+static bool
+HHVM_METHOD(XSLTProcessor, setParameter, const Variant& /*namespaceURI*/,
+            const Variant& localName,
+            const Variant& value /*= uninit_variant*/) {
   auto data = Native::data<XSLTProcessorData>(this_);
 
   // namespaceURI argument is unused in PHP5 XSL extension.
   if (localName.isString() && value.isString()) {
-    if (data->m_params.exists(localName)) {
-      data->m_params.set(localName, value);
-    } else {
-      data->m_params.add(localName, value);
-    }
-
+    data->m_params.set(localName, value);
     return true;
   } else if (localName.isArray() && value.isNull()) {
     int ret = true;
     for (ArrayIter iter(localName); iter; ++iter) {
       if (iter.first().isString() && iter.second().isString()) {
-        if (data->m_params.exists(iter.first().toString())) {
-          data->m_params.set(iter.first().toString(), iter.second().toString());
-        } else {
-          data->m_params.add(iter.first().toString(), iter.second().toString());
-        }
+        data->m_params.set(iter.first().toString(), iter.second().toString());
       } else {
         ret = false;
       }
@@ -594,6 +590,10 @@ static int64_t HHVM_METHOD(XSLTProcessor, setSecurityPrefs,
 static bool HHVM_METHOD(XSLTProcessor, setProfiling,
                         const String& filename) {
   auto data = Native::data<XSLTProcessorData>(this_);
+
+  if (!FileUtil::checkPathAndWarn(filename, "XSLTProcessor::setProfiling", 1)) {
+    return false;
+  }
 
   if (filename.length() > 0) {
     String translated = File::TranslatePath(filename);
@@ -632,6 +632,10 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToURI,
                            const Object& doc,
                            const String& uri) {
   auto data = Native::data<XSLTProcessorData>(this_);
+
+  if (!FileUtil::checkPathAndWarn(uri, "XSLTProcessor::transformToUri", 2)) {
+    return false;
+  }
 
   if (doc.instanceof(s_DOMDocument)) {
     auto domdoc = Native::data<DOMNode>(doc);
@@ -701,54 +705,22 @@ static Variant HHVM_METHOD(XSLTProcessor, transformToXML,
 ///////////////////////////////////////////////////////////////////////////////
 // extension
 
-const StaticString s_XSL_SECPREF_NONE("XSL_SECPREF_NONE");
-const StaticString s_XSL_SECPREF_READ_FILE("XSL_SECPREF_READ_FILE");
-const StaticString s_XSL_SECPREF_WRITE_FILE("XSL_SECPREF_WRITE_FILE");
-const StaticString
-  s_XSL_SECPREF_CREATE_DIRECTORY("XSL_SECPREF_CREATE_DIRECTORY");
-const StaticString s_XSL_SECPREF_READ_NETWORK("XSL_SECPREF_READ_NETWORK");
-const StaticString s_XSL_SECPREF_WRITE_NETWORK("XSL_SECPREF_WRITE_NETWORK");
-const StaticString s_XSL_SECPREF_DEFAULT("XSL_SECPREF_DEFAULT");
-
-const StaticString s_xslt_version("LIBXSLT_VERSION");
-const StaticString s_xslt_dotted_version("LIBXSLT_DOTTED_VERSION");
-const StaticString s_xslt_dotted_version_value(LIBXSLT_DOTTED_VERSION);
-
-class XSLExtension final : public Extension {
-  public:
+struct XSLExtension final : Extension {
     XSLExtension() : Extension("xsl", "0.1") {};
 
     void moduleInit() override {
       xsltSetGenericErrorFunc(nullptr, xslt_ext_error_handler);
       exsltRegisterAll();
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_NONE.get(), k_XSL_SECPREF_NONE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_READ_FILE.get(), k_XSL_SECPREF_READ_FILE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_WRITE_FILE.get(), k_XSL_SECPREF_WRITE_FILE
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_CREATE_DIRECTORY.get(), k_XSL_SECPREF_CREATE_DIRECTORY
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_READ_NETWORK.get(), k_XSL_SECPREF_READ_NETWORK
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_WRITE_NETWORK.get(), k_XSL_SECPREF_WRITE_NETWORK
-      );
-      Native::registerConstant<KindOfInt64>(
-        s_XSL_SECPREF_DEFAULT.get(), k_XSL_SECPREF_DEFAULT
-      );
+      HHVM_RC_INT(XSL_SECPREF_NONE, k_XSL_SECPREF_NONE);
+      HHVM_RC_INT(XSL_SECPREF_READ_FILE, k_XSL_SECPREF_READ_FILE);
+      HHVM_RC_INT(XSL_SECPREF_WRITE_FILE, k_XSL_SECPREF_WRITE_FILE);
+      HHVM_RC_INT(XSL_SECPREF_CREATE_DIRECTORY, k_XSL_SECPREF_CREATE_DIRECTORY);
+      HHVM_RC_INT(XSL_SECPREF_READ_NETWORK, k_XSL_SECPREF_READ_NETWORK);
+      HHVM_RC_INT(XSL_SECPREF_WRITE_NETWORK, k_XSL_SECPREF_WRITE_NETWORK);
+      HHVM_RC_INT(XSL_SECPREF_DEFAULT, k_XSL_SECPREF_DEFAULT);
 
-      Native::registerConstant<KindOfInt64>(
-        s_xslt_version.get(), LIBXSLT_VERSION
-      );
-      Native::registerConstant<KindOfString>(
-        s_xslt_dotted_version.get(), s_xslt_dotted_version_value.get()
-      );
+      HHVM_RC_INT_SAME(LIBXSLT_VERSION);
+      HHVM_RC_STR_SAME(LIBXSLT_DOTTED_VERSION);
 
       HHVM_ME(XSLTProcessor, getParameter);
       HHVM_ME(XSLTProcessor, getSecurityPrefs);

@@ -1,6 +1,6 @@
-<?php
+<?hh
 
-function main() {
+<<__EntryPoint>> function main(): void {
   print "Test begin\n";
 
   $x = "Hello";
@@ -12,12 +12,12 @@ function main() {
     print "$i: $r\n";
   }
 
-  function testEval(&$i) {
+  $testEval = function (inout $i) {
     eval('$i *= 33;');
-  }
+  };
   $i = 1;
   while ($i < 100000) {
-    testEval($i);
+    $testEval(inout $i);
     var_dump($i);
   }
 
@@ -27,4 +27,3 @@ function main() {
 
   print "Test end\n";
 }
-main();

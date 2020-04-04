@@ -1,7 +1,6 @@
-<?php
+<?hh
 class Test {
-	function __get($x,$y) {
-	}
+    function __get($x,$y) {
+    }
 }
 
-?>

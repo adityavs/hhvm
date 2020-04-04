@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,56 +18,92 @@
 #define incl_HPHP_PROCESS_H_
 
 #include <string>
-#include <vector>
-#include <cstdio>
 
-#include <sys/types.h>
+#include <folly/portability/Unistd.h>
+
 #ifdef _MSC_VER
 # include <windows.h>
 #else
 # include <sys/syscall.h>
-# include <unistd.h>
 #endif
+
 #include <pthread.h>
+#include <signal.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-// helper class
 
-class CPipe {
-public:
-  CPipe()  { m_fds[0] = m_fds[1] = 0;}
-  ~CPipe() { close();}
+/*
+ * System-wide memory infomation from /proc/meminfo
+ */
+struct MemInfo {
+  int64_t totalMb{-1};
+  int64_t freeMb{-1};
+  int64_t cachedMb{-1};
+  int64_t buffersMb{-1};
+  int64_t availableMb{-1};
+  bool valid() const {
+    return (totalMb | freeMb | cachedMb | buffersMb | availableMb) >= 0;
+  }
+};
 
-  bool open()  { close(); return !pipe(m_fds);}
-  void close() {
-    for (int i = 0; i <= 1; i++) {
-      if (m_fds[i]) {
-        ::close(m_fds[i]);
-        m_fds[i] = 0;
-      }
-    }
+/*
+ * Infomation from /proc/self/status, along with other HHVM-specific memory
+ * usage data.
+ *
+ * Kernel documentation: http://man7.org/linux/man-pages/man5/proc.5.html
+ */
+struct ProcStatus {
+  int64_t VmSizeKb{-1};                 // virtual memory size
+  int64_t VmRSSKb{-1};                  // RSS, not including hugetlb pages
+  int64_t VmHWMKb{-1};                  // peak RSS
+  int64_t HugetlbPagesKb{0};            // Hugetlb mappings (2M + 1G)
+
+  // 'Real' memory usage that includes VMRSS and HugetlbPages, but excludes
+  // unused space held by jemalloc.  This is mostly used to track regressions.
+  int64_t adjustedRSSKb{-1};
+
+  // Number of threads running in the current process.
+  int Threads{-1};
+
+  // Constructor reads /proc/self/status and fill in the fields.
+  ProcStatus();
+  // Subtrace memory that is mapped in but unused.
+  void registerUnused(int64_t unusedKb) {
+    auto const r = adjustedRSSKb - unusedKb;
+    if (r >= 0) adjustedRSSKb = r;
   }
 
-  int getIn() const  { return m_fds[1];}
-  int getOut() const { return m_fds[0];}
-  int detachIn()  { int fd = m_fds[1]; m_fds[1] = 0; return fd;}
-  int detachOut() { int fd = m_fds[0]; m_fds[0] = 0; return fd;}
-  bool dupIn2(int fd) { return dup2(m_fds[1], fd) >= 0;}
-  bool dupOut2(int fd) { return dup2(m_fds[0], fd) >= 0;}
-
-private:
-  int m_fds[2];
+  bool valid() const {
+    return VmSizeKb > 0 && VmRSSKb > 0 && VmHWMKb > 0 &&
+      HugetlbPagesKb >= 0 &&
+      Threads > 0;
+  }
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class Process {
-public:
+struct Process {
+  // The maximum supported signal number is kNSig - 1.
+  static constexpr unsigned kNSig =
+#if defined(NSIG)
+    NSIG
+#elif defined(_NSIG)
+    _NSIG
+#else
+    64
+#endif
+    ;
+
   // Cached process statics
   static std::string HostName;
   static std::string CurrentWorkingDirectory;
+  static char** Argv;
+
   static void InitProcessStatics();
+  static void RecordArgv(char** argv) { // only call this in main()
+    Argv = argv;
+  }
 
   /**
    * Current executable's name.
@@ -80,38 +116,32 @@ public:
   static std::string GetHostName();
 
   /**
-   * Process identifier.
-   */
-  static pid_t GetProcessId() {
-    return getpid();
-  }
-
-  /**
-   * Parent's process identifier.
-   */
-  static pid_t GetParentProcessId() {
-    return getppid();
-  }
-
-  /**
-   * Search for a process by command line. If matchAll is false, only binary
-   * file's name, not the whole path + command line options, will be matched.
-   */
-  static pid_t GetProcessId(const std::string &cmd, bool matchAll = false);
-  static void GetProcessId(const std::string &cmd, std::vector<pid_t> &pids,
-                           bool matchAll = false);
-
-  /**
    * Get command line with a process ID.
    */
   static std::string GetCommandLine(pid_t pid);
-  static bool CommandStartsWith(pid_t pid, const std::string &cmd);
+
+  /**
+   * Check if the current process is being run under GDB.  Will return false if
+   * we're unable to read /proc/{getpid()}/status.
+   */
   static bool IsUnderGDB();
 
   /**
    * Get memory usage in MB by a process.
    */
-  static int64_t GetProcessRSS(pid_t pid);
+  static int64_t GetMemUsageMb();
+
+  /**
+   * Get the number of threads running in the current process.
+   */
+  static int GetNumThreads();
+
+  /**
+   * Get system-wide memory usage information.  Returns false upon
+   * failure.  Note that previous value of `info` is reset, even upon
+   * failure.
+   */
+  static bool GetMemoryInfo(MemInfo& info);
 
   /**
    * Current thread's identifier.
@@ -147,8 +177,6 @@ public:
     syscall(SYS_thr_self, &tid);
     return (pid_t) tid;
 # endif
-#elif defined(__CYGWIN__) || defined(__MINGW__)
-    return (long)pthread_self();
 #elif defined(_MSC_VER)
     return GetCurrentThreadId();
 #else
@@ -160,7 +188,7 @@ public:
    * Are we in the main thread still?
    */
   static bool IsInMainThread() {
-    return Process::GetThreadPid() == Process::GetProcessId();
+    return Process::GetThreadPid() == getpid();
   }
 
   /**
@@ -168,11 +196,6 @@ public:
    */
   static int GetCPUCount();
   static std::string GetCPUModel();
-
-  /**
-   * Get binary code footprint in bytes.
-   */
-  static size_t GetCodeFootprint(pid_t pid);
 
   /**
    * Get current working directory.
@@ -189,50 +212,27 @@ public:
    */
   static std::string GetHomeDirectory();
 
-public:
   /**
-   * Execute an external program.
-   *
-   * @param   path   binary file's full path
-   * @param   argv   argument array
-   * @param   in     stdin
-   * @param   out    stdout
-   * @param   err    stderr; NULL for don't care
-   * @return         true if program was executed, even if there was stderr;
-   *                 false if anything failed and unable to run the specified
-   *                 program
+   * Set core dump filters to make sure hugetlb pages are included in coredumps.
    */
-  static bool Exec(const char *path, const char *argv[], const char *in,
-                   std::string &out, std::string *err = nullptr,
-                   bool color = false);
+  static void SetCoreDumpHugePages();
 
-  /**
-   * Execute an external program.
-   *
-   * @param   cmd    command line
-   * @param   outf   save stdout to this file
-   * @param   errf   save stderr to this file
-   * @return         exit code of the program
+  /*
+   * Write to /proc/self/oom_score_adj (for Linux only).  This affects the OOM
+   * killer when it decides which process to kill.  Valid values are between
+   * -1000 and 1000.  Lower values makes it less likely for the process to be
+   * killed.  In particular, -1000 disables the OOM killer completely for the
+   * current process.  Returns whether adjustment was successful.
    */
-  static int Exec(const std::string &cmd, const std::string &outf,
-                  const std::string &errf);
-
-  /**
-   * Daemonize current process.
+  static bool OOMScoreAdj(int adj = 1000);
+  /*
+   * Sometimes we want to relaunch under modified environment.  It won't return
+   * upon success, and returns -1 when an error occurs (similar to exec()).
    */
-  static void Daemonize(const char *stdoutFile = "/dev/null",
-                        const char *stderrFile = "/dev/null");
-
-private:
-  static int Exec(const char *path, const char *argv[], int *fdin, int *fdout,
-                  int *fderr
-#ifdef _MSC_VER
-                  , PROCESS_INFORMATION* procInfo
-#endif
-                 );
+  static int Relaunch();
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 }
 
-#endif // incl_HPHP_PROCESS_H_
+#endif

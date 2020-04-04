@@ -506,7 +506,7 @@ static NEOERR* _set_value (HDF *hdf, const char *name, const char *value,
       hdf->value = strdup(value);
       if (hdf->value == NULL)
 	return nerr_raise (NERR_NOMEM, "Unable to duplicate value %s for %s",
-	    value, name);
+	    value, hdf->name);
     }
     else
     {
@@ -706,12 +706,6 @@ skip_search:
 NEOERR* hdf_set_value (HDF *hdf, const char *name, const char *value)
 {
   return nerr_pass(_set_value (hdf, name, value, 1, 1, 0, NULL, NULL));
-}
-
-NEOERR* hdf_set_value_attr (HDF *hdf, const char *name, const char *value,
-                            HDF_ATTR *attr)
-{
-  return nerr_pass(_set_value (hdf, name, value, 1, 1, 0, attr, NULL));
 }
 
 NEOERR* hdf_get_node (HDF *hdf, const char *name, HDF **ret)
@@ -973,6 +967,7 @@ static NEOERR* hdf_dump_cb(HDF *hdf, const char *prefix, int dtype, int lvl,
 	if (err) return nerr_pass(err);
 	while (attr != NULL)
 	{
+    //#undef strcmp
 	  if (attr->value == NULL || !strcmp(attr->value, "1"))
 	    err = dump_cbf(rock, "%s", attr->key);
 	  else
@@ -1190,7 +1185,7 @@ static NEOERR* parse_attr(char **str, HDF_ATTR **attr)
     if (*s == '\0' || k_l == 0)
     {
       _dealloc_hdf_attr(attr);
-      return nerr_raise(NERR_PARSE, "Misformed attribute specification: %s", *str);
+      return nerr_raise(NERR_PARSE, "Malformed attribute specification: %s", *str);
     }
     SKIPWS(s);
     if (*s == '=')
@@ -1245,7 +1240,7 @@ static NEOERR* parse_attr(char **str, HDF_ATTR **attr)
 	{
 	  _dealloc_hdf_attr(attr);
 	  string_clear(&buf);
-	  return nerr_raise(NERR_PARSE, "Misformed attribute specification: %s", *str);
+	  return nerr_raise(NERR_PARSE, "Malformed attribute specification: %s", *str);
 	}
 	s++;
 	v = buf.buf;
@@ -1258,7 +1253,7 @@ static NEOERR* parse_attr(char **str, HDF_ATTR **attr)
 	if (*s == '\0')
 	{
 	  _dealloc_hdf_attr(attr);
-	  return nerr_raise(NERR_PARSE, "Misformed attribute specification: %s", *str);
+	  return nerr_raise(NERR_PARSE, "Malformed attribute specification: %s", *str);
 	}
         v_l = s-v;
       }
@@ -1299,7 +1294,7 @@ static NEOERR* parse_attr(char **str, HDF_ATTR **attr)
   if (*s == '\0')
   {
     _dealloc_hdf_attr(attr);
-    return nerr_raise(NERR_PARSE, "Misformed attribute specification: %s", *str);
+    return nerr_raise(NERR_PARSE, "Malformed attribute specification: %s", *str);
   }
   *str = s+1;
   return STATUS_OK;
@@ -1702,4 +1697,3 @@ NEOERR* hdf_read_file (HDF *hdf, const char *path)
   err = hdf_read_file_internal (hdf, path, INCLUDE_FILE);
   return nerr_pass(err);
 }
-

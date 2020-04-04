@@ -1,17 +1,16 @@
-<?php
+<?hh
 
-function using($cgen) {
+function using_($cgen) {
   foreach ($cgen() as $x) {
     yield $x;
   }
 }
 
 function broke() {
-    foreach (using(function() { yield 1; yield 2; yield 3; }) as $x) {
+    foreach (using_(function() { yield 1; yield 2; yield 3; }) as $x) {
       var_dump($x);
     }
 }
-broke();
 
 class c {
   function genclo() {
@@ -28,4 +27,8 @@ function main() {
     var_dump($v);
   }
 }
-main();
+<<__EntryPoint>>
+function main_entry(): void {
+  broke();
+  main();
+}

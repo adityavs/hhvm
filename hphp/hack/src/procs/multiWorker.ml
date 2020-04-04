@@ -1,99 +1,121 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-open Core
+module Hh_bucket = Bucket
+open Core_kernel
 
-type 'a bucket =
-| Job of 'a list
-| Wait
+(* Hide the worker type from our users *)
+type worker = WorkerController.worker
 
-type 'a nextlist_dynamic =
-  unit -> 'a bucket
+type 'a interrupt_config = 'a MultiThreadedCall.interrupt_config
 
-let single_threaded_call_dynamic job merge neutral next =
-  let x = ref (next()) in
+let single_threaded_call_with_worker_id job merge neutral next =
+  let x = ref (next ()) in
   let acc = ref neutral in
   (* This is a just a sanity check that the job is serializable and so
    * that the same code will work both in single threaded and parallel
    * mode.
    *)
   let _ = Marshal.to_string job [Marshal.Closures] in
-  while !x <> Job [] do
+  while !x <> Hh_bucket.Done do
     match !x with
-    | Wait ->
-        (* this state should never be reached in single threaded mode, since
+    | Hh_bucket.Wait ->
+      (* this state should never be reached in single threaded mode, since
            there is no hope for ever getting out of this state *)
-        failwith "stuck!"
-    | Job l ->
-        let res = job neutral l in
-        acc := merge !acc res;
-        x := next()
+      failwith "stuck!"
+    | Hh_bucket.Job l ->
+      let res = job (0, neutral) l in
+      acc := merge (0, res) !acc;
+      x := next ()
+    | Hh_bucket.Done -> ()
   done;
   !acc
 
-let call_dynamic workers ~job ~merge ~neutral ~next =
-  match workers with
-  | None -> single_threaded_call_dynamic job merge neutral next
-  | Some workers ->
-    let acc = ref neutral in
-    let procs = ref workers in
-    let busy = ref 0 in
-    let waiting_procs = ref [] in
-      try
-        while true do
-          List.iter !procs begin fun proc ->
-            let bucket_opt = next () in
-            match bucket_opt with
-            | Wait -> waiting_procs := proc::!waiting_procs (* wait *)
-            | Job bucket -> (
-              if bucket = [] then raise Exit;
-              incr busy;
-              ignore (Worker.call proc
-                        begin fun xl ->
-                          job neutral xl
-                        end
-                        bucket
-              );
-            )
-          end;
-          let ready_procs = Worker.select workers in
-          List.iter ready_procs begin fun proc ->
-            let res = Worker.get_result proc (Obj.magic 0) in
-            decr busy;
-            acc := merge res !acc
-          end;
-          if ready_procs = [] then
-            (* nothing changed, so no use calling next with the waiting procs,
-               since they would end up waiting again *)
-            procs := []
-          else (
-            (* call next with read_procs and waiting_procs *)
-            procs := List.rev_append !waiting_procs ready_procs;
-            waiting_procs := [];
-          )
-        done;
-        assert false
-      with Exit ->
-        while !busy > 0 do
-          List.iter (Worker.select workers) begin fun proc ->
-            let res = Worker.get_result proc (Obj.magic 0) in
-            decr busy;
-            acc := merge res !acc;
-          end;
-        done;
-        !acc
+let single_threaded_call job merge neutral next =
+  let job (_worker_id, a) b = job a b in
+  let merge (_worker_id, a) b = merge a b in
+  single_threaded_call_with_worker_id job merge neutral next
 
-(* special case of call_dynamic with no waiting, useful for static worklists *)
-type 'a nextlist =
-  unit -> 'a list
+module type CALLER = sig
+  type 'a result
+
+  val return : 'a -> 'a result
+
+  val multi_threaded_call :
+    WorkerController.worker list ->
+    (WorkerController.worker_id * 'c -> 'a -> 'b) ->
+    (WorkerController.worker_id * 'b -> 'c -> 'c) ->
+    'c ->
+    'a Hh_bucket.next ->
+    'c result
+end
+
+module CallFunctor (Caller : CALLER) : sig
+  val call :
+    WorkerController.worker list option ->
+    job:(WorkerController.worker_id * 'c -> 'a -> 'b) ->
+    merge:(WorkerController.worker_id * 'b -> 'c -> 'c) ->
+    neutral:'c ->
+    next:'a Hh_bucket.next ->
+    'c Caller.result
+end = struct
+  let call workers ~job ~merge ~neutral ~next =
+    match workers with
+    | None ->
+      Caller.return (single_threaded_call_with_worker_id job merge neutral next)
+    | Some workers -> Caller.multi_threaded_call workers job merge neutral next
+end
+
+module Call = CallFunctor (struct
+  type 'a result = 'a
+
+  let return x = x
+
+  let multi_threaded_call = MultiThreadedCall.call_with_worker_id
+end)
+
+let call_with_worker_id = Call.call
 
 let call workers ~job ~merge ~neutral ~next =
-  let next = fun () -> Job (next ()) in
-  call_dynamic workers ~job ~merge ~neutral ~next
+  let job (_worker_id, a) b = job a b in
+  let merge (_worker_id, a) b = merge a b in
+  Call.call workers ~job ~merge ~neutral ~next
+
+(* If we ever want this in MultiWorkerLwt then move this into CallFunctor *)
+let call_with_interrupt
+    ?on_cancelled workers ~job ~merge ~neutral ~next ~interrupt =
+  match workers with
+  | Some workers when List.length workers <> 0 ->
+    Hh_logger.log
+      "MultiThreadedCall.call_with_interrupt called with %d workers"
+      (List.length workers);
+    MultiThreadedCall.call_with_interrupt
+      ?on_cancelled
+      workers
+      job
+      merge
+      neutral
+      next
+      interrupt
+  | _ ->
+    Hh_logger.log "single_threaded_call called with zero workers";
+    ( single_threaded_call job merge neutral next,
+      interrupt.MultiThreadedCall.env,
+      [] )
+
+let next ?progress_fn ?max_size workers =
+  Hh_bucket.make
+    ~num_workers:
+      (match workers with
+      | Some w -> List.length w
+      | None -> 1)
+    ?progress_fn
+    ?max_size
+
+let make = WorkerController.make

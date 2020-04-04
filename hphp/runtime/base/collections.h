@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,17 +20,19 @@
 #include <folly/Optional.h>
 
 #include "hphp/runtime/base/header-kind.h"
+#include "hphp/runtime/base/tv-val.h"
 #include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
-class ArrayData;
-class c_Pair;
-class c_Vector;
-class c_ImmVector;
-class c_Map;
-class c_ImmMap;
-class c_Set;
-class c_ImmSet;
+struct ArrayData;
+struct Class;
+struct c_Pair;
+struct c_Vector;
+struct c_ImmVector;
+struct c_Map;
+struct c_ImmMap;
+struct c_Set;
+struct c_ImmSet;
 }
 
 namespace HPHP { namespace collections {
@@ -78,13 +80,10 @@ inline ObjectData* alloc(CollectionType ctype, ArrayData* arr) {
   return allocFromArrayFunc(ctype)(arr);
 }
 
-/* Preallocate room for {sz} elements in the Collection */
-void reserve(ObjectData* obj, int64_t sz);
-
-/* Used by Collections Literals syntax for Maps */
-void initMapElem(ObjectData* obj, TypedValue* key, TypedValue* val);
-/* Used by Collections Literals syntax for non-Maps */
-void initElem(ObjectData* obj, TypedValue* val);
+/*
+ * Creates a Pair. Takes ownership of the TypedValues passed in.
+ */
+ObjectData* allocPair(TypedValue c1, TypedValue c2);
 
 /////////////////////////////////////////////////////////////////////////////
 // Casting and Cloing
@@ -95,11 +94,13 @@ bool isType(const Class* cls, CollectionType type, Args... args) {
   return isType(cls, type) || isType(cls, args...);
 }
 
+template <IntishCast IC = IntishCast::None>
 Array toArray(const ObjectData* obj);
+
 bool toBool(const ObjectData* obj);
 ObjectData* clone(ObjectData* obj);
 
-void deepCopy(TypedValue* tv);
+void deepCopy(tv_lval tv);
 
 /*
  * Return the inner-array for array-backed collections, and nullptr if it's a
@@ -117,30 +118,28 @@ inline const ArrayData* asArray(const ObjectData* obj) {
  * If the key does not exist in the collection, at() will throw an exception
  * while get() will return nullptr
  */
-TypedValue* at(ObjectData* obj, const TypedValue* key);
-TypedValue* get(ObjectData* obj, const TypedValue* key);
+tv_lval at(ObjectData* obj, const TypedValue* key);
+tv_lval get(ObjectData* obj, const TypedValue* key);
 
 /* atLval() is used to get the address of an element when the
  * caller is NOT going to do direct write per se, but it intends to use
  * the element as the base of a member operation in an "lvalue" context
  * (which could mutate the element in various ways).
  */
-TypedValue* atLval(ObjectData* obj, const TypedValue* key);
+tv_lval atLval(ObjectData* obj, const TypedValue* key);
 
 /* atRw() is used to get the address of an element for reading
  * and writing. It is typically used for read-modify-write operations (the
  * SetOp* and IncDec* instructions).
  */
-TypedValue* atRw(ObjectData* obj, const TypedValue* key);
+tv_lval atRw(ObjectData* obj, const TypedValue* key);
 
 /* Check for {key} within {obj} Collection
  * `contains` merely need to exist
  * `isset` needs to exist and not be null
- * `empty` needs to exist and not be falsy
  */
 bool contains(ObjectData* obj, const Variant& offset);
-bool isset(ObjectData* obj, const TypedValue* key);
-bool empty(ObjectData* obj, const TypedValue* key);
+bool (isset)(ObjectData* obj, const TypedValue* key);
 
 /* Remove element {key} from Collection {obj} */
 void unset(ObjectData* obj, const TypedValue* key);
@@ -192,7 +191,7 @@ inline folly::Optional<CollectionType> stringToType(const std::string& s) {
 }
 
 inline bool isTypeName(const StringData* str) {
-  return stringToType(str).hasValue();
+  return stringToType(str).has_value();
 }
 
 /////////////////////////////////////////////////////////////////////////////

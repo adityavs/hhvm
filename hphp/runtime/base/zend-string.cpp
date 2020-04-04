@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -15,87 +15,37 @@
    +----------------------------------------------------------------------+
 */
 
+// NOTE: See also "hphp/zend/zend-string.*".
+
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/zend-math.h"
 
 #include "hphp/util/lock.h"
 #include "hphp/util/overflow.h"
-#include <math.h>
+
+#include "hphp/zend/zend-math.h"
+
+#include <algorithm>
+#include <cmath>
+
+#ifndef _MSC_VER
 #include <monetary.h>
+#endif
 
 #include "hphp/util/bstring.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/runtime-error.h"
-#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/builtin-functions.h"
 
-#ifdef __APPLE__
-#ifndef isnan
-#define isnan(x)  \
-  ( sizeof (x) == sizeof(float )  ? __inline_isnanf((float)(x)) \
-  : sizeof (x) == sizeof(double)  ? __inline_isnand((double)(x))  \
-  : __inline_isnan ((long double)(x)))
-#endif
-
-#ifndef isinf
-#define isinf(x)  \
-  ( sizeof (x) == sizeof(float )  ? __inline_isinff((float)(x)) \
-  : sizeof (x) == sizeof(double)  ? __inline_isinfd((double)(x))  \
-  : __inline_isinf ((long double)(x)))
-#endif
-#endif
-
+#include <folly/portability/String.h>
 
 #define PHP_QPRINT_MAXL 75
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
-
-bool string_substr_check(int len, int &f, int &l) {
-  if (l < 0 && -l > len) {
-    return false;
-  } else if (l > len) {
-    l = len;
-  }
-
-  if (f > len) {
-    return false;
-  } else if (f < 0 && -f > len) {
-    f = 0;
-  }
-
-  if (l < 0 && (l + len - f) < 0) {
-    return false;
-  }
-
-  // if "from" position is negative, count start position from the end
-  if (f < 0) {
-    f += len;
-    if (f < 0) {
-      f = 0;
-    }
-  }
-  if (f >= len) {
-    return false;
-  }
-
-  // if "length" position is negative, set it to the length
-  // needed to stop that many chars from the end of the string
-  if (l < 0) {
-    l += len - f;
-    if (l < 0) {
-      l = 0;
-    }
-  }
-  if ((unsigned int)f + (unsigned int)l > (unsigned int)len) {
-    l = len - f;
-  }
-  return true;
-}
 
 void string_charmask(const char *sinput, int len, char *mask) {
   const unsigned char *input = (unsigned char *)sinput;
@@ -113,22 +63,22 @@ void string_charmask(const char *sinput, int len, char *mask) {
       /* Error, try to be as helpful as possible:
          (a range ending/starting with '.' won't be captured here) */
       if (end-len >= input) { /* there was no 'left' char */
-        throw_invalid_argument
+        raise_invalid_argument_warning
           ("charlist: Invalid '..'-range, missing left of '..'");
         continue;
       }
       if (input+2 >= end) { /* there is no 'right' char */
-        throw_invalid_argument
+        raise_invalid_argument_warning
           ("charlist: Invalid '..'-range, missing right of '..'");
         continue;
       }
       if (input[-1] > input[2]) { /* wrong order */
-        throw_invalid_argument
+        raise_invalid_argument_warning
           ("charlist: '..'-range needs to be incrementing");
         continue;
       }
       /* FIXME: better error (a..b..c is the only left possibility?) */
-      throw_invalid_argument("charlist: Invalid '..'-range");
+      raise_invalid_argument_warning("charlist: Invalid '..'-range");
       continue;
     } else {
       mask[c]=1;
@@ -136,161 +86,11 @@ void string_charmask(const char *sinput, int len, char *mask) {
   }
 }
 
-int string_copy(char *dst, const char *src, int siz) {
-  register char *d = dst;
-  register const char *s = src;
-  register size_t n = siz;
-
-  /* Copy as many bytes as will fit */
-  if (n != 0 && --n != 0) {
-    do {
-      if ((*d++ = *s++) == 0)
-        break;
-    } while (--n != 0);
-  }
-
-  /* Not enough room in dst, add NUL and traverse rest of src */
-  if (n == 0) {
-    if (siz != 0)
-      *d = '\0';    /* NUL-terminate dst */
-    while (*s++)
-      ;
-  }
-
-  return(s - src - 1);  /* count does not include NUL */
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// comparisons
-
-int string_ncmp(const char *s1, const char *s2, int len) {
-  for (int i = 0; i < len; i++) {
-    char c1 = s1[i];
-    char c2 = s2[i];
-    if (c1 > c2) return 1;
-    if (c1 < c2) return -1;
-  }
-  return 0;
-}
-
-static int compare_right(char const **a, char const *aend,
-                         char const **b, char const *bend) {
-  int bias = 0;
-
-  /* The longest run of digits wins.  That aside, the greatest
-     value wins, but we can't know that it will until we've scanned
-     both numbers to know that they have the same magnitude, so we
-     remember it in BIAS. */
-  for(;; (*a)++, (*b)++) {
-    if ((*a == aend || !isdigit((int)(unsigned char)**a)) &&
-        (*b == bend || !isdigit((int)(unsigned char)**b)))
-      return bias;
-    else if (*a == aend || !isdigit((int)(unsigned char)**a))
-      return -1;
-    else if (*b == bend || !isdigit((int)(unsigned char)**b))
-      return +1;
-    else if (**a < **b) {
-      if (!bias)
-        bias = -1;
-    } else if (**a > **b) {
-      if (!bias)
-        bias = +1;
-    }
-  }
-
-  return 0;
-}
-
-static int compare_left(char const **a, char const *aend,
-                        char const **b, char const *bend) {
-  /* Compare two left-aligned numbers: the first to have a
-     different value wins. */
-  for(;; (*a)++, (*b)++) {
-    if ((*a == aend || !isdigit((int)(unsigned char)**a)) &&
-        (*b == bend || !isdigit((int)(unsigned char)**b)))
-      return 0;
-    else if (*a == aend || !isdigit((int)(unsigned char)**a))
-      return -1;
-    else if (*b == bend || !isdigit((int)(unsigned char)**b))
-      return +1;
-    else if (**a < **b)
-      return -1;
-    else if (**a > **b)
-      return +1;
-  }
-
-  return 0;
-}
-
-int string_natural_cmp(char const *a, size_t a_len,
-                       char const *b, size_t b_len, int fold_case) {
-  char ca, cb;
-  char const *ap, *bp;
-  char const *aend = a + a_len, *bend = b + b_len;
-  int fractional, result;
-
-  if (a_len == 0 || b_len == 0)
-    return a_len - b_len;
-
-  ap = a;
-  bp = b;
-  while (1) {
-    ca = *ap; cb = *bp;
-
-    /* skip over leading spaces or zeros */
-    while (isspace((int)(unsigned char)ca))
-      ca = *++ap;
-
-    while (isspace((int)(unsigned char)cb))
-      cb = *++bp;
-
-    /* process run of digits */
-    if (isdigit((int)(unsigned char)ca)  &&  isdigit((int)(unsigned char)cb)) {
-      fractional = (ca == '0' || cb == '0');
-
-      if (fractional)
-        result = compare_left(&ap, aend, &bp, bend);
-      else
-        result = compare_right(&ap, aend, &bp, bend);
-
-      if (result != 0)
-        return result;
-      else if (ap == aend && bp == bend)
-        /* End of the strings. Let caller sort them out. */
-        return 0;
-      else {
-        /* Keep on comparing from the current point. */
-        ca = *ap; cb = *bp;
-      }
-    }
-
-    if (fold_case) {
-      ca = toupper((int)(unsigned char)ca);
-      cb = toupper((int)(unsigned char)cb);
-    }
-
-    if (ca < cb)
-      return -1;
-    else if (ca > cb)
-      return +1;
-
-    ++ap; ++bp;
-    if (ap >= aend && bp >= bend)
-      /* The strings compare the same.  Perhaps the caller
-         will want to call strcmp to break the tie. */
-      return 0;
-    else if (ap >= aend)
-      return -1;
-    else if (bp >= bend)
-      return 1;
-  }
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 
 void string_to_case(String& s, int (*tocase)(int)) {
-  assert(!s.isNull());
-  assert(tocase);
+  assertx(!s.isNull());
+  assertx(tocase);
   auto data = s.mutableData();
   auto len = s.size();
   for (int i = 0; i < len; i++) {
@@ -307,7 +107,7 @@ void string_to_case(String& s, int (*tocase)(int)) {
 String string_pad(const char *input, int len, int pad_length,
                   const char *pad_string, int pad_str_len,
                   int pad_type) {
-  assert(input);
+  assertx(input);
   int num_pad_chars = pad_length - len;
 
   /* If resulting string turns out to be shorter than input string,
@@ -318,8 +118,8 @@ String string_pad(const char *input, int len, int pad_length,
 
   /* Setup the padding string values if specified. */
   if (pad_str_len == 0) {
-    throw_invalid_argument("pad_string: (empty)");
-    return String();
+    SystemLib::throwRuntimeExceptionObject(
+      "Invalid argument: pad_string: (empty)");
   }
 
   String ret(pad_length, ReserveString);
@@ -341,8 +141,8 @@ String string_pad(const char *input, int len, int pad_length,
     right_pad = num_pad_chars - left_pad;
     break;
   default:
-    throw_invalid_argument("pad_type: %d", pad_type);
-    return String();
+    SystemLib::throwRuntimeExceptionObject(
+      folly::sformat("Invalid argument: pad_type: {}", pad_type));
   }
 
   /* First we pad on the left. */
@@ -367,7 +167,7 @@ String string_pad(const char *input, int len, int pad_length,
 
 int string_find(const char *input, int len, char ch, int pos,
                 bool case_sensitive) {
-  assert(input);
+  assertx(input);
   if (pos < 0 || pos > len) {
     return -1;
   }
@@ -385,7 +185,7 @@ int string_find(const char *input, int len, char ch, int pos,
 
 int string_rfind(const char *input, int len, char ch, int pos,
                  bool case_sensitive) {
-  assert(input);
+  assertx(input);
   if (pos < -len || pos > len) {
     return -1;
   }
@@ -411,8 +211,8 @@ int string_rfind(const char *input, int len, char ch, int pos,
 
 int string_find(const char *input, int len, const char *s, int s_len,
                 int pos, bool case_sensitive) {
-  assert(input);
-  assert(s);
+  assertx(input);
+  assertx(s);
   if (!s_len || pos < 0 || pos > len) {
     return -1;
   }
@@ -430,8 +230,8 @@ int string_find(const char *input, int len, const char *s, int s_len,
 
 int string_rfind(const char *input, int len, const char *s, int s_len,
                  int pos, bool case_sensitive) {
-  assert(input);
-  assert(s);
+  assertx(input);
+  assertx(s);
   if (!s_len || pos < -len || pos > len) {
     return -1;
   }
@@ -440,13 +240,13 @@ int string_rfind(const char *input, int len, const char *s, int s_len,
     if (pos >= 0) {
       ptr = bstrrstr(input + pos, len - pos, s, s_len);
     } else {
-      ptr = bstrrstr(input, len + pos + s_len, s, s_len);
+      ptr = bstrrstr(input, len + std::min(pos + s_len, 0), s, s_len);
     }
   } else {
     if (pos >= 0) {
       ptr = bstrrcasestr(input + pos, len - pos, s, s_len);
     } else {
-      ptr = bstrrcasestr(input, len + pos + s_len, s, s_len);
+      ptr = bstrrcasestr(input, len + std::min(pos + s_len, 0), s, s_len);
     }
   }
   if (ptr != nullptr) {
@@ -477,9 +277,9 @@ const char *string_memnstr(const char *haystack, const char *needle,
 
 String string_replace(const char *s, int len, int start, int length,
                       const char *replacement, int len_repl) {
-  assert(s);
-  assert(replacement);
-  assert(len >= 0);
+  assertx(s);
+  assertx(replacement);
+  assertx(len >= 0);
 
   // if "start" position is negative, count start position from the end
   // of the string
@@ -535,11 +335,11 @@ String string_replace(const char *input, int len,
                       const char *search, int len_search,
                       const char *replacement, int len_replace,
                       int &count, bool case_sensitive) {
-  assert(input);
-  assert(search && len_search);
-  assert(len >= 0);
-  assert(len_search >= 0);
-  assert(len_replace >= 0);
+  assertx(input);
+  assertx(search && len_search);
+  assertx(len >= 0);
+  assertx(len_search >= 0);
+  assertx(len_replace >= 0);
 
   if (len == 0) {
     return String();
@@ -678,7 +478,8 @@ static int string_tag_find(const char *tag, int len, const char *set) {
     return 0;
   }
 
-  norm = (char *)req::malloc(len+1);
+  norm = (char *)req::malloc_noptrs(len+1);
+  SCOPE_EXIT { req::free(norm); };
 
   n = norm;
   t = tag;
@@ -719,7 +520,6 @@ static int string_tag_find(const char *tag, int len, const char *set) {
   } else {
     done=0;
   }
-  req::free(norm);
   return done;
 }
 
@@ -751,8 +551,8 @@ String string_strip_tags(const char *s, const int len,
   int br, i=0, depth=0, in_q = 0;
   int state = 0, pos;
 
-  assert(s);
-  assert(allow);
+  assertx(s);
+  assertx(allow);
 
   String retString(s, len, CopyString);
   rbuf = retString.mutableData();
@@ -764,7 +564,7 @@ String string_strip_tags(const char *s, const int len,
   rp = rbuf;
   br = 0;
   if (allow_len) {
-    assert(allow);
+    assertx(allow);
 
     allowString = String(allow_len, ReserveString);
     char *atmp = allowString.mutableData();
@@ -774,7 +574,7 @@ String string_strip_tags(const char *s, const int len,
     allowString.setSize(allow_len);
     abuf = allowString.data();
 
-    tbuf = (char *)req::malloc(PHP_TAG_BUF_SIZE+1);
+    tbuf = (char *)req::malloc_noptrs(PHP_TAG_BUF_SIZE+1);
     tp = tbuf;
   } else {
     abuf = nullptr;
@@ -784,7 +584,8 @@ String string_strip_tags(const char *s, const int len,
   auto move = [&pos, &tbuf, &tp]() {
     if (tp - tbuf >= PHP_TAG_BUF_SIZE) {
       pos = tp - tbuf;
-      tbuf = (char*)req::realloc(tbuf, (tp - tbuf) + PHP_TAG_BUF_SIZE + 1);
+      tbuf = (char*)req::realloc_noptrs(tbuf,
+                                        (tp - tbuf) + PHP_TAG_BUF_SIZE + 1);
       tp = tbuf + pos;
     }
   };
@@ -998,43 +799,6 @@ String string_strip_tags(const char *s, const int len,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-String string_addslashes(const char *str, int length) {
-  assert(str);
-  if (length == 0) {
-    return String();
-  }
-
-  String retString((length << 1) + 1, ReserveString);
-  char *new_str = retString.mutableData();
-  const char *source = str;
-  const char *end = source + length;
-  char *target = new_str;
-
-  while (source < end) {
-    switch (*source) {
-    case '\0':
-      *target++ = '\\';
-      *target++ = '0';
-      break;
-    case '\'':
-    case '\"':
-    case '\\':
-      *target++ = '\\';
-      /* break is missing *intentionally* */
-    default:
-      *target++ = *source;
-      break;
-    }
-
-    source++;
-  }
-
-  retString.setSize(target - new_str);
-  return retString;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
 static char string_hex2int(int c) {
   if (isdigit(c)) {
     return c - '0';
@@ -1105,7 +869,7 @@ String string_quoted_printable_encode(const char *input, int len) {
 }
 
 String string_quoted_printable_decode(const char *input, int len, bool is_q) {
-  assert(input);
+  assertx(input);
   if (len == 0) {
     return String();
   }
@@ -1170,7 +934,7 @@ Variant string_base_to_numeric(const char *s, int len, int base) {
   int64_t cutoff;
   int cutlim;
 
-  assert(string_validate_base(base));
+  assertx(string_validate_base(base));
 
   cutoff = LONG_MAX / base;
   cutlim = LONG_MAX % base;
@@ -1217,7 +981,7 @@ String string_long_to_base(unsigned long value, int base) {
   char buf[(sizeof(unsigned long) << 3) + 1];
   char *ptr, *end;
 
-  assert(string_validate_base(base));
+  assertx(string_validate_base(base));
 
   end = ptr = buf + sizeof(buf) - 1;
 
@@ -1232,7 +996,7 @@ String string_long_to_base(unsigned long value, int base) {
 String string_numeric_to_base(const Variant& value, int base) {
   static char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-  assert(string_validate_base(base));
+  assertx(string_validate_base(base));
   if ((!value.isInteger() && !value.isDouble())) {
     return empty_string();
   }
@@ -1267,15 +1031,15 @@ String string_numeric_to_base(const Variant& value, int base) {
 #define PHP_UU_ENC(c) \
   ((c) ? ((c) & 077) + ' ' : '`')
 #define PHP_UU_ENC_C2(c) \
-  PHP_UU_ENC(((*(c) << 4) & 060) | ((*((c) + 1) >> 4) & 017))
+  PHP_UU_ENC(((*(c) * 16) & 060) | ((*((c) + 1) >> 4) & 017))
 #define PHP_UU_ENC_C3(c) \
-  PHP_UU_ENC(((*(c + 1) << 2) & 074) | ((*((c) + 2) >> 6) & 03))
+  PHP_UU_ENC(((*(c + 1) * 4) & 074) | ((*((c) + 2) >> 6) & 03))
 #define PHP_UU_DEC(c) \
   (((c) - ' ') & 077)
 
 String string_uuencode(const char *src, int src_len) {
-  assert(src);
-  assert(src_len);
+  assertx(src);
+  assertx(src_len);
 
   int len = 45;
   char *p;
@@ -1402,7 +1166,9 @@ String string_uudecode(const char *src, int src_len) {
 ///////////////////////////////////////////////////////////////////////////////
 // base64
 
-static const char base64_table[] = {
+namespace {
+
+const char base64_table[] = {
   'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
   'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
   'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
@@ -1410,9 +1176,9 @@ static const char base64_table[] = {
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/', '\0'
 };
 
-static const char base64_pad = '=';
+const char base64_pad = '=';
 
-static const short base64_reverse_table[256] = {
+const short base64_reverse_table[256] = {
   -2, -2, -2, -2, -2, -2, -2, -2, -2, -1, -1, -2, -2, -1, -2, -2,
   -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2,
   -1, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, 62, -2, -2, -2, 63,
@@ -1431,17 +1197,18 @@ static const short base64_reverse_table[256] = {
   -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2
 };
 
-static String php_base64_encode(const unsigned char *str, int length) {
-  const unsigned char *current = str;
-  unsigned char *p;
-  unsigned char *result;
-
+folly::Optional<int> maxEncodedSize(int length) {
   if ((length + 2) < 0 || ((length + 2) / 3) >= (1 << (sizeof(int) * 8 - 2))) {
-    return String();
+    return folly::none;
   }
+  return ((length + 2) / 3) * 4;
+}
 
-  String ret(((length + 2) / 3) * 4, ReserveString);
-  p = result = (unsigned char *)ret.mutableData();
+// outstr must be at least maxEncodedSize(length) bytes
+size_t php_base64_encode(const unsigned char *str, int length,
+                         unsigned char* outstr) {
+  const unsigned char *current = str;
+  unsigned char *p = outstr;
 
   while (length > 2) { /* keep going until we have less than 24 bits */
     *p++ = base64_table[current[0] >> 2];
@@ -1466,17 +1233,17 @@ static String php_base64_encode(const unsigned char *str, int length) {
       *p++ = base64_pad;
     }
   }
-  ret.setSize(p - result);
-  return ret;
+  return p - outstr;
 }
 
-static String php_base64_decode(const char *str, int length, bool strict) {
+// outstr must be at least length bytes
+ssize_t php_base64_decode(const char *str, int length, bool strict,
+                         unsigned char* outstr) {
   const unsigned char *current = (unsigned char*)str;
   int ch, i = 0, j = 0, k;
   /* this sucks for threaded environments */
 
-  String retString(length, ReserveString);
-  unsigned char* result = (unsigned char*)retString.mutableData();
+  unsigned char* result = outstr;
 
   /* run through the whole string, converting as we go */
   while ((ch = *current++) != '\0' && length-- > 0) {
@@ -1490,7 +1257,7 @@ static String php_base64_decode(const char *str, int length, bool strict) {
             continue;
           }
         }
-        return String();
+        return -1;
       }
       continue;
     }
@@ -1500,7 +1267,7 @@ static String php_base64_decode(const char *str, int length, bool strict) {
       /* a space or some other separator character, we simply skip over */
       continue;
     } else if (ch == -2) {
-      return String();
+      return -1;
     }
 
     switch(i % 4) {
@@ -1527,23 +1294,61 @@ static String php_base64_decode(const char *str, int length, bool strict) {
   if (ch == base64_pad) {
     switch(i % 4) {
     case 1:
-      return String();
+      return -1;
     case 2:
       k++;
     case 3:
       result[k] = 0;
     }
   }
-  retString.setSize(j);
-  return retString;
+  return j;
 }
 
-String string_base64_encode(const char *input, int len) {
-  return php_base64_encode((unsigned char *)input, len);
 }
 
-String string_base64_decode(const char *input, int len, bool strict) {
-  return php_base64_decode(input, len, strict);
+String string_base64_encode(const char* input, int len) {
+  if (auto const wantedSize = maxEncodedSize(len)) {
+    String ret(*wantedSize, ReserveString);
+    auto actualSize = php_base64_encode((unsigned char*)input, len,
+                                        (unsigned char*)ret.mutableData());
+    ret.setSize(actualSize);
+    return ret;
+  }
+  return String();
+}
+
+String string_base64_decode(const char* input, int len, bool strict) {
+  String ret(len, ReserveString);
+  auto actualSize = php_base64_decode(input, len, strict,
+                                      (unsigned char*)ret.mutableData());
+  if (actualSize < 0) return String();
+
+  ret.setSize(actualSize);
+  return ret;
+}
+
+std::string base64_encode(const char* input, int len) {
+  if (auto const wantedSize = maxEncodedSize(len)) {
+    std::string ret;
+    ret.resize(*wantedSize);
+    auto actualSize = php_base64_encode((unsigned char*)input, len,
+                                        (unsigned char*)ret.data());
+    ret.resize(actualSize);
+    return ret;
+  }
+  return std::string();
+}
+
+std::string base64_decode(const char* input, int len, bool strict) {
+  if (!len) return std::string();
+  std::string ret;
+  ret.resize(len);
+  auto actualSize = php_base64_decode(input, len, strict,
+                                      (unsigned char*)ret.data());
+  if (!actualSize) return std::string();
+
+  ret.resize(actualSize);
+  return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1711,7 +1516,7 @@ static int string_similar_char(const char *txt1, int len1,
 }
 
 int string_similar_text(const char *t1, int len1,
-                        const char *t2, int len2, float *percent) {
+                        const char *t2, int len2, double *percent) {
   if (len1 == 0 && len2 == 0) {
     if (percent) *percent = 0.0;
     return 0;
@@ -1740,8 +1545,10 @@ int string_levenshtein(const char *s1, int l1, const char *s2, int l2,
     return -1;
   }
 
-  p1 = (int*)req::malloc((l2+1) * sizeof(int));
-  p2 = (int*)req::malloc((l2+1) * sizeof(int));
+  p1 = (int*)req::malloc_noptrs((l2+1) * sizeof(int));
+  SCOPE_EXIT { req::free(p1); };
+  p2 = (int*)req::malloc_noptrs((l2+1) * sizeof(int));
+  SCOPE_EXIT { req::free(p2); };
 
   for(i2=0;i2<=l2;i2++) {
     p1[i2] = i2*cost_ins;
@@ -1759,8 +1566,6 @@ int string_levenshtein(const char *s1, int l1, const char *s2, int l2,
   }
 
   c0=p1[l2];
-  req::free(p1);
-  req::free(p2);
   return c0;
 }
 
@@ -1776,7 +1581,7 @@ String string_money_format(const char *format, double value) {
       check = true;
       p++;
     } else {
-      throw_invalid_argument
+      raise_invalid_argument_warning
         ("format: Only a single %%i or %%n token can be used");
       return String();
     }
@@ -1815,10 +1620,15 @@ String string_number_format(double d, int dec,
   d = php_math_round(d, dec);
 
   // departure from PHP: we got rid of dependencies on spprintf() here.
+  // This actually means 63 bytes for characters + 1 byte for '\0'
   String tmpstr(63, ReserveString);
   tmpbuf = tmpstr.mutableData();
   tmplen = snprintf(tmpbuf, 64, "%.*F", dec, d);
-  if (tmpbuf == nullptr || !isdigit((int)tmpbuf[0])) {
+  // From the man page of snprintf, the return value is:
+  // The number of characters that would have been written if n had been
+  // sufficiently large, not counting the terminating null character.
+  if (tmplen < 0) return empty_string();
+  if (tmplen < 64 && (tmpbuf == nullptr || !isdigit((int)tmpbuf[0]))) {
     tmpstr.setSize(tmplen);
     return tmpstr;
   }
@@ -1827,6 +1637,7 @@ String string_number_format(double d, int dec,
     tmpstr = String(tmplen, ReserveString);
     tmpbuf = tmpstr.mutableData();
     tmplen = snprintf(tmpbuf, tmplen + 1, "%.*F", dec, d);
+    if (tmplen < 0) return empty_string();
     if (tmpbuf == nullptr || !isdigit((int)tmpbuf[0])) {
       tmpstr.setSize(tmplen);
       return tmpstr;
@@ -1850,6 +1661,11 @@ String string_number_format(double d, int dec,
 
   /* allow for thousand separators */
   if (!thousand_sep.empty()) {
+    if (integral + thousand_sep.size() * ((integral-1) / 3) < integral) {
+      /* overflow */
+      raise_error("String overflow");
+    }
+
     integral += ((integral-1) / 3) * thousand_sep.size();
   }
 
@@ -1859,6 +1675,10 @@ String string_number_format(double d, int dec,
     reslen += dec;
 
     if (!dec_point.empty()) {
+      if (reslen + dec_point.size() < dec_point.size()) {
+        /* overflow */
+        raise_error("String overflow");
+      }
       reslen += dec_point.size();
     }
   }
@@ -1926,7 +1746,7 @@ String string_number_format(double d, int dec,
 
 /* Simple soundex algorithm as described by Knuth in TAOCP, vol 3 */
 String string_soundex(const String& str) {
-  assert(!str.empty());
+  assertx(!str.empty());
   int _small, code, last;
   String retString(4, ReserveString);
   char* soundex = retString.mutableData();
@@ -2574,7 +2394,7 @@ String string_convert_cyrillic_string(const String& input, char from, char to) {
   case 'K':
     break;
   default:
-    throw_invalid_argument("Unknown source charset: %c", from);
+    raise_invalid_argument_warning("Unknown source charset: %c", from);
     break;
   }
 
@@ -2587,7 +2407,7 @@ String string_convert_cyrillic_string(const String& input, char from, char to) {
   case 'K':
     break;
   default:
-    throw_invalid_argument("Unknown destination charset: %c", to);
+    raise_invalid_argument_warning("Unknown destination charset: %c", to);
     break;
   }
 
@@ -2616,10 +2436,10 @@ String string_convert_cyrillic_string(const String& input, char from, char to) {
  * Converts Logical Hebrew text (Hebrew Windows style) to Visual text
  * Cheers/complaints/flames - Zeev Suraski <zeev@php.net>
  */
-String string_convert_hebrew_string(const String& inStr,
-                                    int max_chars_per_line,
-                                    int convert_newlines) {
-  assert(!inStr.empty());
+String
+string_convert_hebrew_string(const String& inStr, int /*max_chars_per_line*/,
+                             int convert_newlines) {
+  assertx(!inStr.empty());
   auto str = inStr.data();
   auto str_len = inStr.size();
   const char *tmp;
@@ -2632,7 +2452,7 @@ String string_convert_hebrew_string(const String& inStr,
   tmp = str;
   block_start=block_end=0;
 
-  heb_str = (char *) req::malloc(str_len + 1);
+  heb_str = (char *) req::malloc_noptrs(str_len + 1);
   SCOPE_EXIT { req::free(heb_str); };
   target = heb_str+str_len;
   *target = 0;
@@ -2768,17 +2588,6 @@ String string_convert_hebrew_string(const String& inStr,
   brokenStr.setSize(str_len);
   return brokenStr;
 }
-
-#if defined(__APPLE__)
-
-  void *memrchr(const void *s, int c, size_t n) {
-    for (const char *p = (const char *)s + n - 1; p >= s; p--) {
-      if (*p == c) return (void *)p;
-    }
-    return nullptr;
-  }
-
-#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 }

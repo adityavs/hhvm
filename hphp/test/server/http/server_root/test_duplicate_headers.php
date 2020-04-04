@@ -1,4 +1,9 @@
-<?php
+<?hh
 
-var_dump(getallheaders());
-var_dump(HH\get_headers_secure());
+show(getallheaders());
+show(HH\get_headers_secure());
+
+function show($a) {
+  ksort(inout $a);
+  var_dump($a);
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,23 +16,41 @@
 #ifndef incl_HPHP_JIT_IRGEN_TYPES_H_
 #define incl_HPHP_JIT_IRGEN_TYPES_H_
 
+#include "hphp/runtime/vm/jit/types.h"
+
 #include <folly/Optional.h>
 
 namespace HPHP {
+
 struct RepoAuthType;
 struct StringData;
-}
-namespace HPHP { namespace jit {
-struct SSATmp;
-struct IRGS;
-struct Type;
-}}
+struct TypeConstraint;
+struct Func;
 
-namespace HPHP { namespace jit { namespace irgen {
+namespace jit {
+
+struct SSATmp;
+struct Type;
+
+namespace irgen {
+
+struct IRGS;
 
 //////////////////////////////////////////////////////////////////////
 
-folly::Optional<Type> ratToAssertType(IRGS& env, RepoAuthType rat);
+void verifyPropType(IRGS& env,
+                    SSATmp* cls,
+                    const HPHP::TypeConstraint* tc,
+                    Slot slot,
+                    SSATmp* val,
+                    SSATmp* name,
+                    bool isSProp,
+                    SSATmp** coerce = nullptr);
+
+void raiseClsmethCompatTypeHint(
+  IRGS& env, int32_t id, const Func* func, const TypeConstraint& tc);
+//////////////////////////////////////////////////////////////////////
+
 SSATmp* implInstanceOfD(IRGS& env, SSATmp* src, const StringData* className);
 
 //////////////////////////////////////////////////////////////////////

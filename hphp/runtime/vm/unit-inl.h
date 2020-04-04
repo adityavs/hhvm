@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,8 +20,10 @@
 
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/vm/hhbc-codec.h"
 #include "hphp/runtime/vm/litstr-table.h"
+#include "hphp/runtime/vm/unit-util.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -97,22 +99,17 @@ inline Func** Unit::MergeInfo::funcHoistableBegin() const {
 
 inline
 Unit::MergeInfo::FuncRange Unit::MergeInfo::funcs() const {
-  return FuncRange(funcBegin(), funcEnd());
+  return { funcBegin(), funcEnd() };
 }
 
 inline
 Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::mutableFuncs() const {
-  return MutableFuncRange(funcBegin(), funcEnd());
+  return { funcBegin(), funcEnd() };
 }
 
 inline
 Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::nonMainFuncs() const {
-  return MutableFuncRange(funcBegin() + 1, funcEnd());
-}
-
-inline
-Unit::MergeInfo::MutableFuncRange Unit::MergeInfo::hoistableFuncs() const {
-  return MutableFuncRange(funcHoistableBegin(), funcEnd());
+  return { funcBegin() + 1, funcEnd() };
 }
 
 inline void*& Unit::MergeInfo::mergeableObj(int idx) {
@@ -126,6 +123,16 @@ inline void** Unit::MergeInfo::mergeableData(int idx) {
 ///////////////////////////////////////////////////////////////////////////////
 // Basic accessors.
 
+inline UnitExtended* Unit::getExtended() {
+  assertx(m_extended);
+  return static_cast<UnitExtended*>(this);
+}
+
+inline const UnitExtended* Unit::getExtended() const {
+  assertx(m_extended);
+  return static_cast<const UnitExtended*>(this);
+}
+
 inline int Unit::repoID() const {
   return m_repoId;
 }
@@ -134,18 +141,26 @@ inline int64_t Unit::sn() const {
   return m_sn;
 }
 
-inline MD5 Unit::md5() const {
-  return m_md5;
+inline SHA1 Unit::sha1() const {
+  return m_sha1;
+}
+
+inline SHA1 Unit::bcSha1() const {
+  return m_bcSha1;
 }
 
 inline const StringData* Unit::filepath() const {
-  assert(m_filepath);
+  assertx(m_filepath);
   return m_filepath;
 }
 
 inline const StringData* Unit::dirpath() const {
-  assert(m_dirpath);
+  assertx(m_dirpath);
   return m_dirpath;
+}
+
+inline bool Unit::isICE() const {
+  return m_ICE;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -160,12 +175,12 @@ inline Offset Unit::bclen() const {
 }
 
 inline PC Unit::at(Offset off) const {
-  assert(off >= 0 && off <= Offset(m_bclen));
+  assertx(off >= 0 && off <= Offset(m_bclen));
   return m_bc + off;
 }
 
 inline Offset Unit::offsetOf(PC pc) const {
-  assert(contains(pc));
+  assertx(contains(pc));
   return pc - m_bc;
 }
 
@@ -174,7 +189,7 @@ inline bool Unit::contains(PC pc) const {
 }
 
 inline Op Unit::getOp(Offset instrOffset) const {
-  assert(instrOffset < m_bclen);
+  assertx(instrOffset < m_bclen);
   return peek_op(m_bc + instrOffset);
 }
 
@@ -182,35 +197,36 @@ inline Op Unit::getOp(Offset instrOffset) const {
 // Litstrs and NamedEntitys.
 
 inline size_t Unit::numLitstrs() const {
-  return m_namedInfo.size();
+  if (!m_extended) return 0;
+  return getExtended()->m_namedInfo.size();
 }
 
 inline bool Unit::isLitstrId(Id id) const {
-  if (isGlobalLitstrId(id)) {
-    auto globalID = decodeGlobalLitstrId(id);
-    return LitstrTable::get().contains(globalID);
+  if (!isUnitLitstrId(id)) {
+    return LitstrTable::get().contains(id);
   }
-  return m_namedInfo.contains(id);
+  auto unitID = decodeUnitLitstrId(id);
+  return m_extended && getExtended()->m_namedInfo.contains(unitID);
 }
 
 inline StringData* Unit::lookupLitstrId(Id id) const {
-  if (isGlobalLitstrId(id)) {
-    auto globalID = decodeGlobalLitstrId(id);
-    return LitstrTable::get().lookupLitstrId(globalID);
+  if (!isUnitLitstrId(id)) {
+    return LitstrTable::get().lookupLitstrId(id);
   }
-  return m_namedInfo.lookupLitstr(id);
+  auto unitID = decodeUnitLitstrId(id);
+  return getExtended()->m_namedInfo.lookupLitstr(unitID);
 }
 
 inline const NamedEntity* Unit::lookupNamedEntityId(Id id) const {
   return lookupNamedEntityPairId(id).second;
 }
 
-inline const NamedEntityPair& Unit::lookupNamedEntityPairId(Id id) const {
-  if (isGlobalLitstrId(id)) {
-    auto globalID = decodeGlobalLitstrId(id);
-    return LitstrTable::get().lookupNamedEntityPairId(globalID);
+inline NamedEntityPair Unit::lookupNamedEntityPairId(Id id) const {
+  if (!isUnitLitstrId(id)) {
+    return LitstrTable::get().lookupNamedEntityPairId(id);
   }
-  return m_namedInfo.lookupNamedEntityPair(id);
+  auto unitID = decodeUnitLitstrId(id);
+  return getExtended()->m_namedInfo.lookupNamedEntityPair(unitID);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -220,40 +236,105 @@ inline size_t Unit::numArrays() const {
   return m_arrays.size();
 }
 
-inline ArrayData* Unit::lookupArrayId(Id id) const {
-  assert(id < m_arrays.size());
-  return const_cast<ArrayData*>(m_arrays[id]);
+inline const ArrayData* Unit::lookupArrayId(Id id) const {
+  assertx(id < m_arrays.size());
+  return m_arrays[id];
+}
+
+inline const RepoAuthType::Array* Unit::lookupArrayTypeId(Id id) const {
+  return RuntimeOption::RepoAuthoritative ?
+    globalArrayTypeTable().lookup(id) :
+    getExtended()->m_arrayTypeTable.lookup(id);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Funcs and PreClasses.
+// Funcs and PreClasses and RecordDescs.
 
 inline Func* Unit::lookupFuncId(Id id) const {
-  assert(id < Id(m_mergeInfo->m_firstHoistablePreClass));
-  return m_mergeInfo->funcBegin()[id];
+  assertx(id < Id(mergeInfo()->m_firstHoistablePreClass));
+  return mergeInfo()->funcBegin()[id];
 }
 
 inline PreClass* Unit::lookupPreClassId(Id id) const {
-  assert(id < Id(m_preClasses.size()));
+  assertx(id < Id(m_preClasses.size()));
   return m_preClasses[id].get();
 }
 
+inline PreRecordDesc* Unit::lookupPreRecordId(Id id) const {
+  assertx(id < Id(m_preRecords.size()));
+  return m_preRecords[id].get();
+}
+
 inline Unit::FuncRange Unit::funcs() const {
-  return m_mergeInfo->funcs();
+  return mergeInfo()->funcs();
 }
 
-inline Unit::PreClassRange Unit::preclasses() const {
-  return PreClassRange(m_preClasses);
+inline folly::Range<PreClassPtr*> Unit::preclasses() {
+  return { m_preClasses.data(), m_preClasses.size() };
 }
 
-inline Func* Unit::firstHoistable() const {
-  return *m_mergeInfo->funcHoistableBegin();
+inline folly::Range<const PreClassPtr*> Unit::preclasses() const {
+  return { m_preClasses.data(), m_preClasses.size() };
+}
+
+inline folly::Range<PreRecordDescPtr*> Unit::prerecords() {
+  return { m_preRecords.data(), m_preRecords.size() };
+}
+
+inline folly::Range<const PreRecordDescPtr*> Unit::prerecords() const {
+  return { m_preRecords.data(), m_preRecords.size() };
+}
+
+template<class Fn> void Unit::forEachFunc(Fn fn) const {
+  for (auto& func : funcs()) {
+    fn(func);
+  }
+  for (auto& c : preclasses()) {
+    auto methods = FuncRange{c->methods(), c->methods() + c->numMethods()};
+    for (auto& method : methods) {
+      fn(method);
+    }
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Type aliases
-inline Unit::TypeAliasRange Unit::typeAliases() const {
-  return TypeAliasRange(m_typeAliases);
+
+inline folly::Range<TypeAlias*> Unit::typeAliases() {
+  return { m_typeAliases.begin(), m_typeAliases.end() };
+}
+
+inline folly::Range<const TypeAlias*> Unit::typeAliases() const {
+  return { m_typeAliases.begin(), m_typeAliases.end() };
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Constants
+
+inline folly::Range<Constant*> Unit::constants() {
+  return { m_constants.begin(), m_constants.end() };
+}
+
+inline folly::Range<const Constant*> Unit::constants() const {
+  return { m_constants.begin(), m_constants.end() };
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// File attributes
+
+inline const UserAttributeMap& Unit::fileAttributes() const {
+  return m_fileAttributes;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// RecordDesc lookup.
+
+inline RecordDesc* Unit::lookupRecordDesc(const NamedEntity* ne) {
+  return ne->getCachedRecordDesc();
+}
+
+inline RecordDesc* Unit::lookupRecordDesc(const StringData* name) {
+  return lookupRecordDesc(NamedEntity::get(name));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -267,27 +348,42 @@ inline Class* Unit::lookupClass(const StringData* name) {
   return lookupClass(NamedEntity::get(name));
 }
 
-inline Class* Unit::lookupClassOrUniqueClass(const NamedEntity* ne) {
-  Class* cls = ne->clsList();
-  if (LIKELY(cls != nullptr)) {
-    if (cls->attrs() & AttrUnique && RuntimeOption::RepoAuthoritative) {
-      return cls;
-    }
-    return cls->getCached();
-  }
+inline const RecordDesc* Unit::lookupUniqueRecDesc(const StringData* name) {
+  auto ne = NamedEntity::get(name);
+  auto rec = ne->recordList();
+  if (LIKELY(rec && (rec->attrs() & AttrUnique))) return rec;
   return nullptr;
 }
 
-inline Class* Unit::lookupClassOrUniqueClass(const StringData* name) {
-  return lookupClassOrUniqueClass(NamedEntity::get(name));
+inline const Class* Unit::lookupUniqueClassInContext(const NamedEntity* ne,
+                                                     const Class* ctx,
+                                                     const Unit* unit) {
+  Class* cls = ne->clsList();
+  if (UNLIKELY(cls == nullptr)) return nullptr;
+  if (cls->attrs() & AttrUnique) return cls;
+  if (unit && cls->preClass()->unit() == unit) return cls;
+  if (!ctx) return nullptr;
+  return ctx->getClassDependency(cls->name());
+}
+
+inline const Class* Unit::lookupUniqueClassInContext(const StringData* name,
+                                                     const Class* ctx,
+                                                     const Unit* unit) {
+  return lookupUniqueClassInContext(NamedEntity::get(name), ctx, unit);
 }
 
 inline Class* Unit::loadClass(const StringData* name) {
   String normStr;
   auto ne = NamedEntity::get(name, true, &normStr);
-  if (normStr) {
-    name = normStr.get();
-  }
+
+  // Try to fetch from cache
+  Class* class_ = ne->getCachedClass();
+  if (LIKELY(class_ != nullptr)) return class_;
+
+  // Normalize the namespace
+  if (normStr) name = normStr.get();
+
+  // Autoload the class
   return loadClass(ne, name);
 }
 
@@ -308,11 +404,11 @@ inline bool Unit::isMergeOnly() const {
 }
 
 inline bool Unit::isEmpty() const {
-  return m_mergeState & MergeState::Empty;
+  return m_mergeState.load(std::memory_order_relaxed) & MergeState::Empty;
 }
 
 inline const TypedValue* Unit::getMainReturn() const {
-  assert(isMergeOnly());
+  assertx(isMergeOnly());
   return &m_mainReturn;
 }
 
@@ -329,6 +425,10 @@ inline void Unit::setInterpretOnly() {
 
 inline bool Unit::isHHFile() const {
   return m_isHHFile;
+}
+
+inline UserAttributeMap Unit::metaData() const {
+  return m_metaData;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

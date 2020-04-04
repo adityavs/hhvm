@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 /*
  * Test intercepts where callsites have already been bound to the
@@ -9,7 +9,7 @@ function foo() {
   var_dump(__METHOD__);
 }
 
-function bar() {
+function bar($_1, $_2, inout $_3, $_4, inout $_5) {
   var_dump(__METHOD__);
 }
 
@@ -24,12 +24,12 @@ class C {
 }
 
 
-function swizzle($name, $obj, $args, $data, &$done) {
+function swizzle($name, $obj, inout $args, $data, inout $done) {
   var_dump($name, $obj, $args, $data, $done);
   $done = false;
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $c = new C();
   for ($i = 0; $i < 3; $i++) {
     test();
@@ -41,6 +41,3 @@ function main() {
     }
   }
 }
-
-main();
-

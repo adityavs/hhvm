@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,13 +35,14 @@ void CmdStep::help(DebuggerClient &client) {
   );
 }
 
-void CmdStep::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
-  assert(!m_complete); // Complete cmds should not be asked to do work.
+void CmdStep::onSetup(DebuggerProxy& /*proxy*/, CmdInterrupt& interrupt) {
+  assertx(!m_complete); // Complete cmds should not be asked to do work.
   installLocationFilterForLine(interrupt.getSite());
   m_needsVMInterrupt = true;
 }
 
-void CmdStep::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
+void CmdStep::onBeginInterrupt(DebuggerProxy& /*proxy*/,
+                               CmdInterrupt& interrupt) {
   // Step doesn't care about this interrupt... we just stay the course and
   // keep stepping.
   if (interrupt.getInterruptType() == ExceptionHandler) return;

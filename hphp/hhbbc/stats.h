@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,24 @@
 
 namespace HPHP { namespace HHBBC {
 
+struct Stats;
+
+struct StatsHolder {
+  StatsHolder();
+  ~StatsHolder();
+  StatsHolder(StatsHolder&& o) noexcept : stats{o.stats} { o.stats = nullptr; }
+  StatsHolder(const StatsHolder&) = delete;
+  StatsHolder& operator=(const StatsHolder&) = delete;
+  StatsHolder& operator=(StatsHolder&&) = delete;
+
+  operator bool() const { return stats; }
+
+  Stats* stats{};
+};
+
 namespace php {
 struct Program;
+struct Unit;
 }
 struct Index;
 
@@ -30,7 +46,9 @@ struct Index;
  * temporary file.  If it's greater than or equal to 2, also dump it
  * to stdout.
  */
-void print_stats(const Index&, const php::Program&);
+StatsHolder allocate_stats();
+void collect_stats(const StatsHolder&, const Index&, const php::Unit*);
+void print_stats(const StatsHolder&);
 
 //////////////////////////////////////////////////////////////////////
 

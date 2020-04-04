@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,8 +26,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class apcExtension final : public Extension {
- public:
+struct apcExtension final : Extension {
   apcExtension() : Extension("apc", "4.0.2") {}
 
   static bool Enable;
@@ -36,27 +35,27 @@ class apcExtension final : public Extension {
   static std::string PrimeLibrary;
   static int LoadThread;
   static std::set<std::string> CompletionKeys;
-  enum class TableTypes {
-    ConcurrentTable
-  };
-  static TableTypes TableType;
   static bool EnableApcSerialize;
-  static int64_t KeyMaturityThreshold;
-  static int64_t MaximumCapacity;
-  static int KeyFrequencyUpdatePeriod;
   static bool ExpireOnSets;
   static int PurgeFrequency;
   static int PurgeRate;
   static bool AllowObj;
   static int TTLLimit;
+  static int64_t TTLMaxFinite;
+  static std::vector<std::string> HotPrefix;
+  static int HotSize;
+  static double HotLoadFactor;
+  static bool HotKeyAllocLow;
+  static bool HotMapAllocLow;
+  static std::string PrimeLibraryUpgradeDest;
   static bool UseFileStorage;
   static int64_t FileStorageChunkSize;
   static std::string FileStoragePrefix;
   static int FileStorageAdviseOutPeriod;
   static std::string FileStorageFlagKey;
   static bool FileStorageKeepFileLinked;
-  static std::vector<std::string> NoTTLPrefix;
   static bool UseUncounted;
+  static bool ShareUncounted;
   static bool Stat;
   static bool EnableCLI;
 
@@ -67,51 +66,53 @@ class apcExtension final : public Extension {
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+
 Variant HHVM_FUNCTION(apc_add,
                       const Variant& key_or_array,
-                      const Variant& var = null_variant,
+                      const Variant& var = uninit_variant,
                       int64_t ttl = 0);
 Variant HHVM_FUNCTION(apc_store,
                       const Variant& key_or_array,
-                      const Variant& var = null_variant,
+                      const Variant& var = uninit_variant,
                       int64_t ttl = 0);
 bool HHVM_FUNCTION(apc_store_as_primed_do_not_use,
                    const String& key,
                    const Variant& var);
-Variant HHVM_FUNCTION(apc_fetch,
-                      const Variant& key,
-                      VRefParam success = uninit_null());
+TypedValue HHVM_FUNCTION(apc_fetch, const Variant& key, bool& success);
 Variant HHVM_FUNCTION(apc_delete,
                       const Variant& key);
 bool HHVM_FUNCTION(apc_clear_cache,
                    const String& cache_type = "");
 Variant HHVM_FUNCTION(apc_inc,
                       const String& key,
-                      int64_t step = 1,
-                      VRefParam success = uninit_null());
+                      int64_t step,
+                      bool& success);
 Variant HHVM_FUNCTION(apc_dec,
                       const String& key,
-                      int64_t step = 1,
-                      VRefParam success = uninit_null());
+                      int64_t step,
+                      bool& success);
 bool HHVM_FUNCTION(apc_cas,
                    const String& key,
                    int64_t old_cas,
                    int64_t new_cas);
 Variant HHVM_FUNCTION(apc_exists,
                       const Variant& key);
+TypedValue HHVM_FUNCTION(apc_size, const String& key);
+
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant HHVM_FUNCTION(apc_cache_info,
-                      const String& cache_type /* = "" */,
-                      bool limited /* = false */);
-Array HHVM_FUNCTION(apc_sma_info,
+Array HHVM_FUNCTION(apc_cache_info,
+                    const String& cache_type /* = "" */,
                     bool limited /* = false */);
 
 ///////////////////////////////////////////////////////////////////////////////
 // loading APC from archive files
 
 void apc_load(int thread);
+
+// Evict any file-backed APC values from OS page cache.
+void apc_advise_out();
 
 // needed by generated apc archive .cpp files
 void apc_load_impl(struct cache_info *info,
@@ -128,8 +129,7 @@ void apc_load_impl_compressed(
   int *thrift_lens, const char *thrifts,
   int *other_lens, const char *others);
 
-class apc_rfc1867_data {
-public:
+struct apc_rfc1867_data {
   std::string tracking_key;
   int64_t content_length;
   std::string filename;
@@ -168,13 +168,26 @@ static_assert(sizeof(int64_t) == sizeof(long long),
 ///////////////////////////////////////////////////////////////////////////////
 // apc serialization
 
-String apc_serialize(const Variant& value);
+enum APCSerializeMode {
+  Normal,
+  Prime
+};
+
+String apc_serialize(const_variant_ref value,
+                     APCSerializeMode mode = APCSerializeMode::Normal);
+inline String apc_serialize(const Variant& var,
+                            APCSerializeMode mode = APCSerializeMode::Normal) {
+  return apc_serialize(const_variant_ref{var}, mode);
+}
 Variant apc_unserialize(const char* data, int len);
 String apc_reserialize(const String& str);
 
 ///////////////////////////////////////////////////////////////////////////////
 // debugging support
 bool apc_dump(const char *filename, bool keyOnly, bool metaDump);
+bool apc_dump_prefix(const char *filename,
+                     const std::string &prefix,
+                     uint32_t count);
 size_t get_const_map_size();
 bool apc_get_random_entries(std::ostream &out, uint32_t count);
 

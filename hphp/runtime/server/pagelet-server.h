@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,11 +30,10 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class PageletTransport;
-class PageletServerTaskEvent;
+struct PageletTransport;
+struct PageletServerTaskEvent;
 
-class PageletServer {
-public:
+struct PageletServer {
   static bool Enabled();
   static void Restart();
   static void Stop();
@@ -68,6 +67,14 @@ public:
                            int64_t timeout_ms);
 
   /**
+   * Get asynchronous results of a task. Returns a tuple of 3 items:
+   * - already flushed strings
+   * - a WaitHandle representing the future results (or null if finished)
+   * - the status code
+   */
+  static Array AsyncTaskResult(const Resource& task);
+
+  /**
    * Add a piece of response to the pipeline.
    */
   static void AddToPipeline(const std::string &s);
@@ -79,8 +86,9 @@ public:
   static int GetQueuedJobs();
 };
 
-class PageletTransport : public Transport, public Synchronizable {
-public:
+const StaticString s_pagelet("pagelet");
+
+struct PageletTransport final : Transport, Synchronizable {
   PageletTransport(
     const String& url, const Array& headers, const String& postData,
     const String& remoteHost,
@@ -90,20 +98,27 @@ public:
   /**
    * Implementing Transport...
    */
-  virtual const char *getUrl();
-  virtual const char *getRemoteHost();
-  virtual uint16_t getRemotePort();
-  virtual const void *getPostData(int &size);
-  virtual Method getMethod();
-  virtual std::string getHeader(const char *name);
-  virtual void getHeaders(HeaderMap &headers);
-  virtual void addHeaderImpl(const char *name, const char *value);
-  virtual void removeHeaderImpl(const char *name);
-  virtual void sendImpl(const void *data, int size, int code,
-                        bool chunked, bool eom);
-  virtual void onSendEndImpl();
-  virtual bool isUploadedFile(const String& filename);
-  virtual bool getFiles(std::string &files);
+  const char *getUrl() override;
+  const char *getRemoteHost() override;
+  uint16_t getRemotePort() override;
+  const void *getPostData(size_t &size) override;
+  Method getMethod() override;
+  std::string getHeader(const char *name) override;
+  const HeaderMap& getHeaders() override;
+  void addHeaderImpl(const char *name, const char *value) override;
+  void removeHeaderImpl(const char *name) override;
+  void sendImpl(const void *data, int size, int code, bool chunked, bool eom)
+       override;
+  void onSendEndImpl() override;
+  bool isUploadedFile(const String& filename) override;
+  bool getFiles(std::string &files) override;
+
+  /**
+   * Get a description of the type of transport.
+   */
+  String describe() const override {
+    return s_pagelet;
+  }
 
   // task interface
   bool isDone();
@@ -118,10 +133,7 @@ public:
     int64_t timeout_ms
   );
 
-  bool getResults(
-    Array &results,
-    PageletServerTaskEvent* next_event
-  );
+  Array getAsyncResults(bool allow_empty);
 
   // ref counting
   void incRefCount();
@@ -151,13 +163,17 @@ private:
   std::set<std::string> m_rfc1867UploadedFiles;
   std::string m_files; // serialized to use as $_FILES
 
+  // points to an event with an attached waithandle from a different request
   PageletServerTaskEvent *m_event;
 };
 
-class PageletServerTaskEvent final : public AsioExternalThreadEvent {
-public:
+struct PageletServerTaskEvent final : AsioExternalThreadEvent {
 
-  ~PageletServerTaskEvent() {
+  PageletServerTaskEvent() = default;
+  PageletServerTaskEvent(const PageletServerTaskEvent&) = delete;
+  PageletServerTaskEvent& operator=(const PageletServerTaskEvent&) = delete;
+
+  ~PageletServerTaskEvent() override {
     if (m_job) m_job->decRefCount();
   }
 
@@ -171,35 +187,13 @@ public:
   }
 
 protected:
-
-  void unserialize(Cell& result) override final {
-    // Main string responses from pagelet thread.
-    Array responses = Array::Create();
-
-    // Create an event for the next results that might be used.
-    PageletServerTaskEvent *event = new PageletServerTaskEvent();
-
-    // Fetch all results from the transport that are currently available.
-    bool done = m_job->getResults(responses, event);
-
-    // Returned tuple/array.
-    Array ret = Array::Create();
-    ret.append(responses);
-
-    if (done) {
-      // If the whole thing is done, then we don't need a next event.
-      event->abandon();
-      ret.append(init_null_variant);
-    } else {
-      // The event was added to the job to be triggered next.
-      ret.append(Variant{event->getWaitHandle()});
-    }
-
-    cellDup(*(Variant(ret)).asCell(), result);
+ void unserialize(TypedValue& result) final {
+   tvCopy(make_array_like_tv(m_job->getAsyncResults(false).detach()), result);
   }
 
 private:
-  PageletTransport* m_job;
+
+  PageletTransport* m_job{nullptr};
   // string m_response;
   // Object m_next_wait_handle;
 };

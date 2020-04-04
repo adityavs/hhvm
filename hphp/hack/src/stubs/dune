@@ -1,0 +1,135 @@
+(library
+  (name ai_stubs)
+  (wrapped false)
+  (modules
+    ai
+    ai_options)
+  (libraries
+    errors))
+
+(library
+  (name artifact_store_stubs)
+  (wrapped false)
+  (modules
+    artifactStore)
+  (libraries
+    errors))
+
+(library
+  (name build)
+  (wrapped false)
+  (modules
+    buildMain))
+
+(library
+  (name rust_ffi_stubs)
+  (wrapped false)
+  (modules ))
+
+(library
+  (name linting_stubs)
+  (wrapped false)
+  (modules
+    linting_service))
+
+(library
+  (name load_script_stubs)
+  (wrapped false)
+  (modules
+    load_script
+    loadScriptConfig
+    loadScriptUtils))
+
+(library
+  (name messages_stubs)
+  (wrapped false)
+  (modules
+    clientMessages))
+
+(library
+  (name vfs_stubs)
+  (wrapped false)
+  (modules
+    vfs)
+  (libraries
+    relative_path))
+
+(library
+  (name typing_service_api_stubs)
+  (wrapped false)
+  (modules
+    typing_service_delegate)
+  (libraries
+    typing_service_api))
+
+(library
+  (name remote_worker_stubs)
+  (wrapped false)
+  (modules
+    remoteWorker)
+  (libraries
+    ci_util_stubs
+    errors
+    file_info
+    future
+    naming
+    relative_path
+    sys_utils))
+
+(library
+  (name job_runner_stubs)
+    (wrapped false)
+  (modules
+    jobRunner))
+
+(library
+  (name state_loader_stubs)
+  (wrapped false)
+  (modules
+    state_loader
+    saved_state_loader
+    state_loader_futures
+    state_loader_lwt
+    xdb)
+  (libraries
+    hg
+    server_monitor))
+
+(library
+  (name decl_ipc_ffi_externs)
+  (wrapped false)
+  (modules
+    decl_ipc_ffi_externs))
+
+(library
+  (name experiments_config_file_stubs)
+  (wrapped false)
+  (modules
+    experiments_config_file))
+
+(library
+  (name ci_util_stubs)
+  (wrapped false)
+  (modules
+    ci_util)
+  (libraries
+    future))
+
+(library
+  (name glean_dependency_graph_stubs)
+  (wrapped false)
+  (modules
+    glean_dependency_graph)
+  (libraries
+    hh_json
+    collections))
+
+(library
+  (name exec_command_stubs)
+  (wrapped false)
+  (modules exec_command))
+
+(library
+  (name clowder_paste)
+  (wrapped false)
+  (modules clowder_paste))

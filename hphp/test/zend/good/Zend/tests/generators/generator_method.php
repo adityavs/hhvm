@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Test implements IteratorAggregate {
     protected $data;
@@ -13,10 +13,9 @@ class Test implements IteratorAggregate {
         }
     }
 }
-
-$test = new Test(['foo', 'bar', 'baz']);
+<<__EntryPoint>> function main(): void {
+$test = new Test(varray['foo', 'bar', 'baz']);
 foreach ($test as $value) {
     var_dump($value);
 }
-
-?>
+}

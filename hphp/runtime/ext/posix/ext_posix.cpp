@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,92 +19,65 @@
 #include <memory>
 
 #include <sys/times.h>
-#include <sys/time.h>
+#include <folly/portability/SysTime.h>
 #include <sys/utsname.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/resource.h>
+#include <folly/portability/SysResource.h>
 #ifdef __FreeBSD__
 #include <sys/param.h>
 #endif
-#include <unistd.h>
+#ifdef __linux__
+#include <sys/sysmacros.h>
+#endif
+#include <folly/portability/Unistd.h>
 #include <pwd.h>
 
+#include <folly/container/Array.h>
 #include <folly/String.h>
 
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/file.h"
+#include "hphp/runtime/base/request-injection-data.h"
+#include "hphp/runtime/server/cli-server.h"
+#include "hphp/util/sync-signal.h"
+#include "hphp/util/user-info.h"
 
 namespace HPHP {
 
-#define DEFINE_POSIX_CONSTANT(name)                                            \
-  const int64_t k_POSIX_##name = name;                                         \
-  static const StaticString s_POSIX_##name("POSIX_"#name)                      \
-
-DEFINE_POSIX_CONSTANT(S_IFMT);
-DEFINE_POSIX_CONSTANT(S_IFSOCK);
-DEFINE_POSIX_CONSTANT(S_IFLNK);
-DEFINE_POSIX_CONSTANT(S_IFREG);
-DEFINE_POSIX_CONSTANT(S_IFBLK);
-DEFINE_POSIX_CONSTANT(S_IFDIR);
-DEFINE_POSIX_CONSTANT(S_IFCHR);
-DEFINE_POSIX_CONSTANT(S_IFIFO);
-DEFINE_POSIX_CONSTANT(S_ISUID);
-DEFINE_POSIX_CONSTANT(S_ISGID);
-DEFINE_POSIX_CONSTANT(S_ISVTX);
-DEFINE_POSIX_CONSTANT(S_IRWXU);
-DEFINE_POSIX_CONSTANT(S_IRUSR);
-DEFINE_POSIX_CONSTANT(S_IWUSR);
-DEFINE_POSIX_CONSTANT(S_IXUSR);
-DEFINE_POSIX_CONSTANT(S_IRWXG);
-DEFINE_POSIX_CONSTANT(S_IRGRP);
-DEFINE_POSIX_CONSTANT(S_IWGRP);
-DEFINE_POSIX_CONSTANT(S_IXGRP);
-DEFINE_POSIX_CONSTANT(S_IRWXO);
-DEFINE_POSIX_CONSTANT(S_IROTH);
-DEFINE_POSIX_CONSTANT(S_IWOTH);
-DEFINE_POSIX_CONSTANT(S_IXOTH);
-DEFINE_POSIX_CONSTANT(F_OK);
-DEFINE_POSIX_CONSTANT(X_OK);
-DEFINE_POSIX_CONSTANT(W_OK);
-DEFINE_POSIX_CONSTANT(R_OK);
-
 ///////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_POSIX_CONSTANT(name)                                          \
-  Native::registerConstant<KindOfInt64>(s_POSIX_##name.get(), k_POSIX_##name)  \
-
-static class POSIXExtension final : public Extension {
-public:
-  POSIXExtension() : Extension("posix", NO_EXTENSION_VERSION_YET) {}
+static struct POSIXExtension final : Extension {
+  POSIXExtension() : Extension("posix", "1.0") {}
   void moduleInit() override {
-    REGISTER_POSIX_CONSTANT(S_IFMT);
-    REGISTER_POSIX_CONSTANT(S_IFSOCK);
-    REGISTER_POSIX_CONSTANT(S_IFLNK);
-    REGISTER_POSIX_CONSTANT(S_IFREG);
-    REGISTER_POSIX_CONSTANT(S_IFBLK);
-    REGISTER_POSIX_CONSTANT(S_IFDIR);
-    REGISTER_POSIX_CONSTANT(S_IFCHR);
-    REGISTER_POSIX_CONSTANT(S_IFIFO);
-    REGISTER_POSIX_CONSTANT(S_ISUID);
-    REGISTER_POSIX_CONSTANT(S_ISGID);
-    REGISTER_POSIX_CONSTANT(S_ISVTX);
-    REGISTER_POSIX_CONSTANT(S_IRWXU);
-    REGISTER_POSIX_CONSTANT(S_IRUSR);
-    REGISTER_POSIX_CONSTANT(S_IWUSR);
-    REGISTER_POSIX_CONSTANT(S_IXUSR);
-    REGISTER_POSIX_CONSTANT(S_IRWXG);
-    REGISTER_POSIX_CONSTANT(S_IRGRP);
-    REGISTER_POSIX_CONSTANT(S_IWGRP);
-    REGISTER_POSIX_CONSTANT(S_IXGRP);
-    REGISTER_POSIX_CONSTANT(S_IRWXO);
-    REGISTER_POSIX_CONSTANT(S_IROTH);
-    REGISTER_POSIX_CONSTANT(S_IWOTH);
-    REGISTER_POSIX_CONSTANT(S_IXOTH);
-    REGISTER_POSIX_CONSTANT(F_OK);
-    REGISTER_POSIX_CONSTANT(X_OK);
-    REGISTER_POSIX_CONSTANT(W_OK);
-    REGISTER_POSIX_CONSTANT(R_OK);
+    HHVM_RC_INT(POSIX_S_IFMT, S_IFMT);
+    HHVM_RC_INT(POSIX_S_IFSOCK, S_IFSOCK);
+    HHVM_RC_INT(POSIX_S_IFLNK, S_IFLNK);
+    HHVM_RC_INT(POSIX_S_IFREG, S_IFREG);
+    HHVM_RC_INT(POSIX_S_IFBLK, S_IFBLK);
+    HHVM_RC_INT(POSIX_S_IFDIR, S_IFDIR);
+    HHVM_RC_INT(POSIX_S_IFCHR, S_IFCHR);
+    HHVM_RC_INT(POSIX_S_IFIFO, S_IFIFO);
+    HHVM_RC_INT(POSIX_S_ISUID, S_ISUID);
+    HHVM_RC_INT(POSIX_S_ISGID, S_ISGID);
+    HHVM_RC_INT(POSIX_S_ISVTX, S_ISVTX);
+    HHVM_RC_INT(POSIX_S_IRWXU, S_IRWXU);
+    HHVM_RC_INT(POSIX_S_IRUSR, S_IRUSR);
+    HHVM_RC_INT(POSIX_S_IWUSR, S_IWUSR);
+    HHVM_RC_INT(POSIX_S_IXUSR, S_IXUSR);
+    HHVM_RC_INT(POSIX_S_IRWXG, S_IRWXG);
+    HHVM_RC_INT(POSIX_S_IRGRP, S_IRGRP);
+    HHVM_RC_INT(POSIX_S_IWGRP, S_IWGRP);
+    HHVM_RC_INT(POSIX_S_IXGRP, S_IXGRP);
+    HHVM_RC_INT(POSIX_S_IRWXO, S_IRWXO);
+    HHVM_RC_INT(POSIX_S_IROTH, S_IROTH);
+    HHVM_RC_INT(POSIX_S_IWOTH, S_IWOTH);
+    HHVM_RC_INT(POSIX_S_IXOTH, S_IXOTH);
+    HHVM_RC_INT(POSIX_F_OK, F_OK);
+    HHVM_RC_INT(POSIX_X_OK, X_OK);
+    HHVM_RC_INT(POSIX_W_OK, W_OK);
+    HHVM_RC_INT(POSIX_R_OK, R_OK);
 
     HHVM_FE(posix_access);
     HHVM_FE(posix_ctermid);
@@ -152,6 +125,10 @@ public:
 bool HHVM_FUNCTION(posix_access,
                    const String& file,
                    int mode /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(file, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   String path = File::TranslatePath(file);
   if (path.empty()) {
     return false;
@@ -186,14 +163,20 @@ String HHVM_FUNCTION(posix_getcwd) {
 }
 
 int64_t HHVM_FUNCTION(posix_getegid) {
+  if (auto cred = get_cli_ucred()) return cred->gid;
+
   return getegid();
 }
 
 int64_t HHVM_FUNCTION(posix_geteuid) {
+  if (auto cred = get_cli_ucred()) return cred->uid;
+
   return geteuid();
 }
 
 int64_t HHVM_FUNCTION(posix_getgid) {
+  if (auto cred = get_cli_ucred()) return cred->gid;
+
   return getgid();
 }
 
@@ -207,59 +190,47 @@ const StaticString
   s_dir("dir"),
   s_shell("shell");
 
-static Variant php_posix_group_to_array(int gid,
-                   const String& gname = null_variant.toString()) {
-  // Don't pass a gid *and* a gname to this.
-  assert((gid <  0) || gname.size() == 0);
+static Variant php_posix_group_to_array(group* gr) {
+  // Invalid user.
+  if (gr == nullptr) return false;
 
-  if ((gid < 0) && (gname.size() == 0)) {
-    return false;
+  auto members = Array::CreateVArray();
+  for (int count=0; gr->gr_mem[count] != NULL; count++) {
+    members.append(String(gr->gr_mem[count], CopyString));
   }
 
-  int grbuflen = sysconf(_SC_GETGR_R_SIZE_MAX);
-  if (grbuflen < 1) {
-    return false;
-  }
-
-  std::unique_ptr<char[]> grbuf(new char[grbuflen]);
-  struct group gr;
-  struct group *retgrptr = NULL;
-
-  // If we somehow reach this point and both gname and gid were
-  // passed, then the gid values will override the gname values,
-  // but it will otherwise function just fine.
-  // The assert() clause above should prevent that, however.
-  if ((gname.size() > 0) &&
-      (getgrnam_r(gname.data(), &gr, grbuf.get(), grbuflen, &retgrptr) != 0 ||
-      retgrptr == nullptr)) {
-    return false;
-  } else if ((gid >= 0) &&
-      (getgrgid_r(gid, &gr, grbuf.get(), grbuflen, &retgrptr) != 0 ||
-      retgrptr == nullptr)) {
-    return false;
-  }
-
-  Array members = Array::Create();
-  for (int count=0; gr.gr_mem[count] != NULL; count++) {
-    members.append(String(gr.gr_mem[count], CopyString));
-  }
-
-  return make_map_array(
-    s_name, String(gr.gr_name, CopyString),
-    s_passwd, String(gr.gr_passwd, CopyString),
+  return make_darray(
+    s_name, String(gr->gr_name, CopyString),
+    s_passwd, String(gr->gr_passwd, CopyString),
     s_members, members,
-    s_gid, (int)gr.gr_gid
+    s_gid, (int)gr->gr_gid
   );
 }
 
 Variant HHVM_FUNCTION(posix_getgrgid,
                       int gid) {
-  return php_posix_group_to_array(gid);
+  if (gid < 0) return false;
+
+  auto buf = GroupBuffer{};
+  group* gr;
+  if (getgrgid_r(gid, &buf.ent, buf.data.get(), buf.size, &gr)) {
+    // Failed to obtain the record.
+    return false;
+  }
+  return php_posix_group_to_array(gr);
 }
 
 Variant HHVM_FUNCTION(posix_getgrnam,
                       const String& name) {
-  return php_posix_group_to_array(-1, name.data());
+  if (name.size() == 0) return false;
+
+  auto buf = GroupBuffer{};
+  group* gr;
+  if (getgrnam_r(name.data(), &buf.ent, buf.data.get(), buf.size, &gr)) {
+    // Failed to obtain the record.
+    return false;
+  }
+  return php_posix_group_to_array(gr);
 }
 
 Variant HHVM_FUNCTION(posix_getgroups) {
@@ -269,11 +240,11 @@ Variant HHVM_FUNCTION(posix_getgroups) {
     return false;
   }
 
-  Array ret;
+  VArrayInit ret(result);
   for (int i = 0; i < result; i++) {
     ret.append((int)gidlist[i]);
   }
-  return ret;
+  return ret.toVariant();
 }
 
 Variant HHVM_FUNCTION(posix_getlogin) {
@@ -307,60 +278,53 @@ int64_t HHVM_FUNCTION(posix_getppid) {
   return getppid();
 }
 
-static Variant php_posix_passwd_to_array(int uid,
-                   const String& name = null_variant.toString()) {
-  // Don't pass a uid *and* a name to this.
-  assert((uid <  0) || name.size() == 0);
+static Variant php_posix_passwd_to_array(passwd* pw) {
+  // Invalid user.
+  if (pw == nullptr) return false;
 
-  if ((uid < 0) && name.size() == 0) {
-    return false;
-  }
-
-  int pwbuflen = sysconf(_SC_GETPW_R_SIZE_MAX);
-  if (pwbuflen < 1) {
-    return false;
-  }
-
-  std::unique_ptr<char[]> pwbuf(new char[pwbuflen]);
-  struct passwd pw;
-  struct passwd *retpwptr = NULL;
-
-  // If we somehow reach this point and both name and uid were
-  // passed, then the uid values will override the name values,
-  // but it will otherwise function just fine.
-  // The assert() clauses above should prevent that, however.
-  if ((name.size() > 0) &&
-      getpwnam_r(name.data(), &pw, pwbuf.get(), pwbuflen, &retpwptr)) {
-    return false;
-  } else if ((uid >= 0) &&
-      getpwuid_r(uid, &pw, pwbuf.get(), pwbuflen, &retpwptr)) {
-    return false;
-  }
-
-  if (!retpwptr) return false;
-
-  return make_map_array(
-    s_name,   String(pw.pw_name,   CopyString),
-    s_passwd, String(pw.pw_passwd, CopyString),
-    s_uid,    (int)pw.pw_uid,
-    s_gid,    (int)pw.pw_gid,
-    s_gecos,  String(pw.pw_gecos,  CopyString),
-    s_dir,    String(pw.pw_dir,    CopyString),
-    s_shell,  String(pw.pw_shell,  CopyString)
+  return make_darray(
+    s_name,   String(pw->pw_name,   CopyString),
+    s_passwd, String(pw->pw_passwd, CopyString),
+    s_uid,    (int)pw->pw_uid,
+    s_gid,    (int)pw->pw_gid,
+    s_gecos,  String(pw->pw_gecos,  CopyString),
+    s_dir,    String(pw->pw_dir,    CopyString),
+    s_shell,  String(pw->pw_shell,  CopyString)
   );
 }
 
 Variant HHVM_FUNCTION(posix_getpwnam,
                       const String& username) {
-  return php_posix_passwd_to_array(-1, username);
+  if (username.size() == 0) return false;
+
+  auto buf = PasswdBuffer{};
+  passwd* pw;
+  if (getpwnam_r(username.data(), &buf.ent, buf.data.get(), buf.size, &pw)) {
+    // Failed to obtain the record.
+    return false;
+  }
+  return php_posix_passwd_to_array(pw);
 }
 
 Variant HHVM_FUNCTION(posix_getpwuid,
                       int uid) {
-  return php_posix_passwd_to_array(uid);
+  if (uid < 0) return false;
+
+  auto buf = PasswdBuffer{};
+  passwd* pw;
+  if (getpwuid_r(uid, &buf.ent, buf.data.get(), buf.size, &pw)) {
+    // Failed to obtain the record.
+    return false;
+  }
+  return php_posix_passwd_to_array(pw);
 }
 
-static bool posix_addlimit(int limit, const char *name, Array &ret) {
+namespace {
+
+const StaticString s_unlimited{"unlimited"};
+
+template <class T>
+bool posix_addlimit(int limit, const char *name, T &ret) {
   char hard[80]; snprintf(hard, 80, "hard %s", name);
   char soft[80]; snprintf(soft, 80, "soft %s", name);
 
@@ -374,13 +338,13 @@ static bool posix_addlimit(int limit, const char *name, Array &ret) {
   String hardStr(hard, CopyString);
 
   if (rl.rlim_cur == RLIM_INFINITY) {
-    ret.set(softStr, "unlimited");
+    ret.set(softStr, s_unlimited);
   } else {
     ret.set(softStr, (int)rl.rlim_cur);
   }
 
   if (rl.rlim_max == RLIM_INFINITY) {
-    ret.set(hardStr, "unlimited");
+    ret.set(hardStr, s_unlimited);
   } else {
     ret.set(hardStr, (int)rl.rlim_max);
   }
@@ -388,38 +352,36 @@ static bool posix_addlimit(int limit, const char *name, Array &ret) {
   return true;
 }
 
-static struct limitlist {
-  int limit;
-  const char *name;
-} limits[] = {
-  { RLIMIT_CORE,    "core" },
-  { RLIMIT_DATA,    "data" },
-  { RLIMIT_STACK,   "stack" },
+constexpr auto limits = folly::make_array<std::pair<int, const char *>>(
+  std::make_pair(RLIMIT_CORE,    "core"),
+  std::make_pair(RLIMIT_DATA,    "data"),
+  std::make_pair(RLIMIT_STACK,   "stack"),
   //{ RLIMIT_VMEM,    "virtualmem" },
-  { RLIMIT_AS,      "totalmem" },
+  std::make_pair(RLIMIT_AS,      "totalmem"),
 #ifdef RLIMIT_RSS
-  { RLIMIT_RSS,     "rss" },
+  std::make_pair(RLIMIT_RSS,     "rss"),
 #endif
 #ifdef RLIMIT_NPROC
-  { RLIMIT_NPROC,   "maxproc" },
+  std::make_pair(RLIMIT_NPROC,   "maxproc"),
 #endif
 #ifdef RLIMIT_MEMLOCK
-  { RLIMIT_MEMLOCK, "memlock" },
+  std::make_pair(RLIMIT_MEMLOCK, "memlock"),
 #endif
-  { RLIMIT_CPU,     "cpu" },
-  { RLIMIT_FSIZE,   "filesize" },
-  { RLIMIT_NOFILE,  "openfiles" },
-  { 0, NULL }
-};
+  std::make_pair(RLIMIT_CPU,     "cpu"),
+  std::make_pair(RLIMIT_FSIZE,   "filesize"),
+  std::make_pair(RLIMIT_NOFILE,  "openfiles")
+);
+
+} // namespace
 
 Variant HHVM_FUNCTION(posix_getrlimit) {
-  Array ret;
-  for (struct limitlist *l = limits; l->name; l++) {
-    if (!posix_addlimit(l->limit, l->name, ret)) {
+  DArrayInit ret{2 * limits.size()};
+  for (auto const l : limits) {
+    if (!posix_addlimit(l.first, l.second, ret)) {
       return false;
     }
   }
-  return ret;
+  return ret.toVariant();
 }
 
 Variant HHVM_FUNCTION(posix_getsid,
@@ -430,6 +392,8 @@ Variant HHVM_FUNCTION(posix_getsid,
 }
 
 int64_t HHVM_FUNCTION(posix_getuid) {
+  if (auto cred = get_cli_ucred()) return cred->uid;
+
   return getuid();
 }
 
@@ -462,12 +426,24 @@ bool HHVM_FUNCTION(posix_isatty,
 bool HHVM_FUNCTION(posix_kill,
                    int pid,
                    int sig) {
+  if (pid == 0 || pid == getpid()) {
+    if (is_sync_signal(sig)) {
+      // Only send to the current thread, and invoke signal handlers in PHP, if
+      // any.
+      RID().sendSignal(sig);
+      return true;
+    }
+  }
   return kill(pid, sig) >= 0;
 }
 
 bool HHVM_FUNCTION(posix_mkfifo,
                    const String& pathname,
                    int mode) {
+  if (!FileUtil::checkPathAndWarn(pathname, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   return mkfifo(pathname.data(), mode) >= 0;
 }
 
@@ -476,6 +452,10 @@ bool HHVM_FUNCTION(posix_mknod,
                    int mode,
                    int major /* = 0 */,
                    int minor /* = 0 */) {
+  if (!FileUtil::checkPathAndWarn(pathname, __FUNCTION__ + 2, 1)) {
+    return false;
+  }
+
   dev_t php_dev = 0;
   if ((mode & S_IFCHR) || (mode & S_IFBLK)) {
     if (major == 0 && minor == 0) {
@@ -526,7 +506,7 @@ bool HHVM_FUNCTION(posix_setuid,
 
 String HHVM_FUNCTION(posix_strerror,
                      int errnum) {
-  return String(folly::errnoStr(errnum).toStdString());
+  return String(folly::errnoStr(errnum));
 }
 
 const StaticString
@@ -543,7 +523,7 @@ Variant HHVM_FUNCTION(posix_times) {
     return false;
   }
 
-  return make_map_array(
+  return make_darray(
     s_ticks,  (int)ticks,        /* clock ticks */
     s_utime,  (int)t.tms_utime,  /* user time */
     s_stime,  (int)t.tms_stime,  /* system time */
@@ -582,16 +562,16 @@ Variant HHVM_FUNCTION(posix_uname) {
     return false;
   }
 
-  Array ret;
-  ret.set(s_sysname,    String(u.sysname,    CopyString));
-  ret.set(s_nodename,   String(u.nodename,   CopyString));
-  ret.set(s_release,    String(u.release,    CopyString));
-  ret.set(s_version,    String(u.version,    CopyString));
-  ret.set(s_machine,    String(u.machine,    CopyString));
+  return make_darray(
+    s_sysname,      String(u.sysname,    CopyString)
+    , s_nodename,   String(u.nodename,   CopyString)
+    , s_release,    String(u.release,    CopyString)
+    , s_version,    String(u.version,    CopyString)
+    , s_machine,    String(u.machine,    CopyString)
 #if defined(_GNU_SOURCE)
-  ret.set(s_domainname, String(u.domainname, CopyString));
+    , s_domainname, String(u.domainname, CopyString)
 #endif
-  return ret;
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////

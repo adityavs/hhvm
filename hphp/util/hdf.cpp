@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,11 @@
 
 #include "hphp/util/hdf.h"
 
-#include <boost/algorithm/string/predicate.hpp>
+#include <mutex>
 
-#include "hphp/util/lock.h"
+#include <folly/portability/String.h>
+
+#include <boost/algorithm/string/predicate.hpp>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -26,13 +28,12 @@ namespace HPHP {
 /**
  * Helper class storing HDF raw pointer and reference counts on it.
  */
-class HdfRaw {
-public:
-  static Mutex HdfMutex;
+struct HdfRaw {
+  static std::mutex HdfMutex;
 
   HdfRaw() : m_hdf(nullptr), m_count(1) {
     // ClearSilver is not thread-safe when calling hdf_init(), so guarding it.
-    Lock lock(HdfMutex);
+    std::lock_guard<std::mutex> lock(HdfMutex);
     Hdf::CheckNeoError(hdf_init(&m_hdf));
     assert(m_hdf);
   }
@@ -49,7 +50,7 @@ public:
   void dec() { assert(m_count > 0); if (--m_count == 0) { delete this;}}
 };
 
-Mutex HdfRaw::HdfMutex;
+std::mutex HdfRaw::HdfMutex;
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors
@@ -328,6 +329,13 @@ double Hdf::configGetDouble(double defValue /* = 0 */) const {
   return n;
 }
 
+void Hdf::configGet(std::vector<uint32_t> &values) const {
+  values.clear();
+  for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
+    values.push_back(hdf.configGetUInt32(0));
+  }
+}
+
 void Hdf::configGet(std::vector<std::string> &values) const {
   values.clear();
   for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
@@ -346,6 +354,13 @@ void Hdf::configGet(boost::container::flat_set<std::string> &values) const {
   values.clear();
   for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
     values.insert(hdf.configGetString(""));
+  }
+}
+
+void Hdf::configGet(std::unordered_map<std::string, int> &values) const {
+  values.clear();
+  for (Hdf hdf = firstChild(); hdf.exists(); hdf = hdf.next()) {
+    values[hdf.getName()] = hdf.configGetInt32();
   }
 }
 

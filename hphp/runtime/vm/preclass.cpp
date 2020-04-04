@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,7 @@
 
 #include "hphp/runtime/vm/preclass.h"
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/repo-auth-type.h"
@@ -45,7 +46,8 @@ PreClass::PreClass(Unit* unit, int line1, int line2, Offset o,
   , m_name(n)
   , m_parent(parent)
   , m_docComment(docComment)
-{}
+{
+}
 
 PreClass::~PreClass() {
   std::for_each(methods(), methods() + numMethods(), Func::destroy);
@@ -58,7 +60,7 @@ void PreClass::atomicRelease() {
 const StringData* PreClass::manglePropName(const StringData* className,
                                            const StringData* propName,
                                            Attr attrs) {
-  switch (attrs & (AttrPublic|AttrProtected|AttrPrivate)) {
+  switch (attrs & VisibilityAttrs) {
     case AttrPublic: {
       return propName;
     }
@@ -78,11 +80,16 @@ const StringData* PreClass::manglePropName(const StringData* className,
       mangledName += propName->data();
       return makeStaticString(mangledName);
     }
-    default: not_reached();
+    default:
+      //Failing here will cause the VM to crash before the Verifier runs, so we
+      //defer the failure to runtime so the Verifier can report this problem to
+      //the user.
+      return staticEmptyString();
   }
 }
 
 void PreClass::prettyPrint(std::ostream &out) const {
+  if (m_attrs & AttrSealed) { out << "<<__Sealed()>> "; }
   out << "Class ";
   if (m_attrs & AttrAbstract) { out << "abstract "; }
   if (m_attrs & AttrFinal) { out << "final "; }
@@ -96,6 +103,14 @@ void PreClass::prettyPrint(std::ostream &out) const {
   if (m_attrs & AttrNoOverride){ out << " (nooverride)"; }
   if (m_attrs & AttrUnique)     out << " (unique)";
   if (m_attrs & AttrPersistent) out << " (persistent)";
+  if (m_attrs & AttrIsConst) {
+    // AttrIsConst classes will always also have AttrForbidDynamicProps set,
+    // so don't bother printing it
+    out << " (const)";
+  } else if (m_attrs & AttrForbidDynamicProps) {
+    out << " (no-dynamic-props)";
+  }
+  if (m_attrs & AttrDynamicallyConstructible) out << " (dyn_constructible)";
   if (m_id != -1) {
     out << " (ID " << m_id << ")";
   }
@@ -119,23 +134,57 @@ void PreClass::prettyPrint(std::ostream &out) const {
   }
 }
 
+const StaticString s___Sealed("__Sealed");
+void PreClass::enforceInMaybeSealedParentWhitelist(
+  const PreClass* parentPreClass) const {
+  // if our parent isn't sealed, then we're fine. If we're a mock, YOLO
+  if (!(parentPreClass->attrs() & AttrSealed) ||
+      m_userAttributes.find(s___MockClass.get()) != m_userAttributes.end()) {
+    return;
+  }
+  const UserAttributeMap& parent_attrs = parentPreClass->userAttributes();
+  assertx(parent_attrs.find(s___Sealed.get()) != parent_attrs.end());
+  const auto& parent_sealed_attr = parent_attrs.find(s___Sealed.get())->second;
+  bool in_sealed_whitelist = false;
+  IterateV(parent_sealed_attr.m_data.parr,
+           [&in_sealed_whitelist, this](TypedValue v) -> bool {
+             if (v.m_data.pstr->same(name())) {
+               in_sealed_whitelist = true;
+               return true;
+             }
+             return false;
+           });
+  if (!in_sealed_whitelist) {
+    raise_error("Class %s may not inherit from sealed %s (%s) without "
+                "being in the whitelist",
+                name()->data(),
+                parentPreClass->attrs() & AttrInterface ? "interface" : "class",
+                parentPreClass->name()->data());
+  }
+}
+
+
 ///////////////////////////////////////////////////////////////////////////////
 // PreClass::Prop.
 
 PreClass::Prop::Prop(PreClass* preClass,
                      const StringData* name,
                      Attr attrs,
-                     const StringData* typeConstraint,
+                     const StringData* userType,
+                     const TypeConstraint& typeConstraint,
                      const StringData* docComment,
                      const TypedValue& val,
-                     RepoAuthType repoAuthType)
+                     RepoAuthType repoAuthType,
+                     UserAttributeMap userAttributes)
   : m_name(name)
   , m_mangledName(manglePropName(preClass->name(), name, attrs))
   , m_attrs(attrs)
-  , m_typeConstraint(typeConstraint)
+  , m_userType{userType}
   , m_docComment(docComment)
   , m_val(val)
   , m_repoAuthType{repoAuthType}
+  , m_typeConstraint{typeConstraint}
+  , m_userAttributes(userAttributes)
 {}
 
 void PreClass::Prop::prettyPrint(std::ostream& out,
@@ -146,13 +195,29 @@ void PreClass::Prop::prettyPrint(std::ostream& out,
   if (m_attrs & AttrProtected) { out << "protected "; }
   if (m_attrs & AttrPrivate) { out << "private "; }
   if (m_attrs & AttrPersistent) { out << "(persistent) "; }
+  if (m_attrs & AttrIsConst) { out << "(const) "; }
+  if (m_attrs & AttrTrait) { out << "(trait) "; }
+  if (m_attrs & AttrNoBadRedeclare) { out << "(no-bad-redeclare) "; }
+  if (m_attrs & AttrNoOverride) { out << "(no-override) "; }
+  if (m_attrs & AttrSystemInitialValue) { out << "(system-initial-val) "; }
+  if (m_attrs & AttrNoImplicitNullable) { out << "(no-implicit-nullable) "; }
+  if (m_attrs & AttrInitialSatisfiesTC) { out << "(initial-satisfies-tc) "; }
+  if (m_attrs & AttrLSB) { out << "(lsb) "; }
+  if (m_attrs & AttrLateInit) { out << "(late-init) "; }
   out << preClass->name()->data() << "::" << m_name->data() << " = ";
   if (m_val.m_type == KindOfUninit) {
     out << "<non-scalar>";
   } else {
-    std::stringstream ss;
+    std::string ss;
     staticStreamer(&m_val, ss);
-    out << ss.str();
+    out << ss;
+  }
+  out << " (RAT = " << show(m_repoAuthType) << ")";
+  if (m_userType && !m_userType->empty()) {
+    out << " (user-type = " << m_userType->data() << ")";
+  }
+  if (m_typeConstraint.hasConstraint()) {
+    out << " (tc = " << m_typeConstraint.displayName(nullptr, true) << ")";
   }
   out << std::endl;
 }
@@ -183,9 +248,9 @@ void PreClass::Const::prettyPrint(std::ostream& out,
   if (m_val.m_type == KindOfUninit) {
     out << " = " << "<non-scalar>";
   } else {
-    std::stringstream ss;
+    std::string ss;
     staticStreamer(&m_val, ss);
-    out << " = " << ss.str();
+    out << " = " << ss;
   }
   out << std::endl;
 }
@@ -195,13 +260,12 @@ void PreClass::Const::prettyPrint(std::ostream& out,
 
 PreClass::TraitAliasRule::NamePair
 PreClass::TraitAliasRule::asNamePair() const {
-  char* buf = (char*)alloca(sizeof(char) *
-    (traitName()->size() + origMethodName()->size() + 9));
-  sprintf(buf, "%s::%s",
-          traitName()->empty() ? "(null)" : traitName()->data(),
-          origMethodName()->data());
+  auto const tmp = folly::sformat(
+    "{}::{}",
+    traitName()->empty() ? "(null)" : traitName()->data(),
+    origMethodName());
 
-  auto origName = makeStaticString(buf);
+  auto origName = makeStaticString(tmp);
   return std::make_pair(newMethodName(), origName);
 }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -104,11 +104,11 @@ void BCPattern::matchAnchored(const Expr& pattern,
 
     if ((pos->op() == Op::JmpZ || pos->op() == Op::JmpNZ)) {
       // Match the taken block, if there is one.
-      auto off = instrJumpOffset(inst);
-      assert(off);
+      auto const offsets = instrJumpOffsets(inst);
+      assertx(offsets.size() == 1);
 
       auto res = result;
-      matchAnchored(pos->getTaken(), inst + *off, end, res);
+      matchAnchored(pos->getTaken(), inst + offsets[0], end, res);
 
       if (!res.found()) {
         return nomatch();

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,9 +33,63 @@ namespace HPHP { namespace jit {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+namespace vasm_detail {
+
+constexpr auto kInvalidConstraint = std::numeric_limits<int>::max();
+
+jit::vector<int> computeDominatingConstraints(Vunit& unit) {
+  auto vregConstraints = jit::vector<int>(unit.blocks.size(),
+                                          kInvalidConstraint);
+
+  auto const rpo = sortBlocks(unit);
+
+  // Calculate each block's dominating Vreg constraint.  The lowerer will use
+  // this as the initial Vreg constraint for each block, adjusting as it
+  // encounter vregrestrict{}/vregunrestrict{} during lowering.
+  vregConstraints[rpo[0]] = 0;
+  for (auto const b : rpo) {
+    auto con = vregConstraints[b];
+    assert_flog(con != kInvalidConstraint,
+                "Dominating constraint can't be uninitialized.");
+
+    // Iterate through the instructions, updating the constraint accordingly.
+    for (auto const& inst : unit.blocks[b].code) {
+      if (inst.op == Vinstr::vregrestrict) {
+        con--;
+      } else if (inst.op == Vinstr::vregunrestrict) {
+        con++;
+      }
+    }
+
+    // Pass the constraint to each of the successors, enforcing that a block
+    // isn't passed conflicting constraints from predecessors.
+    for (auto const s : succs(unit.blocks[b])) {
+      if (vregConstraints[s] == kInvalidConstraint) {
+        vregConstraints[s] = con;
+      } else {
+        assert_flog(
+          vregConstraints[s] == con,
+          "Block must be dominated by a single vreg constraint level."
+        );
+      }
+    }
+  }
+
+  return vregConstraints;
+}
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 namespace {
 
 ///////////////////////////////////////////////////////////////////////////////
+
+template<typename Lower>
+void lower_impl(Vunit& unit, Vlabel b, size_t i, Lower lower) {
+  vmodify(unit, b, i, [&] (Vout& v) { lower(v); return 1; });
+}
 
 template<class Inst>
 void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
@@ -55,22 +109,30 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
 
   auto const scratch = unit.makeScratchBlock();
   SCOPE_EXIT { unit.freeScratchBlock(scratch); };
-  Vout v(unit, scratch, vinstr.origin);
+  Vout v(unit, scratch, vinstr.irctx());
 
-  int32_t const adjust = (vargs.stkArgs.size() & 0x1) ? sizeof(uintptr_t) : 0;
-  if (adjust) v << subqi{adjust, rsp(), rsp(), v.makeReg()};
-
-  // Push stack arguments, in reverse order.
-  for (int i = vargs.stkArgs.size() - 1; i >= 0; --i) {
-    v << push{vargs.stkArgs[i]};
+  // Push stack arguments, in reverse order. Push in pairs without padding
+  // except for the last argument (pushed first) which should be padded if
+  // there are an odd number of arguments.
+  auto numArgs = vargs.stkArgs.size();
+  int32_t const adjust = (numArgs & 0x1) ? sizeof(uintptr_t) : 0;
+  if (adjust) {
+    // Using InvalidReg below fails SSA checks and simplify pass, so just
+    // push the arg twice. It's on the same cacheline and will actually
+    // perform faster than an explicit lea.
+    v << pushp{vargs.stkArgs[numArgs - 1], vargs.stkArgs[numArgs - 1]};
+    --numArgs;
+  }
+  for (auto i2 = numArgs; i2 >= 2; i2 -= 2) {
+    v << pushp{vargs.stkArgs[i2 - 1], vargs.stkArgs[i2 - 2]};
   }
 
   // Get the arguments in the proper registers.
   RegSet argRegs;
   auto doArgs = [&] (const VregList& srcs, PhysReg (*r)(size_t)) {
     VregList argDests;
-    for (size_t i = 0, n = srcs.size(); i < n; ++i) {
-      auto const reg = r(i);
+    for (size_t i2 = 0, n = srcs.size(); i2 < n; ++i2) {
+      auto const reg = r(i2);
       argDests.push_back(reg);
       argRegs |= reg;
     }
@@ -79,6 +141,7 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
                     v.makeTuple(std::move(argDests))};
     }
   };
+  doArgs(vargs.indRetArgs, rarg_ind_ret);
   doArgs(vargs.args, rarg);
   doArgs(vargs.simdArgs, rarg_simd);
 
@@ -102,8 +165,7 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
       assertx(taken.front().op == Vinstr::landingpad ||
               taken.front().op == Vinstr::jmp);
 
-      Vinstr vi { lea{rsp()[rspOffset], rsp()} };
-      vi.origin = taken.front().origin;
+      Vinstr vi { lea{rsp()[rspOffset], rsp()}, taken.front().irctx() };
 
       if (taken.front().op == Vinstr::jmp) {
         taken.insert(taken.begin(), vi);
@@ -127,7 +189,24 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
       static_assert(offsetof(TypedValue, m_type) == 8, "");
 
       if (dests.size() == 2) {
-        v << copy2{rret(0), rret(1), dests[0], dests[1]};
+        switch (arch()) {
+          case Arch::X64: // fall through
+          case Arch::PPC64:
+            v << copyargs{
+              v.makeTuple({rret(0), rret(1)}),
+              v.makeTuple({dests[0], dests[1]})
+            };
+            break;
+          case Arch::ARM:
+            // For ARM64 we need to clear the bits 8..31 from the type value.
+            // That allows us to use the resulting register values in
+            // type comparisons without the need for truncation there.
+            // We must not touch bits 63..32 as they contain the AUX data.
+            v << copy{rret(0), dests[0]};
+            v << andq{v.cns(0xffffffff000000ff),
+                      rret(1), dests[1], v.makeReg()};
+            break;
+        }
       } else {
         // We have cases where we statically know the type but need the value
         // from native call.  Even if the type does not really need a register
@@ -148,11 +227,20 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
 
     case DestType::SSA:
     case DestType::Byte:
-      assertx(dests.size() == 1);
+      assertx(dests.size() == 1 || dests.size() == 2);
       assertx(dests[0].isValid());
 
-      // Copy the single-register result to dests[0].
-      v << copy{rret(0), dests[0]};
+      if (dests.size() == 1) {
+        // Copy the single-register result to dests[0].
+        v << copy{rret(0), dests[0]};
+      } else {
+        assertx(dests[1].isValid());
+        // Copy the result pair to dests.
+        v << copyargs{
+          v.makeTuple({rret(0), rret(1)}),
+          v.makeTuple({dests[0], dests[1]})
+        };
+      }
       break;
 
     case DestType::Dbl:
@@ -160,6 +248,10 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
       assertx(dests.size() == 1);
       assertx(dests[0].isValid());
       v << copy{rret_simd(0), dests[0]};
+      break;
+
+    case DestType::Indirect:
+      // Already asserted above
       break;
 
     case DestType::None:
@@ -171,7 +263,7 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
     auto const delta = safe_cast<int32_t>(
       vargs.stkArgs.size() * sizeof(uintptr_t) + adjust
     );
-    v << addqi{delta, rsp(), rsp(), v.makeReg()};
+    v << lea{rsp()[delta], rsp()};
   }
 
   // Insert new instructions to the appropriate block.
@@ -185,21 +277,111 @@ void lower_vcall(Vunit& unit, Inst& inst, Vlabel b, size_t i) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template<typename Inst>
-void lower(Vunit& unit, Inst& inst, Vlabel b, size_t i) {}
+template <typename Inst>
+void lower(VLS& /*env*/, Inst& /*inst*/, Vlabel /*b*/, size_t /*i*/) {}
 
-void lower(Vunit& unit, vcall& inst, Vlabel b, size_t i) {
-  lower_vcall(unit, inst, b, i);
+void lower(VLS& env, vcall& inst, Vlabel b, size_t i) {
+  lower_vcall(env.unit, inst, b, i);
 }
-void lower(Vunit& unit, vinvoke& inst, Vlabel b, size_t i) {
-  lower_vcall(unit, inst, b, i);
+void lower(VLS& env, vinvoke& inst, Vlabel b, size_t i) {
+  lower_vcall(env.unit, inst, b, i);
 }
 
-void lower(Vunit& unit, defvmsp& inst, Vlabel b, size_t i) {
-  unit.blocks[b].code[i] = copy{rvmsp(), inst.d};
+void lower(VLS& env, vcallunpack& inst, Vlabel b, size_t i) {
+  // vcallunpack can only appear at the end of a block.
+  assertx(i == env.unit.blocks[b].code.size() - 1);
+
+  lower_impl(env.unit, b, i, [&] (Vout& v) {
+    auto const& srcs = env.unit.tuples[inst.extraArgs];
+    auto args = inst.args;
+    auto dsts = jit::vector<Vreg>{};
+
+    for (auto i = 0; i < srcs.size(); ++i) {
+      dsts.emplace_back(rarg(i));
+      args |= rarg(i);
+    }
+
+    v << copyargs{env.unit.makeTuple(srcs),
+                  env.unit.makeTuple(std::move(dsts))};
+    v << callunpack{inst.target, args};
+    v << unwind{{inst.targets[0], inst.targets[1]}};
+  });
 }
-void lower(Vunit& unit, syncvmsp& inst, Vlabel b, size_t i) {
-  unit.blocks[b].code[i] = copy{inst.s, rvmsp()};
+
+void lower(VLS& env, defvmsp& inst, Vlabel b, size_t i) {
+  env.unit.blocks[b].code[i] = copy{rvmsp(), inst.d};
+}
+void lower(VLS& env, syncvmsp& inst, Vlabel b, size_t i) {
+  env.unit.blocks[b].code[i] = copy{inst.s, rvmsp()};
+}
+
+void lower(VLS& env, defvmretdata& inst, Vlabel b, size_t i) {
+  env.unit.blocks[b].code[i] = copy{rret_data(), inst.data};
+}
+void lower(VLS& env, defvmrettype& inst, Vlabel b, size_t i) {
+  switch (arch()) {
+    case Arch::X64: // fall through
+    case Arch::PPC64:
+      env.unit.blocks[b].code[i] = copy{rret_type(), inst.type};
+      break;
+    case Arch::ARM:
+      // For ARM64 we need to clear the bits 8..31 from the type value.
+      // That allows us to use the resulting register values in
+      // type comparisons without the need for truncation there.
+      // We must not touch bits 63..32 as they contain the AUX data.
+      env.unit.blocks[b].code[i] = andq{
+        env.unit.makeConst(Vconst{0xffffffff000000ff}),
+        rret_type(), inst.type, env.unit.makeReg()};
+      break;
+  }
+}
+void lower(VLS& env, syncvmret& inst, Vlabel b, size_t i) {
+  switch (arch()) {
+    case Arch::X64: // fall through
+    case Arch::PPC64:
+      env.unit.blocks[b].code[i] = copyargs{
+        env.unit.makeTuple({inst.data, inst.type}),
+        env.unit.makeTuple({rret_data(), rret_type()})
+      };
+      break;
+    case Arch::ARM:
+      // For ARM64 we need to clear the bits 8..31 from the type value.
+      // That allows us to use the resulting register values in
+      // type comparisons without the need for truncation there.
+      // We must not touch bits 63..32 as they contain the AUX data.
+      lower_impl(env.unit, b, i, [&] (Vout& v) {
+        v << copy{inst.data, rret_data()};
+        v << andq{v.cns(0xffffffff000000ff),
+                  inst.type, rret_type(), v.makeReg()};
+      });
+      break;
+  }
+}
+void lower(VLS& env, syncvmrettype& inst, Vlabel b, size_t i) {
+  switch (arch()) {
+    case Arch::X64: // fall through
+    case Arch::PPC64:
+      env.unit.blocks[b].code[i] = copy{inst.type, rret_type()};
+      break;
+    case Arch::ARM:
+      // For ARM64 we need to clear the bits 8..31 from the type value.
+      // That allows us to use the resulting register values in
+      // type comparisons without the need for truncation there.
+      // We must not touch bits 63..32 as they contain the AUX data.
+      lower_impl(env.unit, b, i, [&] (Vout& v) {
+        v << andq{v.cns(0xffffffff000000ff),
+                  inst.type, rret_type(), v.makeReg()};
+      });
+      break;
+  }
+}
+void lower(VLS& env, vregrestrict& /*inst*/, Vlabel b, size_t i) {
+  env.vreg_restrict_level--;
+  env.unit.blocks[b].code[i] = nop{};
+}
+void lower(VLS& env, vregunrestrict& /*inst*/, Vlabel b, size_t i) {
+  env.vreg_restrict_level++;
+  env.unit.blocks[b].code[i] = nop{};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -208,37 +390,18 @@ void lower(Vunit& unit, syncvmsp& inst, Vlabel b, size_t i) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void vlower(Vunit& unit, Vlabel b, size_t i) {
-  Timer _t(Timer::vasm_lower);
-
-  auto& inst = unit.blocks[b].code[i];
+void vlower(VLS& env, Vlabel b, size_t i) {
+  auto& inst = env.unit.blocks[b].code[i];
 
   switch (inst.op) {
 #define O(name, ...)                    \
     case Vinstr::name:                  \
-      lower(unit, inst.name##_, b, i);  \
+      lower(env, inst.name##_, b, i);  \
       break;
 
     VASM_OPCODES
 #undef O
   }
-}
-
-void vlower(Vunit& unit) {
-  // This pass relies on having no critical edges in the unit.
-  splitCriticalEdges(unit);
-
-  auto& blocks = unit.blocks;
-
-  // The lowering operations for individual instructions may allocate scratch
-  // blocks, which may invalidate iterators on `blocks'.  Correctness of this
-  // pass relies on PostorderWalker /not/ using standard iterators on `blocks'.
-  PostorderWalker{unit}.dfs([&] (Vlabel b) {
-    assertx(!blocks[b].code.empty());
-    for (size_t i = 0; i < blocks[b].code.size(); ++i) {
-      vlower(unit, b, i);
-    }
-  });
 }
 
 ///////////////////////////////////////////////////////////////////////////////

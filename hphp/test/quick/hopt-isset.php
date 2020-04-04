@@ -1,4 +1,4 @@
-<?php
+<?hh
 class B {
   public function foo() {
     echo isset($this);
@@ -6,9 +6,7 @@ class B {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $b = new B;
   $b->foo();
 }
-
-main();

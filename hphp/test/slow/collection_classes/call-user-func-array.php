@@ -1,7 +1,7 @@
 <?hh
 class C {
-  public static function __callStatic($fn, $args) {
-    var_dump($fn, $args);
+  public static function foo(...$args) {
+    var_dump(__FUNCTION__, $args);
   }
 }
 function main() {
@@ -9,13 +9,13 @@ function main() {
   if ($GLOBALS['argc'] > 1000000000) {
     $cufa = 'call_user_func';
   }
-  call_user_func_array('var_dump', array(4 => 123, 6 => 456));
+  call_user_func_array('var_dump', darray[4 => 123, 6 => 456]);
   echo "\n";
-  call_user_func_array('C::foo', array(4 => 123, 6 => 456));
+  call_user_func_array('C::foo', darray[4 => 123, 6 => 456]);
   echo "\n";
-  $cufa('var_dump', array(4 => 123, 6 => 456));
+  $cufa('var_dump', darray[4 => 123, 6 => 456]);
   echo "\n";
-  $cufa('C::foo', array(4 => 123, 6 => 456));
+  $cufa('C::foo', darray[4 => 123, 6 => 456]);
   echo "\n";
   call_user_func_array('var_dump', Vector {123, 456});
   echo "\n";
@@ -58,5 +58,9 @@ function main() {
   $cufa('C::foo', Pair {11, 'a'});
   echo "\n";
 }
-main();
 
+
+<<__EntryPoint>>
+function main_call_user_func_array() {
+main();
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -40,112 +40,93 @@ AsyncGenerator::~AsyncGenerator() {
     return;
   }
 
-  assert(getState() != State::Running);
+  assertx(!isRunning());
 
   // Free locals, but don't trigger the EventHook for FunctionReturn since
   // the generator has already been exited. We don't want redundant calls.
   ActRec* ar = actRec();
-  frame_free_locals_inl_no_hook<false>(ar, ar->m_func->numLocals());
+  frame_free_locals_inl_no_hook(ar, ar->m_func->numLocals());
 }
 
 ObjectData*
 AsyncGenerator::Create(const ActRec* fp, size_t numSlots,
-                       jit::TCA resumeAddr, Offset resumeOffset) {
-  assert(fp);
-  assert(!fp->resumed());
-  assert(fp->func()->isAsyncGenerator());
+                       jit::TCA resumeAddr, Offset suspendOffset) {
+  assertx(fp);
+  assertx(!isResumed(fp));
+  assertx(fp->func()->isAsyncGenerator());
   const size_t frameSz = Resumable::getFrameSize(numSlots);
   const size_t genSz = genSize(sizeof(AsyncGenerator), frameSz);
-  auto const obj = BaseGenerator::Alloc(s_class, genSz);
+  auto const obj = BaseGenerator::Alloc<AsyncGenerator>(s_class, genSz);
   auto const genData = new (Native::data<AsyncGenerator>(obj)) AsyncGenerator();
   genData->resumable()->initialize<false>(fp,
                                           resumeAddr,
-                                          resumeOffset,
+                                          suspendOffset,
                                           frameSz,
                                           genSz);
   genData->setState(State::Created);
   return obj;
 }
 
-c_AsyncGeneratorWaitHandle*
-AsyncGenerator::await(Offset resumeOffset, c_WaitableWaitHandle* child) {
-  assert(getState() == State::Running);
-  resumable()->setResumeAddr(nullptr, resumeOffset);
-
-  if (m_waitHandle) {
-    // Resumed execution.
-    m_waitHandle->await(child);
-    return nullptr;
-  } else {
-    // Eager executon.
-    m_waitHandle = c_AsyncGeneratorWaitHandle::Create(this, child);
-    return m_waitHandle;
-  }
-}
-
 c_StaticWaitHandle*
-AsyncGenerator::yield(Offset resumeOffset,
-                      const Cell* key, const Cell value) {
-  assert(getState() == State::Running);
-  resumable()->setResumeAddr(nullptr, resumeOffset);
+AsyncGenerator::yield(Offset suspendOffset,
+                      const TypedValue* key, const TypedValue value) {
+  assertx(isRunning());
+  resumable()->setResumeAddr(nullptr, suspendOffset);
   setState(State::Started);
 
-  auto keyValueTuple = make_packed_array(
-    key ? Variant(tvAsCVarRef(key), Variant::CellCopy()) : init_null_variant,
-    Variant(tvAsCVarRef(&value), Variant::CellCopy()));
-  auto keyValueTupleTV = make_tv<KindOfArray>(keyValueTuple.detach());
+  auto keyValueTuple = make_varray(
+    key ? Variant(tvAsCVarRef(key), Variant::TVCopy()) : init_null_variant,
+    Variant(tvAsCVarRef(&value), Variant::TVCopy()));
+  auto keyValueTupleTV = make_array_like_tv(keyValueTuple.detach());
 
   if (m_waitHandle) {
     // Resumed execution.
-    m_waitHandle->ret(*tvAssertCell(&keyValueTupleTV));
-    m_waitHandle = nullptr;
+    req::ptr<c_AsyncGeneratorWaitHandle> wh(std::move(m_waitHandle));
+    wh->ret(*tvAssertPlausible(&keyValueTupleTV));
     return nullptr;
-  } else {
-    // Eager execution.
-    return c_StaticWaitHandle::CreateSucceeded(keyValueTupleTV);
   }
+  // Eager execution.
+  return c_StaticWaitHandle::CreateSucceeded(keyValueTupleTV);
 }
 
 c_StaticWaitHandle*
 AsyncGenerator::ret() {
-  assert(getState() == State::Running);
+  assertx(isRunning());
   setState(State::Done);
 
   auto nullTV = make_tv<KindOfNull>();
 
   if (m_waitHandle) {
-    // Resumed execution.
-    m_waitHandle->ret(nullTV);
-    m_waitHandle = nullptr;
+    // Resumed execution. Take wh out of `this` as ret() may free `this`.
+    req::ptr<c_AsyncGeneratorWaitHandle> wh(std::move(m_waitHandle));
+    wh->ret(nullTV);
     return nullptr;
-  } else {
-    return c_StaticWaitHandle::CreateSucceeded(nullTV);
   }
+  return c_StaticWaitHandle::CreateSucceeded(nullTV);
 }
 
 c_StaticWaitHandle*
 AsyncGenerator::fail(ObjectData* exception) {
-  assert(getState() == State::Running);
+  assertx(isRunning());
   setState(State::Done);
 
   if (m_waitHandle) {
-    // Resumed execution.
-    m_waitHandle->fail(exception);
-    m_waitHandle = nullptr;
+    // Resumed execution. Take wh out of `this` as fail() may free `this`.
+    req::ptr<c_AsyncGeneratorWaitHandle> wh(std::move(m_waitHandle));
+    wh->fail(exception);
     return nullptr;
-  } else {
-    return c_StaticWaitHandle::CreateFailed(exception);
   }
+  return c_StaticWaitHandle::CreateFailed(exception);
 }
 
 void AsyncGenerator::failCpp() {
-  assert(getState() == State::Running);
+  assertx(isRunning());
   setState(State::Done);
 
   if (m_waitHandle) {
-    // Resumed execution.
-    m_waitHandle->failCpp();
-    m_waitHandle = nullptr;
+    // Resumed execution. Take wh out of `this` as failCpp() may free `this`.
+    req::ptr<c_AsyncGeneratorWaitHandle> wh(std::move(m_waitHandle));
+    wh->failCpp();
   }
 }
 ///////////////////////////////////////////////////////////////////////////////
@@ -157,7 +138,7 @@ void AsioExtension::initAsyncGenerator() {
   loadSystemlib("async-generator");
   AsyncGenerator::s_class =
     Unit::lookupClass(AsyncGenerator::s_className.get());
-  assert(AsyncGenerator::s_class);
+  assertx(AsyncGenerator::s_class);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

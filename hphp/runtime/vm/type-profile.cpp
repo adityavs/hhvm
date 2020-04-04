@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,61 +16,51 @@
 
 #include "hphp/runtime/vm/type-profile.h"
 
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/request-info.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/vm/jit/mcgen-translate.h"
+#include "hphp/runtime/vm/jit/relocation.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
+
 #include <atomic>
 #include <cstdint>
-#include <queue>
-#include <utility>
-
-#include <tbb/concurrent_hash_map.h>
-
-#include "hphp/util/lock.h"
-#include "hphp/util/logger.h"
-#include "hphp/util/trace.h"
-
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/write-lease.h"
-#include "hphp/runtime/vm/treadmill.h"
-#include "hphp/runtime/vm/jit/relocation.h"
-#include "hphp/util/atomic-vector.h"
 
 namespace HPHP {
 
-TRACE_SET_MOD(typeProfile);
-
 //////////////////////////////////////////////////////////////////////
-
-void profileInit() {
-}
 
 /*
  * Warmup/profiling.
  *
  * In cli mode, we only record samples if we're in recording to replay later.
  *
- * In server mode, we exclude warmup document requests from profiling, then
- * record samples for EvalJitProfileInterpRequests standard requests.
+ * In server mode, we exclude warmup document requests from profiling.
  */
-bool __thread profileOn = false;
-static bool warmingUp;
-static int64_t numRequests;
-bool __thread standardRequest = true;
-static std::atomic<bool> singleJitLock;
-static std::atomic<int> singleJitRequests;
-static std::atomic<int> relocateRequests;
 
-void setRelocateRequests(int32_t n) {
-  relocateRequests.store(n);
-}
+RDS_LOCAL_NO_CHECK(TypeProfileLocals, rl_typeProfileLocals)
+  {TypeProfileLocals{}};
 
 namespace {
 
-using FuncProfileCounters = tbb::concurrent_hash_map<FuncId,uint32_t>;
-FuncProfileCounters s_func_counters;
+bool warmingUp;
+std::atomic<uint64_t> numRequests;
+std::atomic<int> relocateRequests;
 
+}
+
+ProfileNonVMThread::ProfileNonVMThread() {
+  always_assert(!rl_typeProfileLocals->nonVMThread);
+  rl_typeProfileLocals->nonVMThread = true;
+}
+
+ProfileNonVMThread::~ProfileNonVMThread() {
+  rl_typeProfileLocals->nonVMThread = false;
+}
+
+void setRelocateRequests(int32_t n) {
+  relocateRequests.store(n);
 }
 
 void profileWarmupStart() {
@@ -81,142 +71,68 @@ void profileWarmupEnd() {
   warmingUp = false;
 }
 
-typedef std::pair<const Func*, uint32_t> FuncHotness;
-static bool comp(const FuncHotness& a, const FuncHotness& b) {
-  return a.second > b.second;
+uint64_t requestCount() {
+  return numRequests.load(std::memory_order_relaxed);
 }
 
-/*
- * Set AttrHot on hot functions. Sort all functions by their profile count, and
- * set AttrHot to the top Eval.HotFuncCount functions.
- */
-static Mutex syncLock;
-static void setHotFuncAttr() {
-  static bool synced = false;
-  if (synced) return;
-
-  Lock lock(syncLock);
-  if (synced) return;
-
-  /*
-   * s_treadmill forces any Funcs that are being destroyed to go through a
-   * treadmill pass, to make sure we won't try to dereference something that's
-   * being pulled out from under us.
-   */
-  Func::s_treadmill = true;
-  SCOPE_EXIT {
-    Func::s_treadmill = false;
-  };
-
-  if (RuntimeOption::EvalHotFuncCount) {
-    std::priority_queue<FuncHotness,
-                        std::vector<FuncHotness>,
-                        bool(*)(const FuncHotness& a, const FuncHotness& b)>
-      queue(comp);
-
-    Func::getFuncVec().foreach([&](const Func* f) {
-      if (!f) return;
-      auto const profCounter = [&]() -> uint32_t {
-        FuncProfileCounters::const_accessor acc;
-        if (s_func_counters.find(acc, f->getFuncId())) {
-          return acc->second;
-        }
-        return 0;
-      }();
-      auto fh = FuncHotness(f, profCounter);
-      if (queue.size() >= RuntimeOption::EvalHotFuncCount) {
-        if (!comp(fh, queue.top())) return;
-        queue.pop();
-      }
-      queue.push(fh);
-    });
-
-    while (queue.size()) {
-      auto f = queue.top().first;
-      queue.pop();
-      const_cast<Func*>(f)->setAttrs(f->attrs() | AttrHot);
-    }
-  }
-
-  // We won't need the counters anymore.  But there might be requests in flight
-  // that still thought they were profiling, so we need to clear it on the
-  // treadmill.
-  Treadmill::enqueue([&] {
-    FuncProfileCounters newMap(0);
-    swap(s_func_counters, newMap);
-  });
-
-  synced = true;
-}
-
-void profileIncrementFuncCounter(const Func* f) {
-  FuncProfileCounters::accessor acc;
-  auto const value = FuncProfileCounters::value_type(f->getFuncId(), 0);
-  s_func_counters.insert(acc, value);
-  ++acc->second;
-}
-
-int64_t requestCount() {
-  return numRequests;
-}
-
-static inline bool doneProfiling() {
-  return (numRequests >= RuntimeOption::EvalJitProfileInterpRequests) ||
-    (RuntimeOption::ClientExecutionMode() &&
-     !RuntimeOption::EvalJitProfileRecord);
-}
-
-static inline bool profileThisRequest() {
-  if (warmingUp) return false;
-  if (doneProfiling()) return false;
-  if (RuntimeOption::ServerExecutionMode()) return true;
-  return RuntimeOption::EvalJitProfileRecord;
+static inline RequestKind getRequestKind() {
+  if (rl_typeProfileLocals->nonVMThread) return RequestKind::NonVM;
+  if (warmingUp) return RequestKind::Warmup;
+  return RequestKind::Standard;
 }
 
 void profileRequestStart() {
-  bool p = profileThisRequest();
-  if (profileOn && !p) {
-    // If we are turning off profiling, set AttrHot on
-    // functions that are "hot".
-    setHotFuncAttr();
-  }
-  profileOn = p;
+  rl_typeProfileLocals->requestKind = getRequestKind();
 
-  bool okToJit = !warmingUp && !p;
-  if (okToJit) {
-    jit::Lease::mayLock(true);
-    if (singleJitRequests < RuntimeOption::EvalNumSingleJitRequests) {
-      bool flag = false;
-      if (!singleJitLock.compare_exchange_strong(flag, true)) {
-        jit::Lease::mayLock(false);
-      }
+  auto const codeCoverageForceInterp = []{
+    if (RuntimeOption::EvalEnableCodeCoverage > 1) return true;
+    if (RuntimeOption::EvalEnableCodeCoverage == 1) {
+      if (RuntimeOption::RepoAuthoritative) return false;
+      auto const tport = g_context->getTransport();
+      return tport &&
+             tport->getParam("enable_code_coverage").compare("true") == 0;
+    }
+    return false;
+  }();
+
+  // Force the request to use interpreter (not even running jitted code) during
+  // retranslateAll when we need to dump out precise profile data.
+  auto const forceInterp = (jit::mcgen::pendingRetranslateAllScheduled() &&
+                            RuntimeOption::DumpPreciseProfData) ||
+                           codeCoverageForceInterp;
+  bool okToJit = !forceInterp && isStandardRequest();
+  if (!RequestInfo::s_requestInfo.isNull()) {
+    if (RID().isJittingDisabled()) {
+      okToJit = false;
+    } else if (!okToJit) {
+      RID().setJittingDisabled(true);
     }
   }
-  if (standardRequest != okToJit) {
-    standardRequest = okToJit;
-    if (!ThreadInfo::s_threadInfo.isNull()) {
-      ThreadInfo::s_threadInfo->m_reqInjectionData.updateJit();
+  jit::setMayAcquireLease(okToJit);
+
+  // Force interpretation if needed.
+  if (rl_typeProfileLocals->forceInterpret != forceInterp) {
+    rl_typeProfileLocals->forceInterpret = forceInterp;
+    if (!RequestInfo::s_requestInfo.isNull()) {
+      RID().updateJit();
     }
   }
 
-  if (standardRequest && relocateRequests > 0 && !--relocateRequests) {
-    jit::liveRelocate(true);
+  if (okToJit && relocateRequests.load(std::memory_order_relaxed) > 0
+      && !relocateRequests.fetch_sub(1, std::memory_order_relaxed)) {
+    jit::tc::liveRelocate(true);
   }
 }
 
 void profileRequestEnd() {
-  if (warmingUp) return;
-  numRequests++; // racy RMW; ok to miss a rare few.
-  if (standardRequest &&
-      singleJitRequests < RuntimeOption::EvalNumSingleJitRequests &&
-      jit::Lease::mayLock(true)) {
-    assert(singleJitLock);
-    ++singleJitRequests;
-    singleJitLock = false;
-    if (RuntimeOption::ServerExecutionMode()) {
-      Logger::Warning("Finished singleJitRequest %d", singleJitRequests.load());
-    }
-  }
+  if (!isStandardRequest()) return;
+  numRequests.fetch_add(1, std::memory_order_relaxed);
+  static auto const requestSeries = ServiceData::createTimeSeries(
+    "vm.requests",
+    {ServiceData::StatsType::RATE, ServiceData::StatsType::SUM},
+    {std::chrono::seconds(60), std::chrono::seconds(0)}
+  );
+  requestSeries->addValue(1);
 }
 
 }

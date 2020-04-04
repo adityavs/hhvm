@@ -1,5 +1,5 @@
-<?php
-function f() {
+<?hh
+<<__EntryPoint>> function f(): void {
   $a = true;
   $b = true;
   echo ($a && $b) ? "yes\n" : "no\n";
@@ -21,5 +21,3 @@ function f() {
   echo ($a || $b) ? "yes\n" : "no\n";
   echo "\n";
 }
-f();
-

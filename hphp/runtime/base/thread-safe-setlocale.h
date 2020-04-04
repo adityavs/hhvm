@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,11 +20,12 @@
 #include <vector>
 #include <string>
 #include "hphp/util/locale-portability.h"
+#include "hphp/util/rds-local.h"
 #include "hphp/util/thread-local.h"
 
 namespace HPHP {
 
-class ThreadSafeLocaleHandler {
+struct ThreadSafeLocaleHandler {
 private:
   typedef struct {
     int category;
@@ -49,8 +50,7 @@ private:
 #endif
 };
 
-extern DECLARE_THREAD_LOCAL(ThreadSafeLocaleHandler,
-                            g_thread_safe_locale_handler);
+extern RDS_LOCAL(ThreadSafeLocaleHandler, g_thread_safe_locale_handler);
 
 }
 

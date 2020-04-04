@@ -1,14 +1,18 @@
-<?hh
+<?hh // partial
 
 /**
  * Shape unification
  */
 
-type s = shape('x' => int);
+type s = shape(
+  'x' => int,
+  ...
+);
 
 type t = shape(
   'x' => int,
   'y' => ?string,
+  ...
 );
 
 function test(bool $b, s $s, t $t) {

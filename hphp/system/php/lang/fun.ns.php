@@ -1,4 +1,4 @@
-<?php
+<?hh // partial
 
 namespace __SystemLib {
   // systemlib can't have closures, so we get this...
@@ -11,17 +11,32 @@ namespace __SystemLib {
     }
     public function __invoke($x, ...$args) {
       invariant(
-        $x instanceof $this->class,
+        \is_a($x, $this->class),
         'object must be an instance of ('.$this->class.'), instead it is ('.
         (\is_object($x) ? \get_class($x) : \gettype($x)).')'
       );
       return $x->{$this->method}(...$args);
     }
-    public function getClassName(): string {
+    public function getClassNameImpl(): string {
       return $this->class;
     }
-    public function getMethodName(): string {
+    public function getMethodNameImpl(): string {
       return $this->method;
+    }
+    public function getClassName(): string {
+      if (\ini_get("hhvm.notice_on_meth_caller_helper_use")) {
+        \trigger_error("getClassName() called on __SystemLib\MethCallerHelper",
+          \E_USER_WARNING);
+      }
+      return $this->getClassNameImpl();
+    }
+    public function getMethodName(): string {
+      if (\ini_get("hhvm.notice_on_meth_caller_helper_use")) {
+        \trigger_error(
+          "getMethodName() called on __SystemLib\MethCallerHelper",
+          \E_USER_WARNING);
+      }
+      return $this->getMethodNameImpl();
     }
   };
 }
@@ -29,76 +44,41 @@ namespace __SystemLib {
 namespace HH {
 
 /**
- * fun is a special function used to create a "pointer" to a function in a
- * typeable way.
+ * Like `fun`, but with the purpose of
+ * calling an instance method on any object of a certain class.
  *
- * The argument of fun() must always be a constant string.
- */
-<<__IsFoldable>>
-function fun(string $s) /* interpreted by the type checker as
-                           (function(<hack figures this>): <and this>) */ {
-  return $s;
-}
-
-/**
- * Like fun, but with the purpose of calling methods. With fun you'd pass in
- * something like 'count' and it'd call count($x) on whatever you pass in.
- * This, rather, will call $x->count() for whatever _object_ $x you pass in,
- * which must be of type $class.
+ * With `fun` you'd pass in something like `'count'` and it'd call `count($x)`
+ * on whatever you pass in. This, rather, will call `$x->count()` for whatever
+ * _object_ `$x` you pass in, which must be of type `$class`.
  *
  * For example:
+ *
+ * ```
+ * <?hh // partial
  * $v = Vector {
  *   Vector {1, 2, 3},
  *   Vector {1, 2}
  * };
  * $v->map(meth_caller('Vector', 'count'))  // returns Vector {3, 2}
- * ...calls the 'count' method on the inner vectors, and return a vector
+ * ```
+ *
+ * ...calls the `count` method on the inner vectors, and returns a vector
  * of the results of that.
  *
- * Both arguments must be constant strings.
+ * See also:
+ *  - [`fun`](/hack/reference/function/HH.fun/)
+ *  - [`class_meth`](/hack/reference/function/HH.class_meth/)
+ *  - [`inst_meth`](/hack/reference/function/HH.inst_meth/)
+ *
+ * @param $class The class of the method to call. Must be a constant string.
+ * @param $method The method of the class that will be called. Must be a
+ *        constant string.
+ * @return A callback which will call `$method` when invoked.
+ *
+ * @guide /hack/callables/special-functions
  */
 function meth_caller(string $class, string $method) {
   return new \__SystemLib\MethCallerHelper($class, $method);
-}
-
-/**
- * Similar to fun, creates a "pointer" to a callable that calls a
- * static method of a class in a typeable way.
- *
- * Both arguments must be constant strings.
- *
- * Example:
- *   class C {
- *     public static function isOdd(int $i): bool { return $i % 2 == 1;}
- *   }
- *   $data = Vector { 1, 2, 3 };
- *   $data->filter(class_meth('C', 'isOdd'));
- */
-<<__IsFoldable>>
-function class_meth(string $class, string $method)
-  /* : (function(<hack figures this>): <and this>) */ {
-  return array($class, $method);
-}
-
-/**
- * Similar to fun, creates a "pointer" to the invocation of a method on an
- * instance in a typeable way.
- *
- * Both arguments of inst_meth must be be a constant strings.
- *
- * Example:
- *   class C {
- *     private function isOdd(int $i): bool { return $i % 2 == 1; }
- *     private function filter(Vector<int> $data): Vector<int> {
- *       $callback = inst_meth($this, 'isOdd');
- *       return $data->filter($callback);
- *     }
- *   }
- */
-function inst_meth($instance, string $method)
-  /* : (function(<hack figures this>): <and this>) */ {
-  invariant(\is_object($instance), 'expecting an object');
-  return array($instance, $method);
 }
 
 }

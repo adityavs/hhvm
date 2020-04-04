@@ -1,0 +1,6 @@
+(library
+  (name parser_ppl)
+  (wrapped false)
+  (libraries
+    full_fidelity
+    parser_coroutine))

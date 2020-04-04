@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -41,18 +41,44 @@ void HHVM_FUNCTION(hphp_set_static_property, const String& cls,
                                              const String& prop, const Variant& value,
                                              bool force);
 
-class Reflection {
- public:
-  static HPHP::Class* s_ReflectionExceptionClass;
-  static Object AllocReflectionExceptionObject(const Variant& message);
+struct Reflection {
+  static Class* s_ReflectionExceptionClass;
+  static Class* s_ReflectionExtensionClass;
+  [[noreturn]]
+  static void ThrowReflectionExceptionObject(const Variant& message);
 };
 
+struct ReflectionFileHandle {
+  ReflectionFileHandle(): m_unit(nullptr) {}
+  explicit ReflectionFileHandle(const Unit* unit): m_unit(unit) {};
+  ReflectionFileHandle(const ReflectionFileHandle&) = delete;
+  ReflectionFileHandle& operator=(const ReflectionFileHandle& other) {
+    m_unit = other.m_unit;
+    return *this;
+  }
+
+  static ReflectionFileHandle* Get(ObjectData* obj) {
+    return Native::data<ReflectionFileHandle>(obj);
+  }
+
+  static const Unit* GetUnitFor(ObjectData* obj) {
+    return Native::data<ReflectionFileHandle>(obj)->getUnit();
+  }
+
+  const Unit* getUnit() { return m_unit; }
+  void setUnit(const Unit* unit) {
+    assertx(unit != nullptr);
+    assertx(m_unit == nullptr);
+    m_unit = unit;
+  }
+
+ private:
+  LowPtr<const Unit> m_unit{nullptr};
+};
 
 /* A ReflectionFuncHandle is a NativeData object wrapping a Func*
  * for the purposes of ReflectionFunction and ReflectionMethod. */
-extern const StaticString s_ReflectionFuncHandle;
-class ReflectionFuncHandle {
- public:
+struct ReflectionFuncHandle {
   ReflectionFuncHandle(): m_func(nullptr) {}
   explicit ReflectionFuncHandle(const Func* func): m_func(func) {};
   ReflectionFuncHandle(const ReflectionFuncHandle&) = delete;
@@ -60,7 +86,6 @@ class ReflectionFuncHandle {
     m_func = other.m_func;
     return *this;
   }
-  ~ReflectionFuncHandle() {}
 
   static ReflectionFuncHandle* Get(ObjectData* obj) {
     return Native::data<ReflectionFuncHandle>(obj);
@@ -72,20 +97,18 @@ class ReflectionFuncHandle {
 
   const Func* getFunc() { return m_func; }
   void setFunc(const Func* func) {
-    assert(func != nullptr);
-    assert(m_func == nullptr);
+    assertx(func != nullptr);
+    assertx(m_func == nullptr);
     m_func = func;
   }
 
  private:
-  const Func* m_func{nullptr};
+  LowPtr<const Func> m_func{nullptr};
 };
 
 /* A ReflectionClassHandle is a NativeData object wrapping a Class* for the
  * purposes of ReflectionClass. */
-extern const StaticString s_ReflectionClassHandle;
-class ReflectionClassHandle {
- public:
+struct ReflectionClassHandle {
   ReflectionClassHandle(): m_cls(nullptr) {}
   explicit ReflectionClassHandle(const Class* cls): m_cls(cls) {};
   ReflectionClassHandle(const ReflectionClassHandle&) = delete;
@@ -93,7 +116,6 @@ class ReflectionClassHandle {
     m_cls = that_.m_cls;
     return *this;
   }
-  ~ReflectionClassHandle() {}
   String init(const String& name) {
     auto const cls = Unit::loadClass(name.get());
     if (!cls) return empty_string();
@@ -111,8 +133,8 @@ class ReflectionClassHandle {
 
   const Class* getClass() const { return m_cls; }
   void setClass(const Class* cls) {
-    assert(cls != nullptr);
-    assert(m_cls == nullptr);
+    assertx(cls != nullptr);
+    assertx(m_cls == nullptr);
     m_cls = cls;
   }
 
@@ -123,12 +145,11 @@ class ReflectionClassHandle {
   void wakeup(const Variant& content, ObjectData* obj);
 
  private:
-  const Class* m_cls{nullptr};
+  LowPtr<const Class> m_cls{nullptr};
 };
 
 /* A ReflectionConstHandle is a NativeData object wrapping a Const*
  * for the purposes of ReflectionTypeConstant. */
-extern const StaticString s_ReflectionConstHandle;
 struct ReflectionConstHandle {
   ReflectionConstHandle(): m_const(nullptr), m_cls(nullptr) {}
   explicit ReflectionConstHandle(const Class::Const* cns, const Class* cls):
@@ -150,92 +171,66 @@ struct ReflectionConstHandle {
   const Class* getClass() const { return m_cls; }
 
   void setConst(const Class::Const* cns) {
-    assert(cns != nullptr);
-    assert(m_const == nullptr);
+    assertx(cns != nullptr);
+    assertx(m_const == nullptr);
     m_const = cns;
   }
 
   void setClass(const Class* cls) {
-    assert(cls != nullptr);
-    assert(m_cls == nullptr);
+    assertx(cls != nullptr);
+    assertx(m_cls == nullptr);
     m_cls = cls;
   }
 
  private:
   const Class::Const* m_const;
-  const Class* m_cls;
+  LowPtr<const Class> m_cls;
 };
 
-/* A ReflectionPropHandle is a NativeData object wrapping a Prop*
- * for the purposes of ReflectionProperty. */
-extern const StaticString s_ReflectionPropHandle;
-class ReflectionPropHandle {
- public:
-  ReflectionPropHandle(): m_prop(nullptr) {}
-  explicit ReflectionPropHandle(const Class::Prop* prop): m_prop(prop) {};
-  ReflectionPropHandle(const ReflectionPropHandle& other) {
-    m_prop = other.m_prop;
-  }
-  ReflectionPropHandle& operator=(const ReflectionPropHandle& other) {
-    m_prop = other.m_prop;
-    return *this;
-  }
-  ~ReflectionPropHandle() {}
+/**
+ * A ReflectionPropHandle is a NativeData object that represents an instance,
+ * static, or dynamic property for the purposes of ReflectionProperty.
+ */
+struct ReflectionPropHandle {
+  enum Type : uint8_t {
+    Invalid  = 0,
+    Instance = 1,
+    Static   = 2,
+    Dynamic  = 3,
+  };
 
-  static ReflectionPropHandle* Get(ObjectData* obj) {
-    return Native::data<ReflectionPropHandle>(obj);
+  ReflectionPropHandle(): m_prop(nullptr), m_type(Invalid) {}
+
+  Type getType() const { return m_type; }
+  const Class::Prop* getProp() const {
+    assertx(m_type == Instance);
+    return m_prop;
+  }
+  const Class::SProp* getSProp() const {
+    assertx(m_type == Static);
+    return m_sprop;
   }
 
-  static const Class::Prop* GetPropFor(ObjectData* obj) {
-    return Native::data<ReflectionPropHandle>(obj)->getProp();
-  }
-
-  const Class::Prop* getProp() { return m_prop; }
-
-  void setProp(const Class::Prop* prop) {
-    assert(prop != nullptr);
-    assert(m_prop == nullptr);
+  void setInstanceProp(const Class::Prop* prop) {
+    assertx(prop != nullptr);
+    m_type = Instance;
     m_prop = prop;
   }
-
- private:
-  const Class::Prop* m_prop{nullptr};
-};
-
-/* A ReflectionSPropHandle is a NativeData object wrapping a SProp*
- * for the purposes of static ReflectionProperty. */
-extern const StaticString s_ReflectionSPropHandle;
-class ReflectionSPropHandle {
- public:
-  ReflectionSPropHandle(): m_sprop(nullptr) {}
-  explicit ReflectionSPropHandle(const Class::SProp* sprop): m_sprop(sprop) {};
-  ReflectionSPropHandle(const ReflectionSPropHandle& other) {
-    m_sprop = other.m_sprop;
-  }
-  ReflectionSPropHandle& operator=(const ReflectionSPropHandle& other) {
-    m_sprop = other.m_sprop;
-    return *this;
-  }
-  ~ReflectionSPropHandle() {}
-
-  static ReflectionSPropHandle* Get(ObjectData* obj) {
-    return Native::data<ReflectionSPropHandle>(obj);
-  }
-
-  static const Class::SProp* GetSPropFor(ObjectData* obj) {
-    return Native::data<ReflectionSPropHandle>(obj)->getSProp();
-  }
-
-  const Class::SProp* getSProp() { return m_sprop; }
-
-  void setSProp(const Class::SProp* sprop) {
-    assert(sprop != nullptr);
-    assert(m_sprop == nullptr);
+  void setStaticProp(const Class::SProp* sprop) {
+    assertx(sprop != nullptr);
+    m_type = Static;
     m_sprop = sprop;
   }
+  void setDynamicProp() {
+    m_type = Dynamic;
+  }
 
  private:
-  const Class::SProp* m_sprop{nullptr};
+  union {
+    const Class::Prop* m_prop;
+    const Class::SProp* m_sprop;
+  };
+  Type m_type;
 };
 
 /* A ReflectionTypeAliasHandle is a NativeData object wrapping a TypeAliasReq*
@@ -255,8 +250,8 @@ struct ReflectionTypeAliasHandle {
   const TypeAliasReq* getTypeAliasReq() const { return m_req; }
 
   void setTypeAliasReq(const TypeAliasReq* req) {
-    assert(req != nullptr);
-    assert(m_req == nullptr);
+    assertx(req != nullptr);
+    assertx(m_req == nullptr);
     m_req = req;
   }
 
@@ -273,7 +268,8 @@ Array get_class_info(const String& name);
 // These helpers are shared by an FB-specific extension.
 Class* get_cls(const Variant& class_or_object);
 const Func* get_method_func(const Class* cls, const String& meth_name);
-Variant default_arg_from_php_code(const Func::ParamInfo& fpi, const Func* func);
+Variant default_arg_from_php_code(const Func::ParamInfo& fpi, const Func* func,
+                                  unsigned argIdx);
 bool resolveDefaultParameterConstant(const char *value, int64_t valueLen,
                                      Variant &cns);
 

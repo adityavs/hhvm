@@ -1,9 +1,8 @@
+#!/usr/bin/env python3
+
 """
 GDB utility convenience functions.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
@@ -22,6 +21,7 @@ class PtrFunction(gdb.Function):
     def invoke(self, val):
         return rawptr(val)
 
+
 PtrFunction._PtrFunction__doc__ = rawptr.__doc__
 
 PtrFunction()
@@ -37,6 +37,7 @@ class DerefFunction(gdb.Function):
     @errorwrap
     def invoke(self, val):
         return deref(val)
+
 
 DerefFunction._DerefFunction__doc__ = deref.__doc__
 
@@ -56,6 +57,7 @@ class StrhashFunction(gdb.Function):
     def invoke(self, val):
         return strinfo(val)['hash']
 
+
 StrhashFunction()
 
 
@@ -71,5 +73,6 @@ class HHCryCommand(gdb.Command):
     @errorwrap
     def invoke(self, args, from_tty):
         invalidate_all_memoizers()
+
 
 HHCryCommand()

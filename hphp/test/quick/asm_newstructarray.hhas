@@ -1,11 +1,13 @@
+.hh_file 1;
 #
 # NewStructArray
 #
 
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  UnboxR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
   RetC
 }
 
@@ -18,10 +20,11 @@
   SetL $arr
   PopC
 
-  FPushFuncD 1 "var_dump"
-  FPassL 0 $arr
-  FCall 1
-  UnboxR
+  NullUninit
+  NullUninit
+  NullUninit
+  CGetL $arr
+  FCallFuncD <> 1 1 "" - "" "var_dump"
   PopC
 
   Int 1

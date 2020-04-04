@@ -1,0 +1,92 @@
+*** Testing long2ip() : usage variation ***
+
+--float 10.5--
+
+Warning: long2ip() expects parameter 1 to be string, double given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--float -10.5--
+
+Warning: long2ip() expects parameter 1 to be string, double given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--float .5--
+
+Warning: long2ip() expects parameter 1 to be string, double given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--empty array--
+
+Warning: long2ip() expects parameter 1 to be string, array given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--int indexed array--
+
+Warning: long2ip() expects parameter 1 to be string, array given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--associative array--
+
+Warning: long2ip() expects parameter 1 to be string, array given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--nested arrays--
+
+Warning: long2ip() expects parameter 1 to be string, array given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--uppercase NULL--
+
+Warning: long2ip() expects parameter 1 to be string, null given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--lowercase null--
+
+Warning: long2ip() expects parameter 1 to be string, null given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--lowercase true--
+
+Warning: long2ip() expects parameter 1 to be string, boolean given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--lowercase false--
+
+Warning: long2ip() expects parameter 1 to be string, boolean given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--uppercase TRUE--
+
+Warning: long2ip() expects parameter 1 to be string, boolean given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--uppercase FALSE--
+
+Warning: long2ip() expects parameter 1 to be string, boolean given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--empty string DQ--
+string(7) "0.0.0.0"
+
+--empty string SQ--
+string(7) "0.0.0.0"
+
+--string DQ--
+string(7) "0.0.0.0"
+
+--string SQ--
+string(7) "0.0.0.0"
+
+--mixed case string--
+string(7) "0.0.0.0"
+
+--heredoc--
+string(7) "0.0.0.0"
+
+--instance of classWithToString--
+
+Warning: long2ip() expects parameter 1 to be string, object given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--instance of classWithoutToString--
+
+Warning: long2ip() expects parameter 1 to be string, object given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--undefined var--
+
+Warning: long2ip() expects parameter 1 to be string, null given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--unset var--
+
+Warning: long2ip() expects parameter 1 to be string, null given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+
+--resource--
+
+Warning: long2ip() expects parameter 1 to be string, resource given in %s/zend/good/ext/standard/tests/network/long2ip_variation1.php on line 101
+===DONE===

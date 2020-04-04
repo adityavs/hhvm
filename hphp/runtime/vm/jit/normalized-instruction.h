@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,33 +36,22 @@ namespace HPHP { namespace jit {
  */
 struct NormalizedInstruction {
   SrcKey source;
-  const Func* funcd; // The Func in the topmost AR on the stack. Guaranteed to
-                     // be accurate. Don't guess about this. Note that this is
-                     // *not* the function whose body the NI belongs to.
-                     // Note that for an FPush* may be set to the (statically
-                     // known Func* that /this/ instruction is pushing)
   const Unit* m_unit;
 
-  std::vector<Location> inputs;
-  ArgUnion imm[4];
+  ArgUnion imm[kMaxHhbcImms];
   ImmVector immVec; // vector immediate; will have !isValid() if the
                     // instruction has no vector immediate
-
-  // The member codes for the M-vector.
-  std::vector<MemberCode> immVecM;
-
-  bool endsRegion:1;
-  bool preppedByRef:1;
-  bool ignoreInnerType:1;
 
   /*
    * Used with HHIR. Instruction shoud be interpreted, because previous attempt
    * to translate it has failed.
    */
   bool interp:1;
+  // The inst can be marked so that later on we emit a surprise check
+  // in front of it.
+  bool forceSurpriseCheck:1;
 
   Op op() const;
-  Op mInstrOp() const;
   PC pc() const;
   const Unit* unit() const;
   const Func* func() const;

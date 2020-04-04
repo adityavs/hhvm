@@ -1,13 +1,9 @@
-<?php
+<?hh
 function __autoload($className) {
-	class SoapServerActions {
-    function test() {
-      return "Hello World";
-    }
-	}
+  include 'bug28751.inc';
 }
-
-$server = new SoapServer(NULL, array('uri'=>"http://testuri.org"));
+<<__EntryPoint>> function main(): void {
+$server = new SoapServer(NULL, darray['uri'=>"http://testuri.org"]);
 $server->setClass("SoapServerActions");
 
 $HTTP_RAW_POST_DATA = <<<EOF
@@ -26,4 +22,4 @@ EOF;
 
 $server->handle($HTTP_RAW_POST_DATA);
 echo "ok\n";
-?>
+}

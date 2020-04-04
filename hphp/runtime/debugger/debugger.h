@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,7 +27,7 @@
 #include "hphp/util/lock.h"
 
 namespace HPHP {
-struct ThreadInfo;
+struct RequestInfo;
 }
 
 namespace HPHP { namespace Eval {
@@ -89,7 +89,7 @@ struct Debugger {
 
   // Interrupt from VM
   static void InterruptVMHook(int type = BreakPointReached,
-                              const Variant& e = null_variant);
+                              const Variant& e = uninit_variant);
 
   // Surround text with color, if set.
   static void SetTextColors();
@@ -106,6 +106,7 @@ struct Debugger {
 
   // Usage logging
   static void SetUsageLogger(DebuggerUsageLogger *usageLogger);
+  static DebuggerUsageLogger* GetUsageLogger();
   static void InitUsageLogging();
   static void UsageLog(const std::string &mode,
                        const std::string &sandboxId,
@@ -116,8 +117,10 @@ struct Debugger {
                                 CmdInterrupt &cmd);
 
 private:
-  static Debugger s_debugger;
+
   static bool s_clientStarted;
+
+  static Debugger& get();
 
   static void Interrupt(int type,
                         const char* program,
@@ -154,7 +157,7 @@ private:
   SandboxMap m_sandboxMap;
 
   // Map of "sandbox id"->"set of threads executing requests in the sandbox".
-  using ThreadInfoSet = std::set<ThreadInfo*>;
+  using ThreadInfoSet = std::set<RequestInfo*>;
   using SandboxThreadInfoMap = tbb::concurrent_hash_map<
     const StringData*,
     ThreadInfoSet,
@@ -164,7 +167,7 @@ private:
 
   // "thread id"->"thread info". Each thread which is being debugged is
   // added to this map.
-  using ThreadInfoMap = tbb::concurrent_hash_map<int64_t, ThreadInfo*>;
+  using ThreadInfoMap = tbb::concurrent_hash_map<int64_t, RequestInfo*>;
   ThreadInfoMap m_threadInfos;
 
   using RetiredProxyQueue = tbb::concurrent_queue<DebuggerProxyPtr>;
@@ -179,7 +182,7 @@ private:
   void unregisterSandbox(const StringData* sandboxId);
 
   void getSandboxThreads(const DSandboxInfo &sandbox,
-                         std::set<ThreadInfo*>& set);
+                         std::set<RequestInfo*>& set);
 
   void requestInterrupt(DebuggerProxyPtr proxy);
   void setDebuggerFlag(const StringData* sandboxId, bool flag);

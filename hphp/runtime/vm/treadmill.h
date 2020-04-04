@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,11 +25,51 @@ namespace HPHP { namespace Treadmill {
 //////////////////////////////////////////////////////////////////////
 
 /*
+ * List of potentiall users of the treadmill, useful for debugging halts
+ */
+enum class SessionKind {
+  None,
+  DebuggerClient,
+  APCPrime,
+  PreloadRepo,
+  Watchman,
+  Vsdebug,
+  FactsWorker,
+  CLIServer,
+  AdminPort,
+  HttpRequest,
+  RpcRequest,
+  TranslateWorker,
+  Retranslate,
+  ProfData,
+  UnitTests,
+  CompileRepo,
+  HHBBC,
+  CompilerEmit,
+  CompilerAnalysis,
+  CLISession
+};
+
+/*
+ * An invalid request index.
+ */
+constexpr int64_t kInvalidRequestIdx = -1;
+/*
+ * Another invalid request index, used to indicate that an apc entry
+ * has been purged.
+ */
+constexpr int64_t kPurgedRequestIdx = -2;
+/*
+ * Return the current thread's index.
+ */
+int64_t requestIdx();
+
+/*
  * The Treadmill allows us to defer work until all currently
  * outstanding requests have finished.  We hook request start and
  * finish to know when these events happen.
  */
-void startRequest();
+void startRequest(SessionKind session_kind);
 void finishRequest();
 
 /*
@@ -54,6 +94,11 @@ int64_t getAgeOldestRequest();
 void deferredFree(void*);
 
 /*
+ * Used to get debug information about the treadmill.
+ */
+std::string dumpTreadmillInfo();
+
+/*
  * Schedule a function to run on the next appropriate treadmill round.
  *
  * The function will be called from the base mutex rank.
@@ -64,6 +109,13 @@ void deferredFree(void*);
  * Important: f() must not throw an exception.
  */
 template<class F> void enqueue(F&& f);
+
+struct Session final {
+  Session(SessionKind session_kind) { startRequest(session_kind); }
+  ~Session() { finishRequest(); }
+  Session(Session&&) = delete;
+  Session& operator=(Session&&) = delete;
+};
 
 //////////////////////////////////////////////////////////////////////
 

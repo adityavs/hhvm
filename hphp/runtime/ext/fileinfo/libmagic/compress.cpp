@@ -32,7 +32,8 @@
  *  uncompress(method, old, n, newch) - uncompress old into new,
  *              using method, return sizeof new
  */
-#include "config.h"
+#include "hphp/util/hphp-config.h"
+
 #include "file.h"
 
 #ifndef lint
@@ -41,25 +42,23 @@ FILE_RCSID("@(#)$File: compress.c,v 1.70 2012/11/07 17:54:48 christos Exp $")
 
 #include "magic.h"
 #include <stdlib.h>
-#ifdef HAVE_UNISTD_H
-#include <unistd.h>
-#endif
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h>
-#ifndef PHP_WIN32
+#ifndef _MSC_VER
 #include <sys/ioctl.h>
 #endif
 #ifdef HAVE_SYS_WAIT_H
 #include <sys/wait.h>
 #endif
-#if defined(HAVE_SYS_TIME_H)
-#include <sys/time.h>
-#endif
 #if defined(HAVE_ZLIB_H) && defined(HAVE_LIBZ)
 #define BUILTIN_DECOMPRESS
 #include <zlib.h>
 #endif
+
+#include <folly/portability/Stdlib.h>
+#include <folly/portability/SysTime.h>
+#include <folly/portability/Unistd.h>
 
 #undef FIONREAD
 
@@ -152,9 +151,8 @@ swrite(int fd, const void *buf, size_t n)
 /*
  * `safe' read for sockets and pipes.
  */
-protected ssize_t
-sread(int fd, void *buf, size_t n, int canbepipe)
-{
+protected
+ssize_t sread(int fd, void* buf, size_t n, int /*canbepipe*/) {
   ssize_t rv;
 #ifdef FIONREAD
   int t = 0;
@@ -395,14 +393,14 @@ uncompressbuf(struct magic_set *ms, int fd, size_t method,
     (void) dup(fdout[1]);
     (void) close(fdout[0]);
     (void) close(fdout[1]);
-#ifndef DEBUG
+#ifdef NDEBUG
     if (compr[method].silent)
       (void)close(2);
 #endif
 
     (void)execvp(compr[method].argv[0],
         (char *const *)(intptr_t)compr[method].argv);
-#ifdef DEBUG
+#ifndef NDEBUG
     (void)fprintf(stderr, "exec `%s' failed (%s)\n",
         compr[method].argv[0], strerror(errno));
 #endif
@@ -424,7 +422,7 @@ uncompressbuf(struct magic_set *ms, int fd, size_t method,
       case 0: /* child */
         (void)close(fdout[0]);
         if (swrite(fdin[1], old, n) != (ssize_t)n) {
-#ifdef DEBUG
+#ifndef NDEBUG
           (void)fprintf(stderr,
               "Write failed (%s)\n",
               strerror(errno));
@@ -435,7 +433,7 @@ uncompressbuf(struct magic_set *ms, int fd, size_t method,
         /*NOTREACHED*/
 
       case -1:
-#ifdef DEBUG
+#ifndef NDEBUG
         (void)fprintf(stderr, "Fork failed (%s)\n",
             strerror(errno));
 #endif
@@ -452,7 +450,7 @@ uncompressbuf(struct magic_set *ms, int fd, size_t method,
     *newch = (unsigned char *) emalloc(HOWMANY + 1);
 
     if ((r = sread(fdout[0], *newch, HOWMANY, 0)) <= 0) {
-#ifdef DEBUG
+#ifndef NDEBUG
       (void)fprintf(stderr, "Read failed (%s)\n",
           strerror(errno));
 #endif

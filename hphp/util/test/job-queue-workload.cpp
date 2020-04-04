@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,14 +38,12 @@ DEFINE_int32(time_padding_low, 0,
 DEFINE_int32(time_padding_percent, 0,
              "percent of time request is selected for padding");
 
-class Tickable {
- public:
+struct Tickable {
   virtual ~Tickable() {}
   virtual void tick() = 0;
 };
 
-class TickingClock {
- public:
+struct TickingClock {
   TickingClock() : m_ticks(0) {
   }
 
@@ -76,8 +74,7 @@ class TickingClock {
   std::vector<Tickable*> m_tickables;
 };
 
-class TickRequest {
- public:
+struct TickRequest {
   enum class State {
     IN_QUEUE,
     PROCESSING,
@@ -154,8 +151,7 @@ class TickRequest {
 };
 typedef std::shared_ptr<TickRequest> TickRequestPtr;
 
-class TickRequestFactory {
- public:
+struct TickRequestFactory {
   explicit TickRequestFactory(TickingClock* clock) : m_clock(clock) {}
 
   TickRequestPtr newRequest(int duration) {
@@ -212,17 +208,17 @@ class TickRequestFactory {
   TickingClock* m_clock;
 };
 
-class TickWorker : public JobQueueWorker<TickRequestPtr, TickingClock*, true,
-                                         true>,
-                   public Tickable {
- public:
+struct TickWorker
+  : JobQueueWorker<TickRequestPtr, TickingClock*, true, true>
+  , Tickable
+{
   TickWorker() : m_ticks(0) {}
-  virtual ~TickWorker() {}
+  ~TickWorker() override {}
 
-  virtual void onThreadEnter() {
+  void onThreadEnter() override {
     m_context->registerTickable(this);
   }
-  virtual void doJob(TickRequestPtr job) {
+  void doJob(TickRequestPtr job) override {
     job->setState(TickRequest::State::PROCESSING);
     std::unique_lock<std::mutex> lk(m_mutex);
     m_job = job;
@@ -231,10 +227,10 @@ class TickWorker : public JobQueueWorker<TickRequestPtr, TickingClock*, true,
     m_job->setState(TickRequest::State::COMPLETED);
     m_job.reset();
   }
-  virtual void abortJob(TickRequestPtr job) {
+  void abortJob(TickRequestPtr /*job*/) override {
     m_job->setState(TickRequest::State::ABORTED);
   }
-  virtual void tick() {
+  void tick() override {
     std::lock_guard<std::mutex> lk(m_mutex);
     ++m_ticks;
     if (!m_job) {
@@ -257,15 +253,14 @@ class TickWorker : public JobQueueWorker<TickRequestPtr, TickingClock*, true,
   TickRequestPtr m_job;
 };
 
-class JobQueueStatsCollector : public Tickable {
- public:
+struct JobQueueStatsCollector : Tickable {
   explicit JobQueueStatsCollector(JobQueueDispatcher<TickWorker>* dispatcher)
       : m_dispatcher(dispatcher),
         m_maxLoad(0),
         m_maxQueued(0) {
   }
 
-  void tick() {
+  void tick() override {
     m_maxQueued = std::max(m_maxQueued, m_dispatcher->getQueuedJobs());
     m_maxLoad = std::max(m_maxLoad, m_dispatcher->getActiveWorker());
   }
@@ -275,13 +270,12 @@ class JobQueueStatsCollector : public Tickable {
   int m_maxQueued;
 };
 
-class JobQueueTest : public testing::Test {
+struct JobQueueTest : testing::Test {
  protected:
-
-  virtual void SetUp() {
+  void SetUp() override {
     m_clock.reset(new TickingClock());
     m_dispatcher.reset(
-      new JobQueueDispatcher<TickWorker>(180, false, 0, true, m_clock.get()));
+      new JobQueueDispatcher<TickWorker>(180, 180, 0, true, m_clock.get()));
     m_factory.reset(new TickRequestFactory(m_clock.get()));
   }
 
@@ -390,7 +384,7 @@ TEST_F(JobQueueTest, WorkloadTest) {
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
-  google::ParseCommandLineFlags(&argc, &argv, false);
+  gflags::ParseCommandLineFlags(&argc, &argv, false);
   std::srand(folly::randomNumberSeed());
   return RUN_ALL_TESTS();
 }

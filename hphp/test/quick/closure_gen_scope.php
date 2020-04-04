@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class X {
   private $priv = 'X';
@@ -16,7 +16,8 @@ function test($x) {
   $f = $x->foo();
   foreach ($f($x) as $v) var_dump($v);
 }
-
+<<__EntryPoint>> function main(): void {
 test(new X);
 test(new Y);
 test(new Z);
+}

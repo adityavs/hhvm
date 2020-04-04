@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,23 +13,23 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/vm/jit/srcdb.h"
 
-#include <stdint.h>
-#include <stdarg.h>
-#include <string>
-
+#include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/treadmill.h"
 
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/recycle-tc.h"
+#include "hphp/runtime/vm/jit/cg-meta.h"
 #include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/smashable-instr.h"
+#include "hphp/runtime/vm/jit/tc.h"
 
 #include "hphp/util/trace.h"
 
-#include <folly/MoveWrapper.h>
+#include <cstdarg>
+#include <cstdint>
+#include <string>
 
 namespace HPHP { namespace jit {
 
@@ -57,12 +57,12 @@ void IncomingBranch::patch(TCA dest) {
   switch (type()) {
     case Tag::JMP:
       smashJmp(toSmash(), dest);
-      mcg->getDebugInfo()->recordRelocMap(toSmash(), dest, "Arc-2");
+      Debug::DebugInfo::Get()->recordRelocMap(toSmash(), dest, "Arc-2");
       break;
 
     case Tag::JCC:
       smashJcc(toSmash(), dest);
-      mcg->getDebugInfo()->recordRelocMap(toSmash(), dest, "Arc-1");
+      Debug::DebugInfo::Get()->recordRelocMap(toSmash(), dest, "Arc-1");
       break;
 
     case Tag::ADDR: {
@@ -89,33 +89,23 @@ TCA IncomingBranch::target() const {
   always_assert(false);
 }
 
-TCA TransLoc::mainStart()   const { return mcg->code.base() + m_mainOff; }
-TCA TransLoc::coldStart()   const { return mcg->code.base() + m_coldOff; }
-TCA TransLoc::frozenStart() const { return mcg->code.base() + m_frozenOff; }
+TCA TransLoc::mainStart()   const { return tc::offsetToAddr(m_mainOff); }
+TCA TransLoc::coldStart()   const { return tc::offsetToAddr(m_coldOff); }
+TCA TransLoc::frozenStart() const { return tc::offsetToAddr(m_frozenOff); }
 
 void TransLoc::setMainStart(TCA newStart) {
-  assert(mcg->code.base() <= newStart &&
-         newStart - mcg->code.base() < std::numeric_limits<uint32_t>::max());
-
-  m_mainOff = newStart - mcg->code.base();
+  assertx(tc::isValidCodeAddress(newStart));
+  m_mainOff = tc::addrToOffset(newStart);
 }
 
 void TransLoc::setColdStart(TCA newStart) {
-  assert(mcg->code.base() <= newStart &&
-         newStart - mcg->code.base() < std::numeric_limits<uint32_t>::max());
-
-  m_coldOff = newStart - mcg->code.base();
+  assertx(tc::isValidCodeAddress(newStart));
+  m_coldOff = tc::addrToOffset(newStart);
 }
 
 void TransLoc::setFrozenStart(TCA newStart) {
-  assert(mcg->code.base() <= newStart &&
-         newStart - mcg->code.base() < std::numeric_limits<uint32_t>::max());
-
-  m_frozenOff = newStart - mcg->code.base();
-}
-
-void SrcRec::setFuncInfo(const Func* f) {
-  m_unitMd5 = f->unit()->md5();
+  assertx(tc::isValidCodeAddress(newStart));
+  m_frozenOff = tc::addrToOffset(newStart);
 }
 
 /*
@@ -139,7 +129,7 @@ FPInvOffset SrcRec::nonResumedSPOff() const {
 
 void SrcRec::chainFrom(IncomingBranch br) {
   assertx(br.type() == IncomingBranch::Tag::ADDR ||
-         mcg->code.isValidCodeAddress(br.toSmash()));
+          tc::isValidCodeAddress(br.toSmash()));
   TCA destAddr = getTopTranslation();
   m_incomingBranches.push_back(br);
   TRACE(1, "SrcRec(%p)::chainFrom %p -> %p (type %d); %zd incoming branches\n",
@@ -149,30 +139,24 @@ void SrcRec::chainFrom(IncomingBranch br) {
   br.patch(destAddr);
 
   if (RuntimeOption::EvalEnableReusableTC) {
-    recordJump(br.toSmash(), this);
+    tc::recordJump(br.toSmash(), this);
   }
-}
-
-void SrcRec::registerFallbackJump(TCA from, ConditionCode cc /* = -1 */) {
-  auto incoming = cc < 0 ? IncomingBranch::jmpFrom(from)
-                         : IncomingBranch::jccFrom(from);
-
-  // We'll need to know the location of this jump later so we can
-  // patch it to new translations added to the chain.
-  mcg->cgFixups().m_inProgressTailJumps.push_back(incoming);
 }
 
 void SrcRec::newTranslation(TransLoc loc,
                             GrowableVector<IncomingBranch>& tailBranches) {
+  auto srLock = writelock();
   // When translation punts due to hitting limit, will generate one
   // more translation that will call the interpreter.
-  assertx(m_translations.size() <= RuntimeOption::EvalJitMaxTranslations);
+  assertx(m_translations.size() <=
+          std::max(RuntimeOption::EvalJitMaxProfileTranslations,
+                   RuntimeOption::EvalJitMaxTranslations));
 
   TRACE(1, "SrcRec(%p)::newTranslation @%p, ", this, loc.mainStart());
 
   m_translations.push_back(loc);
-  if (!m_topTranslation.load(std::memory_order_acquire)) {
-    m_topTranslation.store(loc.mainStart(), std::memory_order_release);
+  if (!m_topTranslation.get()) {
+    m_topTranslation = loc.mainStart();
     patchIncomingBranches(loc.mainStart());
   }
 
@@ -200,12 +184,15 @@ void SrcRec::newTranslation(TransLoc loc,
 }
 
 void SrcRec::relocate(RelocationInfo& rel) {
+  tc::assertOwnsCodeLock();
+
+  auto srLock = writelock();
   if (auto adjusted = rel.adjustedAddressAfter(m_anchorTranslation)) {
     m_anchorTranslation = adjusted;
   }
 
-  if (auto adjusted = rel.adjustedAddressAfter(m_topTranslation.load())) {
-    m_topTranslation.store(adjusted);
+  if (auto adjusted = rel.adjustedAddressAfter(m_topTranslation.get())) {
+    m_topTranslation = adjusted;
   }
 
   for (auto &t : m_translations) {
@@ -243,14 +230,14 @@ void SrcRec::addDebuggerGuard(TCA dbgGuard, TCA dbgBranchGuardSrc) {
   // Set m_dbgBranchGuardSrc after patching, so we don't try to patch
   // the debug guard.
   m_dbgBranchGuardSrc = dbgBranchGuardSrc;
-  m_topTranslation.store(dbgGuard, std::memory_order_release);
+  m_topTranslation = dbgGuard;
 }
 
 void SrcRec::patchIncomingBranches(TCA newStart) {
   if (hasDebuggerGuard()) {
     // We have a debugger guard, so all jumps to us funnel through
     // this.  Just smash m_dbgBranchGuardSrc.
-    TRACE(1, "smashing m_dbgBranchGuardSrc @%p\n", m_dbgBranchGuardSrc);
+    TRACE(1, "smashing m_dbgBranchGuardSrc @%p\n", m_dbgBranchGuardSrc.get());
     smashJmp(m_dbgBranchGuardSrc, newStart);
     return;
   }
@@ -265,6 +252,8 @@ void SrcRec::patchIncomingBranches(TCA newStart) {
 }
 
 void SrcRec::removeIncomingBranch(TCA toSmash) {
+  auto srLock = writelock();
+
   auto end = std::remove_if(
     m_incomingBranches.begin(),
     m_incomingBranches.end(),
@@ -274,31 +263,29 @@ void SrcRec::removeIncomingBranch(TCA toSmash) {
   m_incomingBranches.setEnd(end);
 }
 
+void SrcRec::removeIncomingBranchesInRange(TCA start, TCA frontier) {
+  auto srLock = writelock();
+
+  auto end = std::remove_if(
+    m_incomingBranches.begin(),
+    m_incomingBranches.end(),
+    [&] (const IncomingBranch& ib) {
+      auto addr = ib.toSmash();
+      return start <= addr && addr < frontier;
+    }
+  );
+
+  m_incomingBranches.setEnd(end);
+}
+
 void SrcRec::replaceOldTranslations() {
+  auto srLock = writelock();
+
   // Everyone needs to give up on old translations; send them to the anchor,
   // which is a REQ_RETRANSLATE.
   auto translations = std::move(m_translations);
   m_tailFallbackJumps.clear();
-  m_topTranslation.store(nullptr, std::memory_order_release);
-
-  /*
-   * It may seem a little weird that we're about to point every
-   * incoming branch at the anchor, since that's going to just
-   * unconditionally retranslate this SrcKey and never patch the
-   * incoming branch to do something else.
-   *
-   * The reason this is ok is this mechanism is only used in
-   * non-RepoAuthoritative mode, and the granularity of code
-   * invalidation there is such that we'll only have incoming branches
-   * like this basically within the same file since we don't have
-   * whole program analysis.
-   *
-   * This means all these incoming branches are about to go away
-   * anyway ...
-   *
-   * If we ever change that we'll have to change this to patch to
-   * some sort of rebind requests.
-   */
+  m_topTranslation = nullptr;
   assertx(!RuntimeOption::RepoAuthoritative || RuntimeOption::EvalJitPGO);
   patchIncomingBranches(m_anchorTranslation);
 
@@ -306,13 +293,7 @@ void SrcRec::replaceOldTranslations() {
   // unreachable-- to prevent a race we treadmill here and then reclaim their
   // associated TC space
   if (RuntimeOption::EvalEnableReusableTC) {
-    auto trans = folly::makeMoveWrapper(std::move(translations));
-    Treadmill::enqueue([trans]() mutable {
-      for (auto& loc : *trans) {
-        reclaimTranslation(loc);
-      }
-      trans->clear();
-    });
+    tc::reclaimTranslations(std::move(translations));
     return;
   }
 

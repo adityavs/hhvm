@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,31 +15,19 @@
 */
 #include "hphp/runtime/vm/jit/irgen.h"
 
-#include "hphp/runtime/vm/jit/irgen-exit.h"
-#include "hphp/runtime/vm/jit/irgen-control.h"
 #include "hphp/runtime/vm/jit/cfg.h"
 #include "hphp/runtime/vm/jit/dce.h"
-
+#include "hphp/runtime/vm/jit/irgen-control.h"
+#include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
+#include "hphp/runtime/vm/jit/normalized-instruction.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 
 namespace HPHP { namespace jit { namespace irgen {
 
 namespace {
 
 //////////////////////////////////////////////////////////////////////
-
-Block* create_catch_block(IRGS& env) {
-  auto const catchBlock = env.irb->unit().defBlock(Block::Hint::Unused);
-  BlockPusher bp(*env.irb, env.irb->curMarker(), catchBlock);
-
-  auto const& exnState = env.irb->exceptionStackState();
-  env.irb->fs().setSyncedSpLevel(exnState.syncedSpLevel);
-
-  gen(env, BeginCatch);
-  gen(env, EndCatch, IRSPOffsetData { offsetFromIRSP(env, BCSPOffset{0}) },
-      fp(env), sp(env));
-  return catchBlock;
-}
 
 void check_catch_stack_state(IRGS& env, const IRInstruction* inst) {
   always_assert_flog(
@@ -54,6 +42,20 @@ void check_catch_stack_state(IRGS& env, const IRInstruction* inst) {
 
 }
 
+uint64_t curProfCount(const IRGS& env) {
+  auto const tid = env.profTransID;
+  assertx(tid == kInvalidTransID ||
+          (env.region != nullptr && profData() != nullptr));
+  return env.profFactor *
+    (tid != kInvalidTransID ? env.region->blockProfCount(tid) : 1);
+}
+
+uint64_t calleeProfCount(const IRGS& env, const RegionDesc& calleeRegion) {
+  auto const tid = calleeRegion.entry()->id();
+  if (tid == kInvalidTransID) return 0;
+  return env.profFactor * calleeRegion.blockProfCount(tid);
+}
+
 //////////////////////////////////////////////////////////////////////
 
 /*
@@ -66,6 +68,11 @@ void check_catch_stack_state(IRGS& env, const IRInstruction* inst) {
  */
 namespace detail {
 SSATmp* genInstruction(IRGS& env, IRInstruction* inst) {
+  if (env.irb->inUnreachableState()) {
+    FTRACE(1, "Skipping unreachable instruction: {}\n", inst->toString());
+    return inst->hasDst() ? cns(env, TBottom) : nullptr;
+  }
+
   if (inst->mayRaiseError() && inst->taken()) {
     FTRACE(1, "{}: asserting about catch block\n", inst->toString());
     /*
@@ -78,9 +85,7 @@ SSATmp* genInstruction(IRGS& env, IRInstruction* inst) {
   }
 
   if (inst->mayRaiseError() && !inst->taken()) {
-    FTRACE(1, "{}: creating {}catch block\n",
-           inst->toString(),
-           env.catchCreator ? "custom " : "");
+    FTRACE(1, "{}: creating catch block\n", inst->toString());
     /*
      * If you hit this assertion, you're gen'ing an IR instruction that can
      * throw after gen'ing one that could write to the evaluation stack.  This
@@ -89,9 +94,33 @@ SSATmp* genInstruction(IRGS& env, IRInstruction* inst) {
      * information.
      */
     check_catch_stack_state(env, inst);
-    inst->setTaken(
-      env.catchCreator ? env.catchCreator() : create_catch_block(env)
-    );
+    auto const offsetToAdjustSPForCall = [&]() -> int32_t {
+      if (inst->is(Call)) {
+        auto const extra = inst->extra<CallData>();
+        return extra->numInputs() + kNumActRecCells + extra->numOut;
+      }
+      if (inst->is(CallUnpack)) {
+        auto const extra = inst->extra<CallUnpackData>();
+        return extra->numInputs() + kNumActRecCells + extra->numOut;
+      }
+      return 0;
+    }();
+    auto const catchMode = [&]() {
+      if (inst->is(Call, CallUnpack)) {
+        return EndCatchData::CatchMode::CallCatch;
+      }
+      if (inst->is(ReturnHook,
+                   SuspendHookAwaitEF,
+                   SuspendHookAwaitEG,
+                   SuspendHookCreateCont,
+                   CheckSurpriseAndStack,
+                   CheckSurpriseFlagsEnter)) {
+        return EndCatchData::CatchMode::LocalsDecRefd;
+      }
+      return EndCatchData::CatchMode::UnwindOnly;
+    }();
+    inst->setTaken(create_catch_block(env, []{}, catchMode,
+                                      offsetToAdjustSPForCall));
   }
 
   if (inst->mayRaiseError()) {
@@ -104,14 +133,24 @@ SSATmp* genInstruction(IRGS& env, IRInstruction* inst) {
 
 //////////////////////////////////////////////////////////////////////
 
-void incTransCounter(IRGS& env) { gen(env, IncTransCounter); }
-
 void incProfCounter(IRGS& env, TransID transId) {
   gen(env, IncProfCounter, TransIDData(transId));
 }
 
 void checkCold(IRGS& env, TransID transId) {
-  gen(env, CheckCold, makeExitOpt(env, transId), TransIDData(transId));
+  gen(env, CheckCold, makeExitOpt(env), TransIDData(transId));
+}
+
+void checkCoverage(IRGS& env) {
+  auto const handle = RDSHandleData { curUnit(env)->coverageDataHandle() };
+  ifElse(
+    env,
+    [&] (Block* next) { gen(env, CheckRDSInitialized, next, handle); },
+    [&] {
+      hint(env, Block::Hint::Unlikely);
+      gen(env, Jmp, makeExitSlow(env));
+    }
+  );
 }
 
 void ringbufferEntry(IRGS& env, Trace::RingBufferType t, SrcKey sk, int level) {
@@ -133,7 +172,7 @@ void prepareEntry(IRGS& env) {
    * C++ function that checks the state of everything.
    */
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
-    auto const data = IRSPOffsetData { offsetFromIRSP(env, BCSPOffset{0}) };
+    auto const data = IRSPRelOffsetData { spOffBCFromIRSP(env) };
     gen(env, DbgTraceCall, data, fp(env), sp(env));
   }
 
@@ -162,8 +201,8 @@ void endRegion(IRGS& env, SrcKey nextSk) {
   }
   auto const data = ReqBindJmpData {
     nextSk,
-    invSPOff(env),
-    offsetFromIRSP(env, BCSPOffset{0}),
+    spOffBCFromFP(env),
+    spOffBCFromIRSP(env),
     TransFlags{}
   };
   gen(env, ReqBindJmp, data, sp(env), fp(env));
@@ -173,135 +212,73 @@ void sealUnit(IRGS& env) {
   mandatoryDCE(env.unit);
 }
 
-Type predictedTypeFromLocal(const IRGS& env, uint32_t locId) {
-  return env.irb->predictedLocalType(locId);
+///////////////////////////////////////////////////////////////////////////////
+
+Type publicTopType(const IRGS& env, BCSPRelOffset idx) {
+  // It's logically const, because we're using DataTypeGeneric.
+  return topType(const_cast<IRGS&>(env), idx, DataTypeGeneric);
 }
 
-Type predictedTypeFromStack(const IRGS& env, BCSPOffset offset) {
-  return env.irb->predictedStackType(offsetFromIRSP(env, offset));
-}
+Type predictedType(const IRGS& env, const Location& loc) {
+  auto& fs = env.irb->fs();
 
-// All accesses to the stack and locals in this function use DataTypeGeneric so
-// this function should only be used for inspecting state; when the values are
-// actually used they must be constrained further.
-Type predictedTypeFromLocation(const IRGS& env, const Location& loc) {
-  switch (loc.space) {
-    case Location::Stack:
-      return predictedTypeFromStack(env, loc.bcRelOffset);
-    case Location::Local:
-      return predictedTypeFromLocal(env, loc.offset);
-    case Location::Litstr:
-      return Type::cns(curUnit(env)->lookupLitstrId(loc.offset));
-    case Location::Litint:
-      return Type::cns(loc.offset);
-    case Location::This:
-      // Don't specialize $this for cloned closures which may have been re-bound
-      if (curFunc(env)->hasForeignThis()) return TObj;
-      if (auto const cls = curFunc(env)->cls()) {
-        return Type::SubObj(cls);
-      }
-      return TObj;
-
-    case Location::Iter:
-    case Location::Invalid:
-      break;
+  switch (loc.tag()) {
+    case LTag::Stack:
+      return fs.stack(offsetFromIRSP(env, loc.stackIdx())).predictedType;
+    case LTag::Local:
+      return fs.local(loc.localId()).predictedType;
+    case LTag::MBase:
+      return fs.mbase().predictedType;
   }
   not_reached();
 }
 
-Type provenTypeFromLocal(const IRGS& env, uint32_t locId) {
-  return env.irb->localType(locId, DataTypeGeneric);
-}
+Type provenType(const IRGS& env, const Location& loc) {
+  auto& fs = env.irb->fs();
 
-Type provenTypeFromStack(const IRGS& env, BCSPOffset offset) {
-  return env.irb->stackType(offsetFromIRSP(env, offset), DataTypeGeneric);
-}
-
-Type provenTypeFromLocation(const IRGS& env, const Location& loc) {
-  switch (loc.space) {
-  case Location::Stack:
-    return provenTypeFromStack(env, loc.bcRelOffset);
-  case Location::Local:
-    return provenTypeFromLocal(env, loc.offset);
-  case Location::Litstr:
-    return Type::cns(curUnit(env)->lookupLitstrId(loc.offset));
-  case Location::Litint:
-    return Type::cns(loc.offset);
-  case Location::This:
-    // Don't specialize $this for cloned closures which may have been re-bound
-    if (curFunc(env)->hasForeignThis()) return TObj;
-    if (auto const cls = curFunc(env)->cls()) {
-      return Type::SubObj(cls);
-    }
-    return TObj;
-
-  case Location::Iter:
-  case Location::Invalid:
-    break;
+  switch (loc.tag()) {
+    case LTag::Stack:
+      return fs.stack(offsetFromIRSP(env, loc.stackIdx())).type;
+    case LTag::Local:
+      return fs.local(loc.localId()).type;
+    case LTag::MBase:
+      return fs.mbase().type;
   }
   not_reached();
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 void endBlock(IRGS& env, Offset next) {
-  if (!fp(env)) {
-    // If there's no fp, we've already executed a RetCtrl or similar, so
-    // there's no reason to try to jump anywhere now.
-    return;
-  }
-  // Don't emit the jump if it would be unreachable.  This avoids
-  // unreachable blocks appearing to be reachable, which would cause
-  // translateRegion to process them.
-  if (auto const curBlock = env.irb->curBlock()) {
-    if (!curBlock->empty() && curBlock->back().isTerminal()) return;
-  }
+  // If there's no fp, we've already executed a RetCtrl or similar, so there's
+  // no reason to try to jump anywhere now. We can probably drop the fp check
+  // here and rely on the unreachable check alone.
+  if (!fp(env) || env.irb->inUnreachableState()) return;
   jmpImpl(env, next);
 }
 
-void prepareForNextHHBC(IRGS& env,
-                        const NormalizedInstruction* ni,
-                        SrcKey newSk,
-                        bool lastBcInst) {
+void prepareForNextHHBC(IRGS& env, SrcKey newSk) {
   FTRACE(1, "------------------- prepareForNextHHBC ------------------\n");
-  env.currentNormalizedInstruction = ni;
-
-  always_assert_flog(
-    IMPLIES(isInlining(env), !env.lastBcInst),
-    "Tried to end trace while inlining."
-  );
-
   always_assert_flog(
     IMPLIES(isInlining(env), !env.firstBcInst),
     "Inlining while still at the first region instruction."
   );
 
-  always_assert(env.bcStateStack.size() >= env.inlineLevel + 1);
-  auto pops = env.bcStateStack.size() - 1 - env.inlineLevel;
-  while (pops--) env.bcStateStack.pop_back();
-
-  always_assert_flog(env.bcStateStack.back().func() == newSk.func(),
+  always_assert(env.inlineState.bcStateStack.size() == inlineDepth(env));
+  always_assert_flog(curFunc(env) == newSk.func(),
                      "Tried to update current SrcKey with a different func");
 
-  env.bcStateStack.back().setOffset(newSk.offset());
+  FTRACE(1, "Next instruction: {}: {}\n", newSk.offset(),
+         NormalizedInstruction(newSk, curUnit(env)).toString());
+
+  env.bcState.setOffset(newSk.offset());
   updateMarker(env);
-  env.lastBcInst = lastBcInst;
-  env.catchCreator = nullptr;
   env.irb->exceptionStackBoundary();
+  env.irb->resetCurIROff();
 }
 
 void finishHHBC(IRGS& env) {
   env.firstBcInst = false;
-}
-
-FPInvOffset logicalStackDepth(const IRGS& env) {
-  // Negate the offsetFromIRSP because it is an offset from the actual StkPtr
-  // (so negative values go deeper on the stack), but this function deals with
-  // logical stack depths (where more positive values are deeper).
-  return env.irb->spOffset() - offsetFromIRSP(env, BCSPOffset{0});
-}
-
-Type publicTopType(const IRGS& env, BCSPOffset idx) {
-  // It's logically const, because we're using DataTypeGeneric.
-  return topType(const_cast<IRGS&>(env), idx, DataTypeGeneric);
 }
 
 //////////////////////////////////////////////////////////////////////

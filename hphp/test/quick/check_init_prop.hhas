@@ -1,0 +1,37 @@
+.hh_file 1;
+
+.main {
+  DefCls 0
+  NewObjD "C"
+  Dup
+  NullUninit
+  NullUninit
+  FCallCtor <LockWhileUnwinding> 0 1 "" - "" ""
+  PopC
+  LockObj
+
+  CheckProp "foo"
+  InitProp "bar" NonStatic
+
+  RetC
+}
+
+.class C {
+  .default_ctor;
+
+  .method [static public] 86sinit() {
+    String "default ::foo value"
+    InitProp "foo" Static
+
+    Null
+    RetC
+  }
+
+  .method [static public] 86pinit() {
+    CheckProp "bar"
+    String "string"
+    InitProp "baz" Static
+
+    RetC
+  }
+}

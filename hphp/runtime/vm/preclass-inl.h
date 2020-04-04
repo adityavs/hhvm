@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -44,21 +44,14 @@ inline bool PreClass::hasProp(const StringData* propName) const {
 inline const PreClass::Const*
 PreClass::lookupConstant(const StringData* cnsName) const {
   Slot s = m_constants.findIndex(cnsName);
-  assert(s != kInvalidSlot);
+  assertx(s != kInvalidSlot);
   return &m_constants[s];
 }
 
 inline Func* PreClass::lookupMethod(const StringData* methName) const {
   Func* f = m_methods.lookupDefault(methName, nullptr);
-  assert(f != nullptr);
+  assertx(f != nullptr);
   return f;
-}
-
-inline const PreClass::Prop*
-PreClass::lookupProp(const StringData* propName) const {
-  Slot s = m_properties.findIndex(propName);
-  assert(s != kInvalidSlot);
-  return &m_properties[s];
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -97,12 +90,23 @@ inline
 PreClass::TraitAliasRule::TraitAliasRule(const StringData* traitName,
                                          const StringData* origMethodName,
                                          const StringData* newMethodName,
-                                         Attr modifiers)
+                                         Attr modifiers,
+                                         bool strict,
+                                         bool async)
   : m_traitName(traitName)
   , m_origMethodName(origMethodName)
   , m_newMethodName(newMethodName)
-  , m_modifiers(modifiers)
-{}
+{
+  if (async) {
+    modifiers |= AttrAsync;
+  }
+
+  if (strict) {
+    modifiers |= AttrStrict;
+  }
+
+  this->m_modifiers = modifiers;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // PreClass::ClassRequirement.
@@ -143,6 +147,10 @@ inline bool PreClass::ClassRequirement::is_implements() const {
 inline bool PreClass::ClassRequirement::is_same(
     const ClassRequirement* other) const {
   return m_word == other->m_word;
+}
+
+inline size_t PreClass::ClassRequirement::hash() const {
+  return m_word;
 }
 
 /*

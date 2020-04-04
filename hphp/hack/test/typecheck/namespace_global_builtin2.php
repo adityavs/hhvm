@@ -14,10 +14,11 @@ function g(): int {
   return \Test\invariant_violation();
 }
 
-interface Traversable {}
+interface Traversable<T> {}
 
-class Vector implements Traversable<int>, \Test\Traversable {}
+// Refers to autoimported Traversable
+class Vector implements Traversable<int> {}
 
-function h(): \Traversable<int> {
+function h(): Traversable<int> {
   return new \Test\Vector();
 }

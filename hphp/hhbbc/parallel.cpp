@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,7 @@ namespace HPHP { namespace HHBBC {
 namespace parallel {
 
 size_t num_threads = 31;
+size_t final_threads = 20;
 size_t work_chunk  = 120;
 
 }
@@ -29,4 +30,3 @@ size_t work_chunk  = 120;
 //////////////////////////////////////////////////////////////////////
 
 }}
-

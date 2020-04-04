@@ -1,14 +1,19 @@
-<?php
+<?hh
 
 function __autoload($n) {
   var_dump($n);
-  class fooo {}
+  include 'class_interface_trait_exists1.inc';
 }
 
 trait tttt {}
 class cccc {}
 interface iiii {}
-if (0) { class zzzz {} interface zzzz {} }
+
+if (__hhvm_intrinsics\launder_value(0)) {
+  include 'class_interface_trait_exists2.inc';
+}
+
+<<__EntryPoint>>
 function main() {
   var_dump(class_exists('fooo', false));
   var_dump(class_exists('fooo'));
@@ -27,10 +32,9 @@ function main() {
   var_dump(trait_exists('iiii'));
   var_dump(trait_exists('zzzz'));
 
-  foreach (array('tttt', 'cccc', 'iiii', 'zzzz') as $n) {
+  foreach (varray['tttt', 'cccc', 'iiii', 'zzzz'] as $n) {
     var_dump(class_exists($n));
     var_dump(interface_exists($n));
     var_dump(trait_exists($n));
   }
 }
-main();

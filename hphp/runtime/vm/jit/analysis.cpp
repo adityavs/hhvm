@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -34,8 +34,18 @@ SSATmp* canonical(SSATmp* value) {
 
   auto inst = value->inst();
 
-  while (inst->isPassthrough()) {
-    value = inst->getPassthroughValue();
+  while (true) {
+    if (inst->isPassthrough()) {
+      value = inst->getPassthroughValue();
+    } else if (inst->is(ConvPtrToLval)) {
+      // ConvPtrToLval is special in that its not a passthrough instruction
+      // (because the dest has a type incompatible with the source and might not
+      // be a nop), but we still want to peer through it in order to find the
+      // value's utimate origin.
+      value = inst->src(0);
+    } else {
+      break;
+    }
     inst = value->inst();
   }
   return value;

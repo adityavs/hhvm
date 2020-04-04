@@ -1,11 +1,11 @@
-<?php
+<?hh
 /* Prototype: int fileperms ( string $filename )
  * Description: Returns the group ID of the file, or FALSE in case of an error.
  */
 
-/* Creating soft and hard links to a file and applying fileperms() on links */ 
-
-$file_path = dirname(__FILE__);
+/* Creating soft and hard links to a file and applying fileperms() on links */
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 fclose( fopen($file_path."/fileperms_variation1.tmp", "w") );
 
 echo "*** Testing fileperms() with links ***\n";
@@ -20,11 +20,9 @@ var_dump( fileperms($file_path."/fileperms_variation1_link.tmp") );  // expected
 clearstatcache();
 
 echo "\n*** Done ***";
-?>
-<?php error_reporting(0); ?>
-<?php
-$file_path = dirname(__FILE__);
+error_reporting(0);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 unlink($file_path."/fileperms_variation1_symlink.tmp");
 unlink($file_path."/fileperms_variation1_link.tmp");
 unlink($file_path."/fileperms_variation1.tmp");
-?>
+}

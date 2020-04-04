@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,7 @@ TRACE_SET_MOD(debugger);
 
 String DebuggerThriftBuffer::readImpl() {
   TRACE(7, "DebuggerThriftBuffer::readImpl\n");
-  assert(m_size <= BUFFER_SIZE);
+  assertx(m_size <= BUFFER_SIZE);
   int nread = getSocket()->readImpl(m_buffer, m_size);
   m_buffer[nread] = '\0';
   return String(m_buffer, nread, CopyString);
@@ -45,15 +45,16 @@ void DebuggerThriftBuffer::throwError(const char *msg, int code) {
 const StaticString
   s_hit_limit("Hit serialization limit"),
   s_unknown_exp("Hit unknown exception"),
-  s_type_mismatch("Type mismatch");
+  s_type_mismatch("Type mismatch"),
+  s_message("message");
 
 template<typename T>
 static inline int serializeImpl(T data, String& sdata) {
   TRACE(7, "DebuggerWireHelpers::serializeImpl\n");
   VariableSerializer vs(VariableSerializer::Type::DebuggerSerialize);
   try {
-    sdata = vs.serialize(data, true);
-  } catch (StringBufferLimitException &e) {
+    sdata = vs.serialize(VarNR{data}, true);
+  } catch (StringBufferLimitException& e) {
     sdata = s_hit_limit;
     return DebuggerWireHelpers::HitLimit;
   } catch (...) {
@@ -75,10 +76,29 @@ static inline int unserializeImpl(const String& sdata, Variant& data) {
                           VariableUnserializer::Type::DebuggerSerialize, true);
   try {
     data = vu.unserialize();
-  } catch (Exception &e) {
-    data = null_variant;
-    return DebuggerWireHelpers::UnknownError;
+  } catch (const std::exception& e) {
+    data = folly::sformat("unserialize() threw '{}'", e.what());
+    return DebuggerWireHelpers::ErrorMsg;
+  } catch (const Object& o) {
+    // Get the message property from the Exception if we can. Otherwise, use
+    // the class name.
+    assertx(o->instanceof(SystemLib::s_ExceptionClass));
+
+    auto const info = o->getProp(SystemLib::s_ExceptionClass, s_message.get());
+    if (info) {
+      if (isStringType(info.type())) {
+        data = folly::sformat(
+          "unserialize() threw '{}' with message '{}'",
+          o->getVMClass()->name(), info.val().pstr
+        );
+        return DebuggerWireHelpers::ErrorMsg;
+      }
+    }
+
+    data = folly::sformat("unserialize() threw '{}'", o->getVMClass()->name());
+    return DebuggerWireHelpers::ErrorMsg;
   }
+
   return DebuggerWireHelpers::NoError;
 }
 

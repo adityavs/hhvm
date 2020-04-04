@@ -1,4 +1,6 @@
-<?hh
+<?hh // partial
+
+namespace {
 
 /**
  * Return thread type. See enum class ThreadType.
@@ -7,18 +9,6 @@
  */
 <<__HipHopSpecific, __Native>>
 function hphp_thread_type(): int;
-
-/**
- * When I'm running a newer version of the server software and I'm getting an
- *   HTTP request that's from old version of a web page, proxy it to a local
- *   instance that is still running or dangling just for handling old version of
- *   requests. Please read server documentation for more details.
- *
- * @return bool - TRUE if successful, FALSE otherwise.
- *
- */
-<<__HipHopSpecific, __Native>>
-function dangling_server_proxy_old_request(): bool;
 
 /**
  * Whether pagelet server is enabled or not. Please read server documentation
@@ -44,9 +34,10 @@ function pagelet_server_is_enabled(): bool;
  */
 <<__HipHopSpecific, __Native>>
 function pagelet_server_task_start(string $url,
-                                   array $headers = [],
+                                   darray $headers = darray[],
                                    string $post_data = "",
-                                   array $files = []): resource;
+                                   darray $files = darray[],
+                                   int $timeout_seconds = 0): resource;
 
 /**
  * Checks finish status of a pagelet task.
@@ -77,10 +68,14 @@ function pagelet_server_task_status(resource $task): int;
  *
  */
 <<__HipHopSpecific, __Native>>
-function pagelet_server_task_result(resource $task,
-                                    mixed &$headers,
-                                    mixed &$code,
-                                    int $timeout_ms = 0): string;
+function pagelet_server_task_result(
+  resource $task,
+  <<__OutOnly('KindOfArray')>>
+  inout mixed $headers,
+  <<__OutOnly('KindOfInt64')>>
+  inout mixed $code,
+  int $timeout_ms = 0,
+): string;
 
 /**
  * Return the number of pagelet tasks started during this request.
@@ -100,6 +95,13 @@ function pagelet_server_tasks_started(): int;
 function pagelet_server_flush(): void;
 
 /**
+ * Determine whether or not the pagelet thread we are executing on has finished
+ * and closed its output buffer.
+ */
+<<__HipHopSpecific, __Native>>
+function pagelet_server_is_done(): bool;
+
+/**
  * Sends an xbox message and waits for response. Please read server
  *   documentation for what an xbox is.
  *
@@ -113,7 +115,8 @@ function pagelet_server_flush(): void;
  */
 <<__HipHopSpecific, __Native>>
 function xbox_send_message(string $msg,
-                           mixed &$ret,
+                           <<__OutOnly('KindOfArray')>>
+                           inout mixed $ret,
                            int $timeout_ms,
                            string $host = "localhost"): bool;
 
@@ -166,7 +169,11 @@ function xbox_task_status(resource $task): bool;
  *
  */
 <<__HipHopSpecific, __Native>>
-function xbox_task_result(resource $task, int $timeout_ms, mixed &$ret): int;
+function xbox_task_result(
+  resource $task,
+  int $timeout_ms,
+  <<__OutOnly>> inout mixed $ret,
+): int;
 
 /**
  * This function is invoked by the xbox facility to start an xbox call task.
@@ -219,3 +226,64 @@ function xbox_schedule_thread_reset(): void;
  */
 <<__HipHopSpecific, __Native>>
 function xbox_get_thread_time(): int;
+
+} // root namespace
+
+namespace HH {
+/**
+ * Whether the server is going to stop soon.
+ *
+ * @return bool - True if server is going to stop soon, False if
+ * server is not running, or is running without a schedule to stop.
+ *
+ */
+<<__HipHopSpecific, __Native>>
+function server_is_stopping(): bool;
+
+/**
+ * Whether the server is prepared to stop.  This is different from
+ * 'server_is_stopping', because the server has not received the 'stop' command,
+ * and is not scheduled to stop.  It is still fully functional, able to handle
+ * requests for an indefinite amount of time, and should be considered healthy.
+ * This is just a hint used during server update.
+ *
+ * @return bool - True if server has received 'prepare-to-stop' command from the
+ * admin port in the past 'RuntimeOption::ServerPrepareToStop' seconds; False
+ * if server is not running, or has not received instructions to prepare to
+ * stop.
+ *
+ */
+<<__HipHopSpecific, __Native>>
+function server_is_prepared_to_stop(): bool;
+
+/**
+ * Return the health level of the server in the range of 0~100.
+ *
+ * @return int - 100 if the server is very healthy, and 0 if the
+ * server should not receive any more request.
+ *
+ */
+<<__HipHopSpecific, __Native>>
+function server_health_level(): int;
+
+/**
+ * Returns the time that the http server has been accepting connections.
+ *
+ * @return int - number of seconds the server has been running.  -1 if
+ * server is not started.
+ *
+ */
+<<__HipHopSpecific, __Native>>
+function server_uptime(): int;
+
+/**
+ * Returns the timestamp when the http server process was started.
+ *
+ * @return int - number of seconds since epoch when process started.  0 if
+ * server is not started.
+ *
+ */
+<<__HipHopSpecific, __Native>>
+function server_process_start_time(): int;
+
+}

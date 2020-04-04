@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,12 +14,13 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/server/server-note.h"
-#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/tv-conversions.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-static IMPLEMENT_THREAD_LOCAL_NO_CHECK(ServerNote, s_note);
+static THREAD_LOCAL_NO_CHECK(ServerNote, s_note);
 
 ServerNote* get_server_note() {
   return s_note.getCheck();
@@ -32,11 +33,13 @@ void ServerNote::Add(const String& name, const String& value) {
 
 String ServerNote::Get(const String& name) {
   Array &arr = s_note->m_notes;
-  String ret;
-  if (arr.exists(name)) {
-    ret = arr.rvalAt(name);
-  }
-  return ret;
+  return arr.exists(name)
+    ? tvCastToString(arr.rval(name).tv())
+    : String{};
+}
+
+void ServerNote::Delete(const String& name) {
+  s_note->m_notes.remove(name);
 }
 
 void ServerNote::Reset() {

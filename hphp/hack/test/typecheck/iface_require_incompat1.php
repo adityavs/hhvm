@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 class Super<T as num> {}
 
@@ -10,6 +10,4 @@ interface I2 {
   require extends Super<float>;
 }
 
-class C extends Super<int>
-implements I1, I2 {
-}
+class C extends Super<int> implements I1, I2 {}

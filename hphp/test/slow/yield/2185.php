@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function gen(int $mode) {
   yield $mode;
@@ -10,13 +10,16 @@ function gen(int $mode) {
   yield 47;
 }
 
+
+<<__EntryPoint>>
+function main_2185() {
 for ($mode = 0;
  $mode < 3;
  ++$mode) {
   echo "Testing mode $mode:\n";
   $gen = gen($mode);
   try {
-    $gen->next();
+    $gen->rewind();
     while ($gen->valid()) {
       var_dump($gen->current());
       $gen->next();
@@ -27,4 +30,5 @@ for ($mode = 0;
   }
   var_dump($gen->valid());
   var_dump($gen->current());
+}
 }

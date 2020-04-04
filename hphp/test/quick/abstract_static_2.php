@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 abstract class Foo {
   abstract public static function who();
@@ -8,9 +8,7 @@ class Bar extends Foo {
   public static function who() { return 'Bar'; }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $bar = new Bar();
-  echo $bar->test();
+  echo $bar::test();
 }
-
-main();

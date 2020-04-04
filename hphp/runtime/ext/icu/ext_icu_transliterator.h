@@ -10,8 +10,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_Transliterator;
 
-class Transliterator : public IntlError {
-public:
+struct Transliterator : IntlError {
   Transliterator() {}
   Transliterator(const Transliterator&) = delete;
   Transliterator& operator=(const Transliterator& src) {
@@ -33,7 +32,7 @@ public:
   static Object newInstance(icu::Transliterator* trans) {
     if (!c_Transliterator) {
       c_Transliterator = Unit::lookupClass(s_Transliterator.get());
-      assert(c_Transliterator);
+      assertx(c_Transliterator);
     }
     Object obj{c_Transliterator};
     auto data = Native::data<Transliterator>(obj);

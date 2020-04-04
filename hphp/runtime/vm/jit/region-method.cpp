@@ -1,8 +1,8 @@
-/*
+  /*
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,10 +13,15 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/util/arena.h"
+
 #include "hphp/runtime/vm/jit/region-selection.h"
-#include "hphp/runtime/vm/verifier/cfg.h"
+
 #include "hphp/runtime/vm/jit/containers.h"
+#include "hphp/runtime/vm/jit/location.h"
+
+#include "hphp/runtime/vm/verifier/cfg.h"
+
+#include "hphp/util/arena.h"
 
 namespace HPHP { namespace jit {
 
@@ -58,17 +63,18 @@ RegionDescPtr selectMethod(const RegionContext& context) {
   using namespace HPHP::Verifier;
   using HPHP::Verifier::Block;
 
-  if (!isFuncEntry(context.func, context.bcOffset)) return nullptr;
-  if (context.func->isPseudoMain()) return nullptr;
+  auto const func = context.sk.func();
+  if (!isFuncEntry(func, context.sk.offset())) return nullptr;
+  if (func->isPseudoMain()) return nullptr;
   FTRACE(1, "function entry for {}: using selectMethod\n",
-         context.func->fullName()->data());
+         func->fullName()->data());
 
   auto ret = std::make_shared<RegionDesc>();
 
   Arena arena;
-  GraphBuilder gb(arena, context.func);
+  GraphBuilder gb(arena, func);
   auto const graph = gb.build();
-  auto const unit = context.func->unit();
+  auto const unit = func->unit();
 
   jit::hash_map<Block*,RegionDesc::BlockId> blockMap;
 
@@ -84,7 +90,7 @@ RegionDescPtr selectMethod(const RegionContext& context) {
     for (Block* b = graph->first_linear; b != nullptr; b = b->next_rpo) {
       auto const start  = unit->offsetOf(b->start);
       auto const length = numInstrs(b->start, b->end);
-      SrcKey sk{context.func, start, context.resumed};
+      SrcKey sk{context.sk, start};
       auto const rblock = ret->addBlock(sk, length, spOffset);
       blockMap[b] = rblock->id();
       // flag SP offset as unknown for all but the first block
@@ -118,15 +124,7 @@ RegionDescPtr selectMethod(const RegionContext& context) {
 
     for (InstrRange inst = blockInstrs(b); !inst.empty();) {
       auto const pc   = inst.popFront();
-      auto const info = instrStackTransInfo(pc);
-      switch (info.kind) {
-      case StackTransInfo::Kind::InsertMid:
-        ++sp;
-        break;
-      case StackTransInfo::Kind::PushPop:
-        sp += info.numPushes - info.numPops;
-        break;
-      }
+      sp += instrNumPushes(pc) - instrNumPops(pc);
     }
 
     for (auto idx = uint32_t{0}; idx < numSuccBlocks(b); ++idx) {
@@ -137,9 +135,9 @@ RegionDescPtr selectMethod(const RegionContext& context) {
           succ->initialSpOffset() == sp,
           "Stack depth mismatch in region method on {}\n"
           "  srcblkoff={}, dstblkoff={}, src={}, target={}",
-          context.func->fullName()->data(),
-          context.func->unit()->offsetOf(b->start),
-          context.func->unit()->offsetOf(b->succs[idx]->start),
+          func->fullName()->data(),
+          func->unit()->offsetOf(b->start),
+          func->unit()->offsetOf(b->succs[idx]->start),
           sp.offset,
           succ->initialSpOffset().offset
         );
@@ -148,29 +146,26 @@ RegionDescPtr selectMethod(const RegionContext& context) {
       succ->setInitialSpOffset(sp);
       FTRACE(2,
         "spOff for {} -> {}\n",
-        context.func->unit()->offsetOf(b->succs[idx]->start),
+        func->unit()->offsetOf(b->succs[idx]->start),
         sp.offset
       );
     }
   }
 
-  /*
-   * Fill the first block predictions with the live types.
-   */
+  // Fill the first block predictions with the live types.
   assertx(!ret->empty());
   for (auto& lt : context.liveTypes) {
-    typedef RegionDesc::Location::Tag LTag;
-
     switch (lt.location.tag()) {
-    case LTag::Stack:
-      break;
-    case LTag::Local:
-      if (lt.location.localId() < context.func->numParams()) {
-        // Only predict objectness, not the specific class type.
-        auto const type = lt.type < TObj ? TObj : lt.type;
-        ret->entry()->addPreCondition({lt.location, type, DataTypeSpecific});
-      }
-      break;
+      case LTag::Local:
+        if (lt.location.localId() < func->numParams()) {
+          // Only predict objectness, not the specific class type.
+          auto const type = lt.type < TObj ? TObj : lt.type;
+          ret->entry()->addPreCondition({lt.location, type, DataTypeSpecific});
+        }
+        break;
+      case LTag::Stack:
+      case LTag::MBase:
+        break;
     }
   }
 

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -123,7 +123,7 @@ public:
    */
   struct LiveLists {
     LiveList& get(size_t i) {
-      assert(i < DebuggerClient::AutoCompleteCount);
+      assertx(i < DebuggerClient::AutoCompleteCount);
       return lists[i];
     }
 
@@ -314,8 +314,7 @@ public:
    * Stacktraces.
    */
   Array getStackTrace() { return m_stacktrace; }
-  void setStackTrace(const Array& stacktrace, bool isAsync);
-  bool isStackTraceAsync() { return m_stacktraceAsync; }
+  void setStackTrace(const Array& stacktrace);
   void moveToFrame(int index, bool display = true);
   void printFrame(int index, const Array& frame);
   void setFrame(int frame) { m_frame = frame; }
@@ -467,7 +466,6 @@ private:
   WatchPtrVec m_watches;
 
   Array m_stacktrace;
-  bool m_stacktraceAsync;
   int m_frame;
 
   std::string m_sourceRoot;
@@ -485,7 +483,9 @@ private:
   int  checkEvalEnd();
   void processTakeCode();
   bool processEval();
-  DebuggerCommand *createCommand();
+  DebuggerCommandPtr createCommand();
+  template<class T> DebuggerCommandPtr new_cmd(const char* name);
+  template<class T> DebuggerCommandPtr match_cmd(const char* name);
 
   void updateLiveLists();
   void promptFunctionPrototype();

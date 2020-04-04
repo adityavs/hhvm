@@ -1,4 +1,4 @@
-<?php
+<?hh
 error_reporting(E_ALL);
 
 abstract class Base {
@@ -12,7 +12,7 @@ class SubClass extends Base {
 }
 
 $s = new SubClass();
-$s->sayHello(array());
+$s->sayHello(varray[]);
 
 
 trait SayWorld {
@@ -26,6 +26,5 @@ class MyHelloWorld extends Base {
 }
 
 $o = new MyHelloWorld();
-$o->sayHello(array());
+$o->sayHello(varray[]);
 
-?>

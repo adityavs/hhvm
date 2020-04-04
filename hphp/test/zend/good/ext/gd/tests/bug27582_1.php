@@ -1,4 +1,5 @@
-<?php
+<?hh
+<<__EntryPoint>> function main(): void {
 /* $id$ */
 $dest = dirname(realpath(__FILE__)) . '/bug27582.png';
 @unlink($dest);
@@ -15,4 +16,4 @@ $col = imagecolorat($im2, 5, 5);
 $color = imagecolorsforindex($im2, $col);
 echo $color['alpha'];
 @unlink($dest);
-?>
+}

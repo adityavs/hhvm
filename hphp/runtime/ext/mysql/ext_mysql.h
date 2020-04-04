@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,12 +18,9 @@
 #ifndef incl_HPHP_EXT_MYSQL_H_
 #define incl_HPHP_EXT_MYSQL_H_
 
-#include <folly/Optional.h>
-
 #include "hphp/runtime/ext/extension.h"
-#include "mysql.h"
-#include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/base/config.h"
+#include "mysql.h"
 
 #ifdef PHP_MYSQL_UNIX_SOCK_ADDR
 #ifdef MYSQL_UNIX_ADDR
@@ -49,8 +46,7 @@ Variant HHVM_FUNCTION(mysql_get_server_info, const Variant& link_identifier);
 Variant HHVM_FUNCTION(mysql_thread_id, const Variant& link_identifier);
 Variant HHVM_FUNCTION(mysql_warning_count, const Variant& link_identifier);
 
-class mysqlExtension final : public Extension {
-public:
+struct mysqlExtension final : Extension {
   mysqlExtension() : Extension("mysql", "1.0") {}
 
   // implementing IDebuggable

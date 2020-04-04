@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class aa {
   protected function blah() {
@@ -9,11 +9,6 @@ class aa {
   protected function func($o) {
     echo "protected aa::blah\n";
     var_dump($o === $this);
-  }
-
-  public static function callfunc() {
-    self::func(null);
-    self::func(null);
   }
 
   public function __call($name, $args) {
@@ -42,15 +37,12 @@ class a extends aa {
     parent::func(null);
     parent::func($this);
 
-    parent::callfunc();
-
     self::fakemethod(1, 2, 3);
     self::fakemethod();
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $a = new a();
   $a->nons();
 }
-main();

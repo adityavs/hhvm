@@ -1,4 +1,4 @@
-<?php
+<?hh
 /*
  * Run unit test in OO- and in procedural mode.
  * Then compare the outputs.
@@ -51,21 +51,21 @@ function ut_coll_compare( $coll, $str1, $str2 )
 {
     return $GLOBALS['oo-mode'] ? $coll->compare( $str1, $str2 ) : collator_compare( $coll, $str1, $str2 );
 }
-function ut_coll_sort( $coll, &$arr, $sort_flag = Collator::SORT_REGULAR )
+function ut_coll_sort( $coll, inout $arr, $sort_flag = Collator::SORT_REGULAR )
 {
-    return $GLOBALS['oo-mode'] ? $coll->sort( $arr, $sort_flag ) : collator_sort( $coll, $arr, $sort_flag );
+    return $GLOBALS['oo-mode'] ? $coll->sort( inout $arr, $sort_flag ) : collator_sort( $coll, inout $arr, $sort_flag );
 }
-function ut_coll_sort_with_sort_keys( $coll, &$arr )
+function ut_coll_sort_with_sort_keys( $coll, inout $arr )
 {
-    return $GLOBALS['oo-mode'] ? $coll->sortWithSortKeys( $arr ) : collator_sort_with_sort_keys( $coll, $arr );
+    return $GLOBALS['oo-mode'] ? $coll->sortWithSortKeys( inout $arr ) : collator_sort_with_sort_keys( $coll, inout $arr );
 }
 function ut_coll_get_sort_key( $coll, $str )
 {
     return $GLOBALS['oo-mode'] ? $coll->getSortKey( $str ) : collator_get_sort_key( $coll, $str );
 }
-function ut_coll_asort( $coll, &$arr, $sort_flag = Collator::SORT_REGULAR )
+function ut_coll_asort( $coll, inout $arr, $sort_flag = Collator::SORT_REGULAR )
 {
-    return $GLOBALS['oo-mode'] ? $coll->asort( $arr, $sort_flag ) : collator_asort( $coll, $arr, $sort_flag );
+    return $GLOBALS['oo-mode'] ? $coll->asort( inout $arr, $sort_flag ) : collator_asort( $coll, inout $arr, $sort_flag );
 }
 function ut_coll_get_locale( $coll, $type )
 {
@@ -130,33 +130,25 @@ function ut_coll_set_default( $coll )
 
 // FIXME: incomplete list
 
-function ut_nfmt_create( $locale, $style, $pattern = null )
+function ut_nfmt_create( $locale, $style, $pattern = '' )
 {
     return $GLOBALS['oo-mode'] ? new NumberFormatter( $locale, $style, $pattern ) : numfmt_create( $locale, $style, $pattern );
 }
-function ut_nfmt_format( $fmt, $number, $type = null )
+function ut_nfmt_format( $fmt, $number, $type = 0 )
 {
     return $GLOBALS['oo-mode'] ? $fmt->format( $number, $type ) : numfmt_format( $fmt, $number, $type );
 }
-function ut_nfmt_parse( $fmt, $string, $type = NumberFormatter::TYPE_DOUBLE, &$position = null )
+function ut_nfmt_parse( $fmt, $string, $type, inout $position)
 {
-    if(is_null($position)) {
-    return $GLOBALS['oo-mode'] ? $fmt->parse( $string, $type ) : numfmt_parse( $fmt, $string, $type );
-    } else {
-    return $GLOBALS['oo-mode'] ? $fmt->parse( $string, $type, $position ) : numfmt_parse( $fmt, $string, $type, $position );
-    }
+    return $GLOBALS['oo-mode'] ? $fmt->parseWithPosition( $string, $type, inout $position ) : numfmt_parse( $fmt, $string, $type, inout $position );
 }
 function ut_nfmt_format_currency( $fmt, $number, $currency )
 {
     return $GLOBALS['oo-mode'] ? $fmt->formatCurrency( $number, $currency ) : numfmt_format_currency( $fmt, $number, $currency );
 }
-function ut_nfmt_parse_currency( $fmt, $string, &$currency, &$position = null )
+function ut_nfmt_parse_currency( $fmt, $string, inout $currency, inout $position)
 {
-    if(is_null($position)) {
-    return $GLOBALS['oo-mode'] ? $fmt->parseCurrency( $string, $currency ) : numfmt_parse_currency( $fmt, $string, $currency );
-    } else {
-    return $GLOBALS['oo-mode'] ? $fmt->parseCurrency( $string, $currency, $position ) : numfmt_parse_currency( $fmt, $string, $currency, $position );
-   }
+    return $GLOBALS['oo-mode'] ? $fmt->parseCurrency( $string, inout $currency, inout $position ) : numfmt_parse_currency( $fmt, $string, inout $currency, inout $position );
 }
 function ut_nfmt_set_attribute( $fmt, $attribute, $value )
 {
@@ -329,7 +321,7 @@ function ut_msgfmt_get_error_message( $fmt )
     return $GLOBALS['oo-mode'] ? $fmt->getErrorMessage() : msgfmt_get_error_message( $fmt );
 }
 /* IntlDateFormatter functions */
-function ut_datefmt_create( $locale, $datetype, $timetype, $timezone = null, $calendar = null ,$pattern = null)
+function ut_datefmt_create( $locale, $datetype, $timetype, $timezone = null, $calendar = null ,$pattern = '')
 {
     return $GLOBALS['oo-mode'] ? datefmt_create( $locale, $datetype, $timetype, $timezone, $calendar ,$pattern ) : datefmt_create( $locale, $datetype, $timetype, $timezone, $calendar ,$pattern);
 }
@@ -381,13 +373,13 @@ function ut_datefmt_format( $fmt , $value )
 {
     return $GLOBALS['oo-mode'] ? $fmt->format(  $value ) : datefmt_format( $fmt ,  $value);
 }
-function ut_datefmt_parse( $fmt , $value , &$parse_pos=0 )
+function ut_datefmt_parse( $fmt , $value , inout $parse_pos )
 {
-    return $GLOBALS['oo-mode'] ? $fmt->parse(  $value ,$parse_pos ) : datefmt_parse( $fmt ,  $value,$parse_pos);
+    return $GLOBALS['oo-mode'] ? $fmt->parseWithPosition(  $value ,inout $parse_pos ) : datefmt_parse( $fmt ,  $value,inout $parse_pos);
 }
-function ut_datefmt_localtime( $fmt , $value , &$parse_pos=0 )
+function ut_datefmt_localtime( $fmt , $value , inout $parse_pos )
 {
-    return $GLOBALS['oo-mode'] ? $fmt->localtime(  $value , $parse_pos ) : datefmt_localtime( $fmt ,  $value , $parse_pos );
+    return $GLOBALS['oo-mode'] ? $fmt->localtime(  $value , inout $parse_pos ) : datefmt_localtime( $fmt ,  $value , inout $parse_pos );
 }
 
 function ut_resourcebundle_create( $locale, $bundle, $fallback=true )

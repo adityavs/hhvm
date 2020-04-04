@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class X {
   protected function foo() {
@@ -38,6 +38,7 @@ class B extends Y {
 #    $a->baz();
   }
 }
-
+<<__EntryPoint>> function main(): void {
 $b = new B;
 $b->foo();
+}

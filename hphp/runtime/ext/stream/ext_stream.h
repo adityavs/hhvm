@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -122,11 +122,6 @@ struct StreamContext final : ResourceData {
   void mergeParams(const Array& params);
   Array getParams() const;
 
-  /*void vscan(IMarker& mark) const override {
-    mark(m_options);
-    mark(m_params);
-  }*/
-
 private:
   static StaticString s_options_key;
   static StaticString s_notification_key;
@@ -136,8 +131,8 @@ private:
 };
 
 Variant HHVM_FUNCTION(stream_context_create,
-                      const Variant& options = null_variant,
-                      const Variant& params = null_variant);
+                      const Variant& options = uninit_variant,
+                      const Variant& params = uninit_variant);
 
 Variant HHVM_FUNCTION(stream_context_get_options,
                       const Resource& stream_or_context);
@@ -145,11 +140,11 @@ Variant HHVM_FUNCTION(stream_context_get_options,
 bool HHVM_FUNCTION(stream_context_set_option,
                    const Variant& stream_or_context,
                    const Variant& wrapper,
-                   const Variant& option = null_variant,
-                   const Variant& value = null_variant);
+                   const Variant& option = uninit_variant,
+                   const Variant& value = uninit_variant);
 
 Variant HHVM_FUNCTION(stream_context_get_default,
-                      const Variant& options /* = null_variant */);
+                      const Variant& options /* = uninit_variant */);
 
 Variant HHVM_FUNCTION(stream_context_get_params,
                       const Resource& stream_or_context);
@@ -174,7 +169,7 @@ Variant HHVM_FUNCTION(stream_get_contents,
 Variant HHVM_FUNCTION(stream_get_line,
                       const Resource& handle,
                       int length = 0,
-                      const Variant& ending = null_variant);
+                      const Variant& ending = uninit_variant);
 
 Variant HHVM_FUNCTION(stream_get_meta_data,
                       const Resource& stream);
@@ -184,27 +179,15 @@ Array HHVM_FUNCTION(stream_get_transports);
 Array HHVM_FUNCTION(stream_get_wrappers);
 bool HHVM_FUNCTION(stream_is_local,
                    const Variant& stream_or_url);
-bool HHVM_FUNCTION(stream_register_wrapper,
-                   const String& protocol,
-                   const String& classname,
-                   int flags);
-bool HHVM_FUNCTION(stream_wrapper_register,
-                   const String& protocol,
-                   const String& classname,
-                   int flags);
-bool HHVM_FUNCTION(stream_wrapper_restore,
-                   const String& protocol);
-bool HHVM_FUNCTION(stream_wrapper_unregister,
-                   const String& protocol);
 
 Variant HHVM_FUNCTION(stream_resolve_include_path,
                       const String& filename,
-                      const Variant& context = null_variant);
+                      const Variant& context = uninit_variant);
 
 Variant HHVM_FUNCTION(stream_select,
-                      VRefParam read,
-                      VRefParam write,
-                      VRefParam except,
+                      Variant& read,
+                      Variant& write,
+                      Variant& except,
                       const Variant& vtv_sec,
                       int tv_usec = 0);
 
@@ -215,7 +198,15 @@ Object HHVM_FUNCTION(stream_await,
 
 bool HHVM_FUNCTION(stream_set_blocking,
                    const Resource& stream,
-                   int mode);
+                   bool mode);
+
+int64_t HHVM_FUNCTION(stream_set_read_buffer,
+                      const Resource& stream,
+                      int buffer);
+
+Variant HHVM_FUNCTION(stream_set_chunk_size,
+                      const Resource& stream,
+                      int64_t chunk_size);
 
 bool HHVM_FUNCTION(stream_set_timeout,
                    const Resource& stream,
@@ -235,23 +226,23 @@ int64_t HHVM_FUNCTION(set_file_buffer,
 
 Variant HHVM_FUNCTION(stream_socket_accept,
                       const Resource& server_socket,
-                      double timeout = -1.0,
-                      VRefParam peername = uninit_null());
+                      double timeout,
+                      Variant& peername);
 
 Variant HHVM_FUNCTION(stream_socket_server,
                       const String& local_socket,
-                      VRefParam errnum = uninit_null(),
-                      VRefParam errstr = uninit_null(),
+                      Variant& errnum,
+                      Variant& errstr,
                       int flags = k_STREAM_SERVER_BIND|k_STREAM_SERVER_LISTEN,
-                      const Variant& context = null_variant);
+                      const Variant& context = uninit_variant);
 
 Variant HHVM_FUNCTION(stream_socket_client,
                       const String& remote_socket,
-                      VRefParam errnum = uninit_null(),
-                      VRefParam errstr = uninit_null(),
+                      Variant& errnum,
+                      Variant& errstr,
                       double timeout = -1.0,
                       int flags = 0,
-                      const Variant& context = null_variant);
+                      const Variant& context = uninit_variant);
 
 bool HHVM_FUNCTION(stream_socket_enable_crypto,
                    const Resource& socket,
@@ -271,14 +262,14 @@ Variant HHVM_FUNCTION(stream_socket_pair,
 Variant HHVM_FUNCTION(stream_socket_recvfrom,
                       const Resource& socket,
                       int length,
-                      int flags = 0,
-                      VRefParam address = uninit_null());
+                      int flags,
+                      Variant& address);
 
 Variant HHVM_FUNCTION(stream_socket_sendto,
                       const Resource& socket,
                       const String& data,
                       int flags = 0,
-                      const Variant& address = null_variant);
+                      const Variant& address = uninit_variant);
 
 bool HHVM_FUNCTION(stream_socket_shutdown,
                    const Resource& stream,

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,12 +14,16 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/util/cronolog.h"
+#include "hphp/util/user-info.h"
 
 #include <boost/filesystem/path.hpp>
 
 #ifndef _MSC_VER
 #include <pwd.h>
 #endif
+
+#include <folly/portability/Fcntl.h>
+#include <folly/portability/SysStat.h>
 
 /* Default permissions for files and directories that are created */
 
@@ -123,7 +127,7 @@ FILE *Cronolog::getOutputFile() {
 
   /* We need to open a new file under a mutex. */
   {
-    Lock lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_mutex);
     if ((time_now >= m_nextPeriod)) {
       /* the current period has finished */
 
@@ -163,34 +167,32 @@ void Cronolog::changeOwner(const string &username, const string &symlink) {
     return;
   }
 
-  int username_length = sysconf(_SC_GETPW_R_SIZE_MAX);
-  if (username_length == -1) {
-    username_length = 512;
-  }
-
-  struct passwd user_info, *user_infop;
-  std::vector<char> username_buf(username_length);
-
-  if (getpwnam_r(username.c_str(), &user_info, &username_buf[0],
-                 username_length, &user_infop)) {
-    // invalid user
+  auto buf = PasswdBuffer{};
+  passwd* pw;
+  if (getpwnam_r(username.c_str(), &buf.ent, buf.data.get(), buf.size, &pw)) {
+    // Failed to obtain the record.
     return;
   }
 
-  if (lchown(symlink.c_str(), user_info.pw_uid, -1) < 0) {
-    fprintf(stderr, "Unable to chmod %s\n", symlink.c_str());
+  if (pw == nullptr) {
+    // Invalid user.
+    return;
+  }
+
+  if (lchown(symlink.c_str(), pw->pw_uid, -1) < 0) {
+    fprintf(stderr, "Unable to chown %s\n", symlink.c_str());
   }
 
   // using chown() isn't portable if it is a symlink
   int fd = open(symlink.c_str(), O_RDONLY | O_NONBLOCK | O_NOCTTY);
-  int success = (fd >= 0 ? fchown(fd, user_info.pw_uid, -1) : -1);
+  int success = (fd >= 0 ? fchown(fd, pw->pw_uid, -1) : -1);
 
   if (fd >= 0) {
     close(fd);
   }
 
   if (success < 0) {
-    fprintf(stderr, "Unable to chmod %s\n", symlink.c_str());
+    fprintf(stderr, "Unable to chown %s\n", symlink.c_str());
   }
 #endif
 }

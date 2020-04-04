@@ -366,7 +366,7 @@ Assembler::~Assembler() {
 
 
 void Assembler::Reset() {
-#ifdef DEBUG
+#ifndef NDEBUG
   assert(literal_pool_monitor_ == 0);
   cb_.zero();
   finalized_ = false;
@@ -381,7 +381,7 @@ void Assembler::FinalizeCode() {
   if (!literals_.empty()) {
     EmitLiteralPool();
   }
-#ifdef DEBUG
+#ifndef NDEBUG
   finalized_ = true;
 #endif
 }
@@ -392,10 +392,11 @@ void Assembler::bind(Label* label) {
   label->target_ = cb_.frontier();
   while (label->IsLinked()) {
     // Get the address of the following instruction in the chain.
-    auto link = Instruction::Cast(label->link_);
-    Instruction* next_link = link->ImmPCOffsetTarget();
+    auto const link = Instruction::Cast(label->link_);
+    auto const actual_link = Instruction::Cast(cb_.toDestAddress(label->link_));
+    auto const next_link = actual_link->ImmPCOffsetTarget(link);
     // Update the instruction target.
-    link->SetImmPCOffsetTarget(Instruction::Cast(label->target_));
+    actual_link->SetImmPCOffsetTarget(Instruction::Cast(label->target_), link);
     // Update the label's link.
     // If the offset of the branch we just updated was 0 (kEndOfChain) we are
     // done.
@@ -531,6 +532,17 @@ void Assembler::adr(const Register& rd, int imm21) {
 
 void Assembler::adr(const Register& rd, Label* label) {
   adr(rd, UpdateAndGetByteOffsetTo(label));
+}
+
+
+void Assembler::adrp(const Register& rd, int imm21) {
+  assert(rd.Is64Bits());
+  Emit(ADRP | ImmPCRelAddress(imm21) | Rd(rd));
+}
+
+
+void Assembler::adrp(const Register& rd, Label* label) {
+  adrp(rd, UpdateAndGetByteOffsetTo(label));
 }
 
 
@@ -1088,10 +1100,15 @@ void Assembler::str(const CPURegister& rt, const MemOperand& src) {
 
 
 void Assembler::ldr(const Register& rt, Label* label) {
-  assert(rt.Is64Bits());
-  Emit(LDR_x_lit
-       | ImmLLiteral(UpdateAndGetInstructionOffsetTo(label))
-       | Rt(rt));
+  if (rt.Is64Bits()) {
+    Emit(LDR_x_lit
+         | ImmLLiteral(UpdateAndGetInstructionOffsetTo(label))
+         | Rt(rt));
+  } else {
+    Emit(LDR_w_lit
+         | ImmLLiteral(UpdateAndGetInstructionOffsetTo(label))
+         | Rt(rt));
+  }
 }
 
 
@@ -1121,6 +1138,55 @@ void Assembler::ldr(const FPRegister& ft, double imm) {
   }
 
   LoadLiteral(ft, rawbits, op);
+}
+
+
+void Assembler::ldaddal(const Register& rs, const Register& rt, const MemOperand& src) {
+  assert(src.IsImmediateOffset() && (src.offset() == 0));
+  // aquire/release semantics
+  uint32_t op = rt.Is64Bits() ? LSELD_ADD_alx : LSELD_ADD_alw;
+  Emit(op | Rs(rs) | Rt(rt) | RnSP(src.base()));
+}
+
+
+void Assembler::ldxr(const Register& rt, const MemOperand& src) {
+  assert(src.IsImmediateOffset() && (src.offset() == 0));
+  LoadStoreExclusive op = rt.Is64Bits() ? LDXR_x : LDXR_w;
+  Emit(op | Rs_mask | Rt(rt) | Rt2_mask | RnSP(src.base()));
+}
+
+
+void Assembler::stxr(const Register& rs,
+                     const Register& rt,
+                     const MemOperand& dst) {
+  assert(dst.IsImmediateOffset() && (dst.offset() == 0));
+  LoadStoreExclusive op = rt.Is64Bits() ? STXR_x : STXR_w;
+  Emit(op | Rs(rs) | Rt(rt) | Rt2_mask | RnSP(dst.base()));
+}
+
+
+void Assembler::ld1(const VRegister& vt,
+                    const MemOperand& src) {
+  LoadStoreStruct(vt, src, NEON_LD1_1v);
+}
+
+
+void Assembler::st1(const VRegister& vt,
+                    const MemOperand& src) {
+  LoadStoreStruct(vt, src, NEON_ST1_1v);
+}
+
+
+void Assembler::mov(const VRegister& vd, const VRegister& vs) {
+  assert(vd.IsSameSizeAndType(vs));
+  Instr format;
+  if (vd.Is64Bits()) {
+    format = NEON_8B;
+  } else {
+    assert(vd.Is128Bits());
+    format = NEON_16B;
+  }
+  Emit(format | NEON_ORR | Rm(vs) | Rn(vs) | Rd(vd));
 }
 
 
@@ -1189,6 +1255,20 @@ void Assembler::fmov(FPRegister fd, Register rn) {
 void Assembler::fmov(FPRegister fd, FPRegister fn) {
   assert(fd.size() == fn.size());
   Emit(FPType(fd) | FMOV | Rd(fd) | Rn(fn));
+}
+
+
+void Assembler::fmov(const FPRegister& fd, int index, const Register& rn) {
+  assert(index == 1);
+  USE(index);
+  Emit(FMOV_d1_x | Rd(fd) | Rn(rn));
+}
+
+
+void Assembler::fmov(const Register& rd, const FPRegister& fn, int index) {
+  assert(index == 1);
+  USE(index);
+  Emit(FMOV_x_d1 | Rd(rd) | Rn(fn));
 }
 
 
@@ -1267,6 +1347,20 @@ void Assembler::frintn(const FPRegister& fd,
                        const FPRegister& fn) {
   assert(fd.SizeInBits() == fn.SizeInBits());
   FPDataProcessing1Source(fd, fn, FRINTN);
+}
+
+
+void Assembler::frintm(const FPRegister& fd,
+                       const FPRegister& fn) {
+  assert(fd.SizeInBits() == fn.SizeInBits());
+  FPDataProcessing1Source(fd, fn, FRINTM);
+}
+
+
+void Assembler::frintp(const FPRegister& fd,
+                       const FPRegister& fn) {
+  assert(fd.SizeInBits() == fn.SizeInBits());
+  FPDataProcessing1Source(fd, fn, FRINTP);
 }
 
 
@@ -1767,6 +1861,38 @@ void Assembler::LoadStore(const CPURegister& rt,
       not_reached();
     }
   }
+}
+
+
+void Assembler::LoadStoreStruct(const VRegister& vt,
+                                const MemOperand& addr,
+                                NEONLoadStoreMultiStructOp op) {
+  USE(vt);
+  Emit(op | LoadStoreStructAddrModeField(addr) | LSVFormat(vt) | Rt(vt));
+}
+
+
+// NEON structure loads and stores.
+Instr Assembler::LoadStoreStructAddrModeField(const MemOperand& addr) {
+  Instr addr_field = RnSP(addr.base());
+
+  if (addr.IsPostIndex()) {
+    static_assert(NEONLoadStoreMultiStructPostIndex ==
+        static_cast<NEONLoadStoreMultiStructPostIndexOp>(
+            NEONLoadStoreSingleStructPostIndex), "");
+
+    addr_field |= NEONLoadStoreMultiStructPostIndex;
+    if (addr.offset() == 0) {
+      addr_field |= RmNot31(addr.regoffset());
+    } else {
+      // The immediate post index addressing mode is indicated by rm = 31.
+      // The immediate is implied by the number of vector registers used.
+      addr_field |= (0x1f << Rm_offset);
+    }
+  } else {
+    assert(addr.IsImmediateOffset() && (addr.offset() == 0));
+  }
+  return addr_field;
 }
 
 

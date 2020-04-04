@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,10 @@
 #include <cstring>
 #include <string>
 
+#include <folly/portability/String.h>
+#include <folly/Range.h>
+
+#include "hphp/util/bstring.h"
 #include "hphp/util/hash.h"
 
 namespace HPHP {
@@ -57,8 +61,22 @@ struct stdltstr {
 };
 
 struct stdltistr {
+  using is_transparent = void;
+
   bool operator()(const std::string &s1, const std::string &s2) const {
     return strcasecmp(s1.c_str(), s2.c_str()) < 0;
+  }
+  bool operator()(const std::string &s1, folly::StringPiece s2) const {
+    return bstrcasecmp(s1, s2) < 0;
+  }
+  bool operator()(folly::StringPiece s1, const std::string &s2) const {
+    return bstrcasecmp(s1, s2) < 0;
+  }
+  bool operator()(const std::string &s1, const char* s2) const {
+    return strcasecmp(s1.c_str(), s2) < 0;
+  }
+  bool operator()(const char* s1, const std::string &s2) const {
+    return strcasecmp(s1, s2.c_str()) < 0;
   }
 };
 
@@ -76,13 +94,13 @@ struct stringHashCompare {
     return s1 == s2;
   }
   size_t hash(const std::string &s) const {
-    return hash_string_unsafe(s.c_str(), s.size());
+    return hash_string_cs_unsafe(s.c_str(), s.size());
   }
 };
 
 struct int64_hash {
   size_t operator() (const int64_t v) const {
-    return (size_t)hash_int64(v);
+    return hash_int64(v);
   }
   size_t hash(const int64_t v) const {
     return operator()(v);
@@ -95,7 +113,7 @@ struct int64_hash {
 template<typename T>
 struct pointer_hash {
   size_t operator() (const T *const p) const {
-    return (size_t)hash_int64(intptr_t(p));
+    return hash_int64(intptr_t(p));
   }
   size_t hash(const T *const p) const {
     return operator()(p);

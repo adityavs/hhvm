@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   protected $x = 1;
@@ -14,10 +14,8 @@ class C extends A {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $b = new B;
   $c = new C;
   $c->test($b);
 }
-
-main();

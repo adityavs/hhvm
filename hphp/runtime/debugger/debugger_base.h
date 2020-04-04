@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -82,6 +82,15 @@ struct DebuggerClientExitException : DebuggerException {
     return "Debugger client has just quit, request (if any) terminated.";
   }
   EXCEPTION_COMMON_IMPL(DebuggerClientExitException);
+};
+
+// Exception thrown when a DebuggerClientExitException occurs specifically
+// due to a failure to set hphpd as the active debugger for the HHVM instance.
+struct DebuggerClientAttachFailureException : DebuggerClientExitException {
+  const char* what() const noexcept override {
+    return "Debugger client was unable to attach to the request thread. "
+      "Another debugger is already attached.";
+  }
 };
 
 struct DebuggerRestartException : DebuggerException {
@@ -223,8 +232,12 @@ struct Macro {
 struct DebuggerUsageLogger {
   virtual ~DebuggerUsageLogger() {}
   virtual void init() {}
-  virtual void log(const std::string &mode, const std::string &sandboxId,
-                   const std::string &cmd, const std::string &data) {}
+  virtual void clearClientInfo() {}
+  virtual void setClientInfo(const std::string& /*username*/, uid_t /*uid*/,
+                             pid_t /*clientPid*/) {}
+  virtual void
+  log(const std::string& /*mode*/, const std::string& /*sandboxId*/,
+      const std::string& /*cmd*/, const std::string& /*data*/) {}
 };
 
 ///////////////////////////////////////////////////////////////////////////////

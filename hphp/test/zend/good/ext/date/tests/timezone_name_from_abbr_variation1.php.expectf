@@ -1,0 +1,104 @@
+*** Testing timezone_name_from_abbr() : usage variation -  unexpected values to first argument $abbr***
+
+-- int 0 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, integer given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- int 12345 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, integer given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- int -12345 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, integer given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- float 10.5 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- float -10.5 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- float .5 --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- empty array --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- int indexed array --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- associative array --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- nested arrays --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- uppercase NULL --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- lowercase null --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- lowercase true --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- lowercase false --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- uppercase TRUE --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- uppercase FALSE --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- empty string DQ --
+string(13) "Europe/London"
+
+-- empty string SQ --
+string(13) "Europe/London"
+
+-- string DQ --
+string(13) "Europe/London"
+
+-- string SQ --
+string(13) "Europe/London"
+
+-- mixed case string --
+string(13) "Europe/London"
+
+-- heredoc --
+string(13) "Europe/London"
+
+-- instance of classWithToString --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, object given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- instance of classWithoutToString --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, object given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- undefined var --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- unset var --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+
+-- resource --
+
+Warning: timezone_name_from_abbr() expects parameter 1 to be string, resource given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation1.php on line 99
+===DONE===

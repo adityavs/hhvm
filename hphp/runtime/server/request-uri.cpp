@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,8 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
+
+#include <folly/portability/Unistd.h>
 
 #include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -33,8 +34,13 @@ namespace HPHP {
 RequestURI::RequestURI(const VirtualHost *vhost, Transport *transport,
                        const std::string &pathTranslation,
                        const std::string &sourceRoot)
-  :  m_rewritten(false), m_defaultDoc(false), m_done(false),
-     m_forbidden(false), m_ext(nullptr) {
+  : m_rewritten(false)
+  , m_defaultDoc(false)
+  , m_globalDoc(false)
+  , m_done(false)
+  , m_forbidden(false)
+  , m_ext(nullptr)
+{
   if (!process(vhost, transport, sourceRoot, pathTranslation,
                transport->getServerObject()) ||
       (m_forbidden && RuntimeOption::ForbiddenAs404)) {
@@ -63,7 +69,11 @@ RequestURI::RequestURI(const VirtualHost *vhost, Transport *transport,
 }
 
 RequestURI::RequestURI(const std::string & rpcFunc)
-  :  m_rewritten(false), m_defaultDoc(false), m_done(false) {
+  : m_rewritten(false)
+  , m_defaultDoc(false)
+  , m_globalDoc(false)
+  , m_done(false)
+{
   m_originalURL = m_rewrittenURL = m_resolvedURL = String(rpcFunc);
 }
 
@@ -96,6 +106,25 @@ bool RequestURI::process(const VirtualHost *vhost, Transport *transport,
       m_pathInfo = m_origPathInfo;
     }
     return true;
+  }
+
+  if (!RuntimeOption::GlobalDocument.empty()) {
+    // GlobalDocument option in use - never resolveURL and 404 if GlobalDocument
+    // does not exist. Still check for rewrites.
+
+    if (!rewriteURL(vhost, transport, pathTranslation, sourceRoot)) {
+      // Redirection
+      m_done = true;
+      return true;
+    }
+
+    m_resolvedURL = String(RuntimeOption::GlobalDocument);
+    if (virtualFileExists(vhost, sourceRoot, pathTranslation,
+                          m_resolvedURL)) {
+      m_globalDoc = true;
+      return true;
+    }
+    return false;
   }
 
   // Fast path for files that exist
@@ -317,8 +346,10 @@ bool RequestURI::virtualFileExists(const VirtualHost *vhost,
     struct stat st;
     return RuntimeOption::AllowedFiles.find(fullname.c_str()) !=
       RuntimeOption::AllowedFiles.end() ||
-      (stat(m_absolutePath.c_str(), &st) == 0 &&
-       (st.st_mode & S_IFMT) == S_IFREG);
+      ((!RuntimeOption::RepoAuthoritative ||
+        RuntimeOption::EnableStaticContentFromDisk) &&
+         (stat(m_absolutePath.c_str(), &st) == 0 &&
+          (st.st_mode & S_IFMT) == S_IFREG));
   }
   m_path = canon;
   m_absolutePath = String(sourceRoot) + canon;

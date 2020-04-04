@@ -1,4 +1,4 @@
-<?php
+<?hh // partial
 
 class MultipleIterator implements Iterator {
   /** Inner Iterators */
@@ -42,20 +42,20 @@ class MultipleIterator implements Iterator {
   /** @param $iter new Iterator to attach.
   * @param $inf associative info forIteraotr, must be NULL, integer or string
   *
-  * @throws IllegalValueException if a inf is none of NULL, integer or string
-  * @throws IllegalValueException if a inf is already an associated info
+  * @throws InvalidArgumentException if a inf is none of NULL, integer or string
+  * @throws InvalidArgumentException if a inf is already an associated info
   */
   public function attachIterator(Iterator $iter, $inf = NULL) {
 
     if (!is_null($inf)) {
       if (!is_int($inf) && !is_string($inf)){
-        throw new IllegalValueException(
+        throw new InvalidArgumentException(
           'Inf must be NULL, integer or string');
       }
 
       foreach($this->iterators as $iter) {
         if ($inf == $this->iterators->getInfo()) {
-          throw new IllegalValueException('Key duplication error');
+          throw new InvalidArgumentException('Key duplication error');
         }
       }
     }
@@ -89,7 +89,7 @@ class MultipleIterator implements Iterator {
   /**
   * @return whether all or one sub iterator is valid depending on flags.
   * In mode MIT_NEED_ALL we expect all sub iterators to be valid and
-  * return flase on the first non valid one. If that flag is not set we
+  * return false on the first non valid one. If that flag is not set we
   * return true on the first valid sub iterator found. If no Iterator
   * is attached, we always return false.
   */
@@ -121,19 +121,19 @@ class MultipleIterator implements Iterator {
   * all registered Iterator instances current() result.
   * @throws RuntimeException      if mode MIT_NEED_ALL is set and at least one
   *                               attached Iterator is not valid().
-  * @throws IllegalValueException if a key is NULL and MIT_KEYS_ASSOC is set.
+  * @throws InvalidArgumentException if a key is NULL and MIT_KEYS_ASSOC is set.
   */
   public function current() {
     if (!sizeof($this->iterators)) {
       return false;
     }
-    $retval = array();
+    $retval = darray[];
     foreach($this->iterators as $iter) {
       if ($iter->valid()) {
         if ($this->flags & self::MIT_KEYS_ASSOC) {
           $key = $this->iterators->getInfo();
           if (is_null($key)) {
-            throw new IllegalValueException(
+            throw new InvalidArgumentException(
               'Sub-Iterator is associated with NULL');
           }
           $retval[$key] = $iter->current();
@@ -159,7 +159,7 @@ class MultipleIterator implements Iterator {
     if (!sizeof($this->iterators)) {
       return false;
     }
-    $retval = array();
+    $retval = varray[];
     foreach($this->iterators as $iter) {
       if ($iter->valid()) {
         $retval[] = $iter->key();

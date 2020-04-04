@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,6 @@
 #include "hphp/runtime/vm/litstr-table.h"
 
 #include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/repo-helpers.h"
 #include "hphp/runtime/vm/unit.h"
 
 namespace HPHP {
@@ -28,30 +27,59 @@ LitstrTable* LitstrTable::s_litstrTable = nullptr;
 ///////////////////////////////////////////////////////////////////////////////
 
 Id LitstrTable::mergeLitstr(const StringData* litstr) {
-  std::lock_guard<Mutex> g(mutex());
-  assert(!m_safeToRead);
-  auto it = m_litstr2id.find(litstr);
+  if (!litstr) {
+    return 0;
+  }
 
-  if (it == m_litstr2id.end()) {
-    const StringData* sd = makeStaticString(litstr);
-    Id id = numLitstrs();
+  {
+    LitstrMap::const_accessor acc;
+    if (m_litstr2id.find(acc, litstr)) {
+      return acc->second;
+    }
+  }
 
-    m_litstr2id[sd] = id;
-    m_namedInfo.emplace_back(sd, nullptr);
+  auto const sd = makeStaticString(litstr);
+  LitstrMap::accessor acc;
+  if (m_litstr2id.insert(acc, sd)) {
+    acc->second = m_nextId.fetch_add(1, std::memory_order_relaxed);
+  }
 
-    return id;
-  } else {
-    return it->second;
+  return acc->second;
+}
+
+void LitstrTable::setReading() {
+  always_assert(!m_safeToRead);
+  always_assert(!m_namedInfo.size());
+
+  m_namedInfo.resize(m_litstr2id.size() + 1);
+  m_namedInfo.shrink_to_fit();
+  for (auto const& strId : m_litstr2id) {
+    m_namedInfo[strId.second] = LowStringPtr{strId.first};
+  }
+
+  m_safeToRead = true;
+}
+
+void LitstrTable::forEachLitstr(
+  std::function<void (int, const StringData*)> onItem) {
+  assertx(m_safeToRead);
+  auto i = 0;
+  for (auto& s : m_namedInfo) {
+    if (i != 0) {
+      onItem(i, s.get());
+    }
+    i++;
   }
 }
 
-void LitstrTable::insert(RepoTxn& txn) {
-  Repo& repo = Repo::get();
-  LitstrRepoProxy& lsrp = repo.lsrp();
-  int repoId = Repo::get().repoIdForNewUnit(UnitOrigin::File);
-  for (int i = 0; i < m_namedInfo.size(); ++i) {
-    lsrp.insertLitstr(repoId).insert(txn, i, m_namedInfo[i].first);
+///////////////////////////////////////////////////////////////////////////////
+// Lazy loading.
+
+StringData* loadLitstrById(Id id) {
+  if (RuntimeOption::RepoAuthoritative) {
+    return Repo::get().lsrp().loadOne(id);
   }
+  return nullptr;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

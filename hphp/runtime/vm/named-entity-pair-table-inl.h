@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,13 +22,20 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
+extern StringData* loadLitstrById(Id id);
+
+///////////////////////////////////////////////////////////////////////////////
+
 inline bool NamedEntityPairTable::contains(Id id) const {
   return id >= 0 && id < Id(size());
 }
 
 inline StringData* NamedEntityPairTable::lookupLitstr(Id id) const {
-  assert(contains(id));
-  return const_cast<StringData*>((*this)[id].first);
+  assertx(contains(id));
+  if (auto const ret = (*this)[id].get()) {
+    return const_cast<StringData*>(ret);
+  }
+  return loadLitstrById(id);
 }
 
 inline const NamedEntity*
@@ -36,21 +43,15 @@ NamedEntityPairTable::lookupNamedEntity(Id id) const {
   return lookupNamedEntityPair(id).second;
 }
 
-inline const NamedEntityPair&
+inline NamedEntityPair
 NamedEntityPairTable::lookupNamedEntityPair(Id id) const {
-  assert(contains(id));
-  auto const& nep = (*this)[id];
+  assertx(contains(id));
+  auto const name = lookupLitstr(id);
 
-  // Check that the name exists and is normalized.
-  assert(nep.first);
-  assert(nep.first->data()[nep.first->size()] == 0);
-  assert(nep.first->data()[0] != '\\');
+  assertx(name);
+  assertx(name->data()[0] != '\\');
 
-  // Create the NamedEntity if necessary.
-  if (UNLIKELY(!nep.second)) {
-    const_cast<const NamedEntity*&>(nep.second) = NamedEntity::get(nep.first);
-  }
-  return nep;
+  return { name, NamedEntity::get(name) };
 }
 
 ///////////////////////////////////////////////////////////////////////////////

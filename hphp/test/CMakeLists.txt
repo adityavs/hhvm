@@ -9,8 +9,6 @@ endforeach(dir ${RECURSIVE_SOURCE_SUBDIRS})
 
 list(APPEND CXX_SOURCES ${files})
 list(APPEND CXX_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../hhvm/process-init.cpp")
-list(APPEND CXX_SOURCES
-     "${CMAKE_CURRENT_SOURCE_DIR}/../hhvm/global-variables.cpp")
 
 if(NOT HAVE_CUSTOM_LIBEVENT)
   list(REMOVE_ITEM CXX_SOURCES
@@ -19,6 +17,7 @@ endif()
 
 add_executable(test ${CXX_SOURCES})
 target_link_libraries(test ${HHVM_LINK_LIBRARIES})
+link_object_libraries(test ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
 embed_all_systemlibs(test "${CMAKE_CURRENT_BINARY_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}/test")
 add_dependencies(test systemlib)
 if (ENABLE_COTIRE)

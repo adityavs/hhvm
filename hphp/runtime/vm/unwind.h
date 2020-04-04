@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,33 +21,48 @@
 #include "hphp/runtime/base/object-data.h"
 #include "hphp/runtime/base/type-object.h"
 #include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/util/either.h"
 #include "hphp/util/trace.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-/*
- * Unwind the PHP exception on the top of the fault stack.
- */
-void unwindPhp();
+enum UnwinderResult {
+   UnwindNone        = 0,
+   // Unwound an async function and placed the exception inside a failed static
+   // wait handle
+   UnwindFSWH        = (1u << 0),
+   // Unwound until the given fp, i.e. did not reach the end of the vm nesting
+   UnwindReachedGoal = (1u << 1),
+};
+
+constexpr UnwinderResult operator|(UnwinderResult a, UnwinderResult b) {
+   return UnwinderResult((int)a | (int)b);
+}
+
+//////////////////////////////////////////////////////////////////////
 
 /*
- * Unwind the PHP exception.
+ * Locks the object on the top of the stack if the PC points to a FCallCtor and
+ * the FCallArgs indicates the necessity to lock
  */
-void unwindPhp(ObjectData* phpException);
+void lockObjectWhileUnwinding(PC pc, Stack& stack);
 
 /*
- * Unwind the C++ exception.
+ * Find a catch exception handler for a given raise location if the handler was
+ * found or kInvalidOffset.
  */
-void unwindCpp(Exception* cppException);
+Offset findCatchHandler(const Func* func, Offset raiseOffset);
 
 /*
- * Unwind the frame for a builtin.  Currently only used when switching modes
- * for hphpd_break, fb_enable_code_coverage, and xdebug_start_code_coverage.
+ * Unwind the exception.
  */
-void unwindBuiltinFrame();
+UnwinderResult unwindVM(Either<ObjectData*, Exception*> exception,
+                        const ActRec* fpToUnwind = nullptr,
+                        bool teardown = true);
 
 /*
  * The main entry point to the unwinder.
@@ -62,42 +77,15 @@ void unwindBuiltinFrame();
  */
 template<class Action> void exception_handler(Action action);
 
-//////////////////////////////////////////////////////////////////////
-
 /*
- * This exception is thrown when executing an Unwind bytecode, which
- * will reraise the current fault and resume propagating it.
+ * top and prev must implement Throwable. Walk the chain of top's previous
+ * pointers, finding the first unset one. If there is a cycle in either top or
+ * prev's previous chains, do nothing. Otherwise, add prev to the end of top's
+ * previous chain.
+ *
+ * Either way, this function takes ownership of one existing reference to prev.
  */
-struct VMPrepareUnwind : std::exception {
-  const char* what() const noexcept override { return "VMPrepareUnwind"; }
-};
-
-/*
- * Thrown when we need to "switch modes" by re-starting the current VM
- * invocation.  For example, if we need to break for the debugger, or
- * enable code coverage mode.
- */
-struct VMSwitchMode : std::exception {
-  const char* what() const noexcept override { return "VMSwitchMode"; }
-};
-
-/*
- * Thrown for stack overflow thrown from a prolog while
- * re-entering
- */
-struct VMReenterStackOverflow : std::exception {
-  const char* what() const noexcept override {
-    return "VMReenterStackOverflow";
-  }
-};
-
-/*
- * Same as VMSwitchMode, except for use from a builtin---the frame for
- * the builtin function should be unwound before resuming the VM.
- */
-struct VMSwitchModeBuiltin : std::exception {
-  const char* what() const noexcept override { return "VMSwitchModeBuiltin"; }
-};
+void chainFaultObjects(ObjectData* top, ObjectData* prev);
 
 //////////////////////////////////////////////////////////////////////
 

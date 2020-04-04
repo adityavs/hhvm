@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,21 +56,6 @@ struct FuncPtr {
   /* implicit */ FuncPtr(Ret (Cls::*fp)(Args...) const)
     : call(CallSpec::method(fp))
   {}
-
-  /*
-   * Create FuncPtrs to array data "rotated" vtables.  For example, in
-   * native-calls.cpp:
-   *
-   *   {NvGetInt, &g_array_funcs.nvGetInt, DSSA, SNone, {{SSA, 0}, {SSA, 1}}},
-   *
-   */
-  template<class Ret, class... Args>
-  /* implicit */ FuncPtr(Ret (*const (*p)[ArrayData::kNumKinds])(Args...))
-    : call(CallSpec::array(p))
-  {
-    always_assert(0 && "This code needs to be conditional on "
-                       "deltaFits(p, sz::dword) before using it");
-  }
 
   union { CallSpec call; };
 };

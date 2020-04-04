@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,12 +18,15 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/file.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/debugger/cmd/cmd_info.h"
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -95,9 +98,9 @@ void CmdList::help(DebuggerClient &client) {
 // The current location is initially determined by the location
 // where execution was interrupted to hand control back to
 // the debugger client and can thereafter be modified by list
-// commands and by switching the the stack frame.
+// commands and by switching the stack frame.
 //
-// The lineFocus and and charFocus parameters
+// The lineFocus and charFocus parameters
 // are non zero only when the source location comes from a breakpoint.
 // They can be used to highlight the location of the current breakpoint
 // in the edit window of an attached IDE, for example.
@@ -124,7 +127,7 @@ void CmdList::getListLocation(DebuggerClient &client, int &lineFocus0,
 // or give an error message if the debugger is not currently performing
 // an eval command.
 void CmdList::listEvalCode(DebuggerClient &client) {
-  assert(m_file.empty());
+  assertx(m_file.empty());
 
   std::string evalCode = client.getCode();
   if (evalCode.empty()) {
@@ -175,9 +178,8 @@ const StaticString
 // Returns false if the server was unable to return the information
 // needed for this command.
 bool CmdList::listFunctionOrClass(DebuggerClient &client) {
-  assert(client.argCount() == 1);
+  assertx(client.argCount() == 1);
   auto cmdInfo = std::make_shared<CmdInfo>();
-  DebuggerCommandPtr deleter(cmdInfo);
   std::string subsymbol;
   cmdInfo->parseOneArg(client, subsymbol);
   auto cmd = client.xend<CmdInfo>(cmdInfo.get());
@@ -296,7 +298,7 @@ void CmdList::onClient(DebuggerClient &client) {
             return;
           }
         } else {
-          int line = atoi(arg.c_str());
+          line = atoi(arg.c_str());
           if (line <= 0) {
             client.error("A line number has to be a positive integer.");
             help(client);
@@ -356,8 +358,7 @@ bool CmdList::onServer(DebuggerProxy &proxy) {
     }
   }
   RuntimeOption::WarningFrequency = savedWarningFrequency;
-  if (!m_code.toBoolean() &&
-    m_file.find("systemlib.php") == m_file.length() - 13) {
+  if (!m_code.toBoolean() && FileUtil::isSystemName(m_file)) {
     m_code = SystemLib::s_source;
   }
   return proxy.sendToClient((DebuggerCommand*)this);

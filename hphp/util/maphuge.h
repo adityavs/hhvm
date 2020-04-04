@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,29 @@
 #ifndef incl_HPHP_MAPHUGE_H_
 #define incl_HPHP_MAPHUGE_H_
 
-#include <sys/types.h>
+#include <folly/portability/SysMman.h>
 
 namespace HPHP {
-void hintHuge(void* mem, size_t length);
-bool hugePagesSupported();
+
+inline constexpr bool hugePagesSupported() {
+#ifdef MADV_HUGEPAGE
+  // Kernels earlier than 3.2.28 may have bugs dealing with MADV_HUGEPAGE.  The
+  // bug should've been fixed in production kernels now, so we no longer do
+  // run-time kernel version checks.
+  return true;
+#else
+  return false;
+#endif
+}
+
+inline void hintHuge(void* mem, size_t length) {
+#ifdef MADV_HUGEPAGE
+  if (hugePagesSupported()) {
+    madvise(mem, length, MADV_HUGEPAGE);
+  }
+#endif
+}
+
 }
 
 #endif

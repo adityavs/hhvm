@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,7 @@ const StaticString s_output("Output");
 
 OutputFile::OutputFile(const String& filename): File(true, s_php, s_output) {
   if (filename != s_php_output) {
-    throw FatalErrorException("not a php://output file ");
+    raise_fatal_error("not a php://output file ");
   }
   setIsLocal(true);
 }
@@ -43,17 +43,16 @@ void OutputFile::sweep() {
   File::sweep();
 }
 
-bool OutputFile::open(const String& filename, const String& mode) {
-  throw FatalErrorException("cannot open a php://output file ");
+bool OutputFile::open(const String& /*filename*/, const String& /*mode*/) {
+  raise_fatal_error("cannot open a php://output file ");
 }
 
 bool OutputFile::close() {
-  invokeFiltersOnClose();
   return closeImpl();
 }
 
 bool OutputFile::closeImpl() {
-  s_pcloseRet = 0;
+  *s_pcloseRet = 0;
   if (!isClosed()) {
     setIsClosed(true);
     return true;
@@ -64,9 +63,9 @@ bool OutputFile::closeImpl() {
 ///////////////////////////////////////////////////////////////////////////////
 // virtual functions
 
-int64_t OutputFile::readImpl(char *buffer, int64_t length) {
+int64_t OutputFile::readImpl(char* /*buffer*/, int64_t /*length*/) {
   raise_warning("cannot read from a php://output stream");
-  return -1;
+  return 0;
 }
 
 int OutputFile::getc() {
@@ -75,13 +74,13 @@ int OutputFile::getc() {
 }
 
 int64_t OutputFile::writeImpl(const char *buffer, int64_t length) {
-  assert(length > 0);
+  assertx(length > 0);
   if (isClosed()) return 0;
   g_context->write(buffer, length);
   return length;
 }
 
-bool OutputFile::seek(int64_t offset, int whence /* = SEEK_SET */) {
+bool OutputFile::seek(int64_t /*offset*/, int /*whence*/ /* = SEEK_SET */) {
   raise_warning("cannot seek a php://output stream");
   return false;
 }
@@ -108,7 +107,7 @@ bool OutputFile::flush() {
   return false;
 }
 
-bool OutputFile::truncate(int64_t size) {
+bool OutputFile::truncate(int64_t /*size*/) {
   raise_warning("cannot truncate a php://output stream");
   return false;
 }

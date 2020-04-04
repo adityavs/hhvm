@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -18,6 +18,9 @@
 #include "hphp/zend/zend-string.h"
 
 #include <cinttypes>
+#include <cstdlib>
+
+#include <folly/ScopeGuard.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -295,6 +298,14 @@ static void SHA1Transform(uint32_t state[5], const unsigned char block[64]) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+std::string string_sha1(folly::StringPiece s) {
+  int out_len;
+  auto const hex = string_sha1(s.data(), s.size(), false, out_len);
+  SCOPE_EXIT { free(hex); };
+
+  return std::string(hex, out_len);
+}
 
 char *string_sha1(const char *arg, int arg_len, bool raw, int &out_len) {
   PHP_SHA1_CTX context;

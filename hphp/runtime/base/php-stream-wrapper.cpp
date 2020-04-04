@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,9 +20,9 @@
 #include "hphp/runtime/base/temp-file.h"
 #include "hphp/runtime/base/mem-file.h"
 #include "hphp/runtime/base/output-file.h"
+#include "hphp/runtime/server/cli-server.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
-#include "hphp/runtime/ext/stream/ext_stream-user-filters.h"
 #include <memory>
 
 namespace HPHP {
@@ -34,7 +34,12 @@ const StaticString s_temp("TEMP");
 const StaticString s_memory("MEMORY");
 
 req::ptr<File> PhpStreamWrapper::openFD(const char *sFD) {
-  if (!RuntimeOption::ClientExecutionMode()) {
+  if (is_cli_server_mode()) {
+    raise_warning("Direct access to file descriptors is not "
+                  "available via remote unix server execution");
+    return nullptr;
+  }
+  if (RuntimeOption::ServerExecutionMode()) {
     raise_warning("Direct access to file descriptors "
                   "is only available from command-line");
     return nullptr;
@@ -57,64 +62,6 @@ req::ptr<File> PhpStreamWrapper::openFD(const char *sFD) {
   return req::make<PlainFile>(dup(nFD), true, s_php);
 }
 
-static void phpStreamApplyFilterList(const Resource& fpres,
-                                     char *filter,
-                                     int rwMode) {
-  char *token = nullptr;
-  filter = strtok_r(filter, "|", &token);
-  while (filter) {
-    auto ret = HHVM_FN(stream_filter_append)(fpres, String(filter, CopyString),
-                                             rwMode, null_variant);
-    if (!ret.toBoolean()) {
-      raise_warning("Unable to create filter (%s)", filter);
-    }
-    filter = strtok_r(nullptr, "|", &token);
-  }
-}
-
-static req::ptr<File>
-phpStreamOpenFilter(const char* sFilter,
-                    const String& modestr,
-                    int options,
-                    const req::ptr<StreamContext>& context) {
-  const char *mode = modestr.c_str();
-  int rwMode = 0;
-  if (strchr(mode, 'r') || strchr(mode, '+')) {
-    rwMode |= k_STREAM_FILTER_READ;
-  }
-  if (strchr(mode, 'w') || strchr(mode, '+') || strchr(mode, 'a')) {
-    rwMode |= k_STREAM_FILTER_WRITE;
-  }
-
-  String duppath(sFilter, CopyString);
-  char *path = duppath.mutableData();
-  char *p = strstr(path, "/resource=");
-  if (!p) {
-    raise_recoverable_error("No URL resource specified");
-    return nullptr;
-  }
-  auto fp = File::Open(String(p + sizeof("/resource=") - 1, CopyString),
-                       modestr, options, context);
-  if (!fp) return nullptr;
-  Resource fpres(fp);
-  *p = 0;
-  char *token = nullptr;
-  p = strtok_r(path + 1, "/", &token);
-  while (p) {
-    if (!strncasecmp(p, "read=", sizeof("read=") - 1)) {
-      phpStreamApplyFilterList(fpres, p + sizeof("read=") - 1,
-                               k_STREAM_FILTER_READ);
-    } else if (!strncasecmp(p, "write=", sizeof("write=") - 1)) {
-      phpStreamApplyFilterList(fpres, p + sizeof("write=") - 1,
-                               k_STREAM_FILTER_WRITE);
-    } else {
-      phpStreamApplyFilterList(fpres, p, rwMode);
-    }
-    p = strtok_r(nullptr, "/", &token);
-  }
-  return fp;
-}
-
 req::ptr<File>
 PhpStreamWrapper::open(const String& filename, const String& mode,
                        int options, const req::ptr<StreamContext>& context) {
@@ -124,23 +71,24 @@ PhpStreamWrapper::open(const String& filename, const String& mode,
 
   const char *req = filename.c_str() + sizeof("php://") - 1;
 
+  auto make_from = [] (const Variant& f) -> req::ptr<File> {
+    auto res = dyn_cast_or_null<PlainFile>(f);
+    if (!res || res->isClosed()) return nullptr;
+    return req::make<PlainFile>(dup(res->fd()), true, s_php);
+  };
+
   if (!strcasecmp(req, "stdin")) {
-    return req::make<PlainFile>(dup(STDIN_FILENO), true, s_php);
+    return make_from(BuiltinFiles::getSTDIN());
   }
   if (!strcasecmp(req, "stdout")) {
-    return req::make<PlainFile>(dup(STDOUT_FILENO), true, s_php);
+    return make_from(BuiltinFiles::getSTDOUT());
   }
   if (!strcasecmp(req, "stderr")) {
-    return req::make<PlainFile>(dup(STDERR_FILENO), true, s_php);
+    return make_from(BuiltinFiles::getSTDERR());
   }
   if (!strncasecmp(req, "fd/", sizeof("fd/") - 1)) {
     return openFD(req + sizeof("fd/") - 1);
   }
-  if (!strncasecmp(req, "filter/", sizeof("filter/") - 1)) {
-    return phpStreamOpenFilter(req + sizeof("filter") - 1, mode,
-                               options, context);
-  }
-
   if (!strncasecmp(req, "temp", sizeof("temp") - 1)) {
     auto file = req::make<TempFile>(true, s_php, s_temp);
     if (!file->valid()) {
@@ -155,6 +103,25 @@ PhpStreamWrapper::open(const String& filename, const String& mode,
       raise_warning("Unable to create temporary file");
       return nullptr;
     }
+
+    file->getData()->m_mode = [mode] {
+      if (mode.empty()) {
+        return "w+b";
+      }
+      for (auto c : mode.slice()) {
+        switch (c) {
+          case '+':
+          case 'w':
+          case 'a':
+          case 'x':
+          case 'c':
+            return "w+b";
+          default:
+            break;
+        }
+      }
+      return "rb";
+    }();
     return file;
   }
 

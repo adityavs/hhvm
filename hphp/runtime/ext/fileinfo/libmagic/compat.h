@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -28,20 +28,21 @@
 
 #define PCRE_CASELESS 0x00000001
 #define PCRE_MULTILINE 0x00000002
-#define emalloc HPHP::req::malloc
-#define ecalloc HPHP::req::calloc
+#define emalloc HPHP::req::malloc_untyped
+#define ecalloc HPHP::req::calloc_untyped
 #define efree HPHP::req::free
-#define erealloc HPHP::req::realloc
+#define erealloc HPHP::req::realloc_untyped
 #define php_stream HPHP::File
 
 inline char *estrndup(const char *s, unsigned int length) {
-  char* ret = (char*) emalloc(length + 1);
+  char* ret = (char*)HPHP::req::malloc_noptrs(length + 1);
   memcpy(ret, s, length);
   ret[length] = '\0';
   return ret;
 }
 
-inline int vspprintf(char **pbuf, size_t max_len, const char *format, va_list ap) {
+inline int vspprintf(char **pbuf, size_t max_len, const char *format,
+                     va_list ap) {
   int ret = HPHP::vspprintf_ap(pbuf, max_len, format, ap);
 
   // *pbuf is a malloc()ed buf, but we need it emalloc()ed, *sigh*

@@ -1,15 +1,16 @@
-<?php
+<?hh
 
 $a = 100;
+
 function f() {
-  foreach ($GLOBALS as $k => &$v) {
+  foreach (HH\global_keys() as $k) {
     if ($k == 'a') {
- $v = -1;
- }
+      $GLOBALS[$k] = -1;
+    }
   }
-  global $a;
-  var_dump($a);
-  $b = $GLOBALS;
+
+  var_dump($GLOBALS['a']);
+  $b = $GLOBALS['GLOBALS'];
   $b['a'] = 0;
   var_dump($GLOBALS['a']);
 }

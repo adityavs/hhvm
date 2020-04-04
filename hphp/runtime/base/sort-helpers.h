@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,6 +25,8 @@
 #include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/sort-flags.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/set-array.h"
 
 #include "hphp/util/safesort.h"
 
@@ -41,19 +43,34 @@ struct TVAccessor {
   Variant getValue(ElmT elm) const { return tvAsCVarRef(&elm); }
 };
 
-template<typename E> struct AssocKeyAccessor {
+template<class Self, typename E>
+struct AssocKeyAccessorImpl {
   typedef const E& ElmT;
   bool isInt(ElmT elm) const { return elm.hasIntKey(); }
   bool isStr(ElmT elm) const { return elm.hasStrKey(); }
-  int64_t getInt(ElmT elm) const { return elm.ikey; }
-  StringData* getStr(ElmT elm) const { return elm.skey; }
   Variant getValue(ElmT elm) const {
     if (isInt(elm)) {
-      return getInt(elm);
+      return Self::getInt(elm);
     }
-    assert(isStr(elm));
-    return Variant{getStr(elm)};
+    assertx(isStr(elm));
+    return Variant{Self::getStr(elm)};
   }
+};
+
+template<typename E> struct AssocKeyAccessor;
+
+template<>
+struct AssocKeyAccessor<MixedArray::Elm> :
+  AssocKeyAccessorImpl<AssocKeyAccessor<MixedArray::Elm>, MixedArray::Elm> {
+  static int64_t getInt(ElmT elm) { return elm.ikey; }
+  static StringData* getStr(ElmT elm) { return elm.skey; }
+};
+
+template<>
+struct AssocKeyAccessor<SetArray::Elm> :
+  AssocKeyAccessorImpl<AssocKeyAccessor<SetArray::Elm>, SetArray::Elm> {
+  static int64_t getInt(ElmT elm) { return elm.intKey(); }
+  static StringData* getStr(ElmT elm) { return elm.strKey(); }
 };
 
 template<typename E> struct AssocValAccessor {
@@ -132,7 +149,7 @@ struct IntElmCompare {
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) > 0) :
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) < 0);
     }
-    assert(false);
+    assertx(false);
     return true;
   }
 };
@@ -181,7 +198,7 @@ struct StrElmCompare {
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) > 0) :
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) < 0);
     }
-    assert(false);
+    assertx(false);
     return true;
   }
 };
@@ -296,7 +313,7 @@ struct ElmCompare {
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) > 0) :
                (string_natural_cmp(sLeft, lenLeft, sRight, lenRight, 1) < 0);
     }
-    assert(false);
+    assertx(false);
     return true;
   }
 };
@@ -307,17 +324,19 @@ struct ElmUCompare {
   AccessorT acc;
   const CallCtx* ctx;
 
-  // only warn with HH syntax enabled
-  ElmUCompare() : warned(!RuntimeOption::EnableHipHopSyntax) {}
+  ElmUCompare() : warned(false) {}
 
   bool operator()(ElmT left, ElmT right) const {
-    Variant ret;
-    {
-      TypedValue args[2] = {
-        *acc.getValue(left).asCell(),
-        *acc.getValue(right).asCell()
-      };
-      g_context->invokeFuncFew(ret.asTypedValue(), *ctx, 2, args);
+    TypedValue args[2] = {
+      *acc.getValue(left).asTypedValue(),
+      *acc.getValue(right).asTypedValue()
+    };
+    auto ret = Variant::attach(
+      g_context->invokeFuncFew(*ctx, 2, args)
+    );
+    if (ctx->func->takesInOutParams()) {
+      assertx(ret.isArray());
+      ret = ret.asCArrRef()[0];
     }
     if (LIKELY(ret.isInteger())) {
       return ret.toInt64() > 0;

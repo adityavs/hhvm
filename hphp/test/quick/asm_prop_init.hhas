@@ -1,15 +1,20 @@
+.hh_file 1;
 #
 # Some tests of property/constant initializers.
 #
 
 .main {
-  FPushFuncD 0 "init_test"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "init_test"
+  PopC
 
-  FPushFuncD 0 "uninit_test"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "uninit_test"
+  PopC
 
   Int 1
   RetC
@@ -28,7 +33,7 @@
   .property [static public] foo = uninit;
   .property [public] nonstat = uninit;
 
-  .method [public] 86cinit($which) {
+  .method [static public] 86cinit($which) {
     CGetL $which
     String "BAR"
     Same
@@ -42,7 +47,7 @@
     Fatal Runtime
   }
 
-  .method [public] 86sinit() {
+  .method [static public] 86sinit() {
     String "default ::foo value"
     InitProp "foo" Static
 
@@ -50,7 +55,7 @@
     RetC
   }
 
-  .method [public] 86pinit() {
+  .method [static public] 86pinit() {
     CheckProp "nonstat"
     JmpNZ isset
     String "code-created prop value"
@@ -63,7 +68,8 @@
 }
 
 .function do_test($who) {
-  AGetL $who
+  CGetL $who
+  ClassGetC
   ClsCns "BAR"
   String "\n"
   Concat
@@ -71,22 +77,29 @@
   PopC
 
   String "foo"
-  AGetL $who
+  CGetL $who
+  ClassGetC
   CGetS
   String "\n"
   Concat
   Print
   PopC
 
-  AGetL $who
-  FPushCtor 0
-  FCall 0
-  PopR
+  CGetL $who
+  ClassGetC
+  NewObj
+  Dup
+  NullUninit
+  NullUninit
+  FCallCtor <LockWhileUnwinding> 0 1 "" - "" ""
+  PopC
+  LockObj
   SetL $obj
   PopC
 
   String "nonstat"
-  CGetM <L:$obj PC>
+  BaseL $obj Warn
+  QueryM 1 CGet PC:0
   String "\n"
   Concat
   Print
@@ -97,19 +110,19 @@
 }
 
 .function init_test {
-  FPushFuncD 1 "do_test"
+  NullUninit
+  NullUninit
+  NullUninit
     String "Init"
-    FPassC 0
-  FCall 1
-  UnboxR
+  FCallFuncD <> 1 1 "" - "" "do_test"
   RetC
 }
 
 .function uninit_test {
-  FPushFuncD 1 "do_test"
+  NullUninit
+  NullUninit
+  NullUninit
     String "Uninit"
-    FPassC 0
-  FCall 1
-  UnboxR
+  FCallFuncD <> 1 1 "" - "" "do_test"
   RetC
 }

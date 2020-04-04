@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,11 +31,12 @@ namespace HPHP {
  * interface.
  */
 template<class TServer, class TTransport>
-class ServerTaskEvent final : public AsioExternalThreadEvent {
- public:
+struct ServerTaskEvent final : AsioExternalThreadEvent {
   ServerTaskEvent() {}
+  ServerTaskEvent(const ServerTaskEvent&) = delete;
+  ServerTaskEvent& operator=(const ServerTaskEvent&) = delete;
 
-  ~ServerTaskEvent() {
+  ~ServerTaskEvent() override {
     if (m_job) m_job->decRefCount();
   }
 
@@ -49,7 +50,7 @@ class ServerTaskEvent final : public AsioExternalThreadEvent {
   }
 
  protected:
-  void unserialize(Cell& result) override final {
+  void unserialize(TypedValue& result) final {
     if (UNLIKELY(!m_job)) {
       SystemLib::throwInvalidOperationExceptionObject(
         "The async operation was incorrectly initialized.");
@@ -62,11 +63,12 @@ class ServerTaskEvent final : public AsioExternalThreadEvent {
       SystemLib::throwExceptionObject(ret);
     }
 
-    cellDup(*ret.asCell(), result);
+    tvDup(*ret.asTypedValue(), result);
   }
 
  private:
-  TTransport *m_job;
+
+  TTransport *m_job{nullptr};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

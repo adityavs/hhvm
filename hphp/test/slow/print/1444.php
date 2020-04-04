@@ -1,57 +1,61 @@
-<?php
+<?hh
+
 
 // disable array -> "Array" conversion notice
+<<__EntryPoint>>
+function main_1444() {
 error_reporting(error_reporting() & ~E_NOTICE);
 
-print(array("\0" => 1));
-print(array("\0" => "\0"));
-print(array("\0" => "\\"));
-print(array("\0" => "\'"));
-print(array("\\" => 1));
-print(array("\\" => "\0"));
-print(array("\\" => "\\"));
-print(array("\\" => "\'"));
-print(array("\'" => 1));
-print(array("\'" => "\0"));
-print(array("\'" => "\\"));
-print(array("\'" => "\'"));
-print(array("\a" => "\a"));
-print(!array("\0" => "\0"));
-print((array("\0" => "\0")));
-print((int)array("\0" => "\0"));
-print((integer)array("\0" => "\0"));
-print((bool)array("\0" => "\0"));
-print((boolean)array("\0" => "\0"));
-print((float)array("\0" => "\0"));
-print((double)array("\0" => "\0"));
-print((real)array("\0" => "\0"));
-print((string)array("\0" => "\0"));
+print(darray["\0" => 1]);
+print(darray["\0" => "\0"]);
+print(darray["\0" => "\\"]);
+print(darray["\0" => "\'"]);
+print(darray["\\" => 1]);
+print(darray["\\" => "\0"]);
+print(darray["\\" => "\\"]);
+print(darray["\\" => "\'"]);
+print(darray["\'" => 1]);
+print(darray["\'" => "\0"]);
+print(darray["\'" => "\\"]);
+print(darray["\'" => "\'"]);
+print(darray["\a" => "\a"]);
+print(!darray["\0" => "\0"]);
+print((darray["\0" => "\0"]));
+print((int)darray["\0" => "\0"]);
+print((int)darray["\0" => "\0"]);
+print((bool)darray["\0" => "\0"]);
+print((bool)darray["\0" => "\0"]);
+print((float)darray["\0" => "\0"]);
+print((float)darray["\0" => "\0"]);
+print((float)darray["\0" => "\0"]);
+print((string)darray["\0" => "\0"]);
 $a = "0x10";
 print($a);
 print("\0");
-$a = array("\0" => 1);
+$a = darray["\0" => 1];
 print($a);
-$a = array("\0" => "\0");
+$a = darray["\0" => "\0"];
 print($a);
-$a = array("\0" => "\\");
+$a = darray["\0" => "\\"];
 print($a);
-$a = array("\0" => "\'");
+$a = darray["\0" => "\'"];
 print($a);
-$a = array("\\" => 1);
+$a = darray["\\" => 1];
 print($a);
-$a = array("\\" => "\0");
+$a = darray["\\" => "\0"];
 print($a);
-$a = array("\\" => "\\");
+$a = darray["\\" => "\\"];
 print($a);
-$a = array("\\" => "\'");
+$a = darray["\\" => "\'"];
 print($a);
-$a = array("\'" => 1);
+$a = darray["\'" => 1];
 print($a);
-$a = array("\'" => "\0");
+$a = darray["\'" => "\0"];
 print($a);
-$a = array("\'" => "\\");
+$a = darray["\'" => "\\"];
 print($a);
-$a = array("\'" => "\'");
+$a = darray["\'" => "\'"];
 print($a);
-$a = array("\a" => "\a");
+$a = darray["\a" => "\a"];
 print($a);
+}

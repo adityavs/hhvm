@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class SecurityLogger {
   private $x, $y;
@@ -24,11 +24,11 @@ function SecurityLogger($x, $y) {
 
 function unique_function() {
   mt_rand();
-  return array('1');
+  return varray['1'];
 }
 
 function foo() {
-  $resource_arr = array('a' => 'b');
+  $resource_arr = darray['a' => 'b'];
   // Inlining something which calls a function inside a generator
   // doesn't work.  This test shouldn't inline right now (if it does
   // it crashes).
@@ -42,4 +42,8 @@ function main() {
   foreach (foo() as $k) {
 }
 }
+
+<<__EntryPoint>>
+function main_generator_nested_fcalls() {
 main();
+}

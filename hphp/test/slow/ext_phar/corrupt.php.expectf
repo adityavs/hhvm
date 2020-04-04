@@ -1,7 +1,0 @@
-#!/usr/bin/env php
-
-Fatal error: Uncaught exception 'PharException' with message 'phar has a broken signature' in %s/composer-corrupt%s:13
-Stack trace:
-#0 %s/composer-corrupt%s(13): Phar::mapPhar()
-#1 %s/test/slow/ext_phar/corrupt.php(16): include()
-#2 {main}

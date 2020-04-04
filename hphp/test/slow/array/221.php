@@ -1,6 +1,10 @@
-<?php
+<?hh
 
-$a = array(1,2);
- $b = array(2,3);
+
+<<__EntryPoint>>
+function main_221() {
+$a = varray[1,2];
+ $b = varray[2,3];
  $c = $a + $b;
  var_dump($c);
+}

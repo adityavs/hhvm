@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -29,19 +29,18 @@ namespace HPHP {
 /**
  * A wait handle that sleeps until a give time passes.
  */
-class c_SleepWaitHandle final : public c_WaitableWaitHandle {
- public:
-  DECLARE_CLASS_NO_SWEEP(SleepWaitHandle);
+struct c_SleepWaitHandle final : c_WaitableWaitHandle {
+  WAITHANDLE_CLASSOF(SleepWaitHandle);
+  WAITHANDLE_DTOR(SleepWaitHandle);
 
-  explicit c_SleepWaitHandle(Class* cls = c_SleepWaitHandle::classof())
-    : c_WaitableWaitHandle(cls) {}
+  explicit c_SleepWaitHandle()
+    : c_WaitableWaitHandle(classof(), HeaderKind::WaitHandle,
+                           type_scan::getIndexForMalloc<c_SleepWaitHandle>()) {}
   ~c_SleepWaitHandle() {}
-  static void ti_setoncreatecallback(const Variant& callback);
-  static void ti_setonsuccesscallback(const Variant& callback);
-  static Object ti_create(int64_t usecs);
 
  public:
-  void process();
+  bool cancel(const Object& exception);
+  bool process();
   String getName();
   void exitContext(context_idx_t ctx_idx);
   AsioSession::TimePoint getWakeTime() const { return m_waketime; };
@@ -53,13 +52,20 @@ class c_SleepWaitHandle final : public c_WaitableWaitHandle {
   void initialize(int64_t usecs);
 
   AsioSession::TimePoint m_waketime;
+  friend Object HHVM_STATIC_METHOD(SleepWaitHandle, create, int64_t usecs);
 
  public:
   static const int8_t STATE_WAITING = 2;
 };
 
-inline c_SleepWaitHandle* c_WaitHandle::asSleep() {
-  assert(getKind() == Kind::Sleep);
+void HHVM_STATIC_METHOD(SleepWaitHandle, setOnCreateCallback,
+                        const Variant& callback);
+void HHVM_STATIC_METHOD(SleepWaitHandle, setOnSuccessCallback,
+                        const Variant& callback);
+Object HHVM_STATIC_METHOD(SleepWaitHandle, create, int64_t usecs);
+
+inline c_SleepWaitHandle* c_Awaitable::asSleep() {
+  assertx(getKind() == Kind::Sleep);
   return static_cast<c_SleepWaitHandle*>(this);
 }
 

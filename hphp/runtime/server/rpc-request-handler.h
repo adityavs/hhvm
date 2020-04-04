@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,13 +23,12 @@
 
 namespace HPHP {
 
-class SourceRootInfo;
-class RequestURI;
-class Transport;
+struct SourceRootInfo;
+struct RequestURI;
+struct Transport;
 ///////////////////////////////////////////////////////////////////////////////
 
-class RPCRequestHandler : public RequestHandler {
-public:
+struct RPCRequestHandler : RequestHandler {
   static AccessLog &GetAccessLog() { return s_accessLog; }
 
   enum class ReturnEncodeType {
@@ -38,15 +37,15 @@ public:
   };
 
   RPCRequestHandler(int timeout, bool info);
-  virtual ~RPCRequestHandler();
+  ~RPCRequestHandler() override;
 
   void setServerInfo(std::shared_ptr<SatelliteServerInfo> info) {
     m_serverInfo = info;
   }
 
   // implementing RequestHandler
-  virtual void handleRequest(Transport *transport);
-  virtual void abortRequest(Transport *transport);
+  void handleRequest(Transport* transport) override;
+  void abortRequest(Transport* transport) override;
 
   static void cleanupState();
 
@@ -77,7 +76,7 @@ private:
   std::string getSourceFilename(const std::string &path,
                                 SourceRootInfo &sourceRootInfo);
 
-  static DECLARE_THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
+  static THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
   static AccessLog s_accessLog;
 
   static AccessLog::ThreadData* getAccessLogThreadData() {

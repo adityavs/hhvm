@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,6 +24,8 @@
 #include "hphp/util/data-block.h"
 
 namespace HPHP { namespace jit {
+
+struct CGMeta;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -62,18 +64,21 @@ size_t smashableJmpLen();
 size_t smashableJccLen();
 
 /*
+ * Boundry to align the smashables to (normally cache line size).
+ */
+size_t smashableAlignTo();
+
+/*
  * Emit a smashable instruction and return the instruction's address.
  *
  * For jcc_and_jmp, return a pair of (jcc_addr, jmp_addr).
  */
-TCA emitSmashableMovq(CodeBlock& cb, uint64_t imm, PhysReg d);
-TCA emitSmashableCmpq(CodeBlock& cb, int32_t imm, PhysReg r, int8_t disp);
-TCA emitSmashableCall(CodeBlock& cb, TCA target);
-TCA emitSmashableJmp(CodeBlock& cb, TCA target);
-TCA emitSmashableJcc(CodeBlock& cb, TCA target, ConditionCode cc);
-
-std::pair<TCA,TCA>
-emitSmashableJccAndJmp(CodeBlock& cb, TCA target, ConditionCode cc);
+TCA emitSmashableMovq(CodeBlock& cb, CGMeta& fixups, uint64_t imm,
+                      PhysReg d);
+TCA emitSmashableCall(CodeBlock& cb, CGMeta& fixups, TCA target);
+TCA emitSmashableJmp(CodeBlock& cb, CGMeta& fixups, TCA target);
+TCA emitSmashableJcc(CodeBlock& cb, CGMeta& fixups, TCA target,
+                     ConditionCode cc);
 
 /*
  * Logically smash the smashable operand of an instruction.
@@ -88,7 +93,7 @@ void smashMovq(TCA inst, uint64_t imm);
 void smashCmpq(TCA inst, uint32_t imm);
 void smashCall(TCA inst, TCA target);
 void smashJmp(TCA inst, TCA target);
-void smashJcc(TCA inst, TCA target, ConditionCode cc = CC_None);
+void smashJcc(TCA inst, TCA target);
 
 /*
  * Extract instruction operands from assembly.
@@ -108,6 +113,14 @@ ConditionCode smashableJccCond(TCA inst);
  * Obtain the address of a smashable call from its return IP.
  */
 TCA smashableCallFromRet(TCA ret);
+
+/*
+ * Optimize a smashable instruction in place after it has been smashed.  Returns
+ * whether or not the instruction was optimized.
+ */
+bool optimizeSmashedCall(TCA inst);
+bool optimizeSmashedJmp(TCA inst);
+bool optimizeSmashedJcc(TCA inst);
 
 ///////////////////////////////////////////////////////////////////////////////
 

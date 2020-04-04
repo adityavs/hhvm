@@ -1,15 +1,18 @@
-# Some tests for fault regions and catch regions.
+.hh_file 1;
+# Some tests for catch regions.
 
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
   Int 1
   RetC
 }
 
 .function throw_stuff($msg) {
-  .try_fault fault {
+  .try {
     String "about to throw: "
     CGetL $msg
     Concat
@@ -18,54 +21,59 @@
     Print
     PopC
 
-    FPushCtorD 1 "Exception"
-    FPassL 0 $msg
-    FCall 1
-    PopR
+    NewObjD "Exception"
+    Dup
+    NullUninit
+    NullUninit
+    CGetL $msg
+    FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+    PopC
+    LockObj
+    Throw
+  } .catch {
+    String "throw_stuff's exception handler ...\n"
+    Print
+    PopC
     Throw
   }
-
-fault:
-  String "throw_stuff's fault ...\n"
-  Print
-  PopC
-  Unwind
 }
 
 .function foo() {
-  String "testing fault region\n"
+  String "testing catch region\n"
   Print
   PopC
 
-  .try_fault handler {
+  .try {
     String "In region\n"
     Print
     PopC
 
-    FPushFuncD 1 "throw_stuff"
+    NullUninit
+    NullUninit
+    NullUninit
     String "the message"
-    FPassC 0
-    FCall 1
-    PopR
+    FCallFuncD <> 1 1 "" - "" "throw_stuff"
+    PopC
 
     String "unreached\n"
     Print
     PopC
+    True
+    RetC
+  } .catch {
+    String "In foo's exception handler\n"
+    Print
+    PopC
+    Throw
   }
-
-  True
-  RetC
-
-handler:
-  String "In foo's fault handler\n"
-  Print
-  PopC
-  Unwind
 }
 
-.class One extends Exception {}
-.class Two extends Exception {}
-.class Three extends Exception {}
+.class One extends Exception {
+}
+.class Two extends Exception {
+}
+.class Three extends Exception {
+}
 
 .function throw_various() {
            Int 0
@@ -73,89 +81,108 @@ handler:
            PopC
 
 repeat:
-           .try_catch (One on_one)
-                      (Two on_two)
-                      (Three on_three) {
+           .try {
              CGetL $counter
-             Switch <make_one make_two make_three> 0 Unbounded
+             Switch Unbounded 0 <make_one make_two make_three>
 
-make_one:    FPushCtorD 0 "One"
-             FCall 0
-             PopR
+make_one:    NewObjD "One"
+             Dup
+             NullUninit
+             NullUninit
+             FCallCtor <LockWhileUnwinding> 0 1 "" - "" ""
+             PopC
+             LockObj
              Throw
-make_two:    FPushCtorD 0 "Two"
-             FCall 0
-             PopR
+make_two:    NewObjD "Two"
+             Dup
+             NullUninit
+             NullUninit
+             FCallCtor <LockWhileUnwinding> 0 1 "" - "" ""
+             PopC
+             LockObj
              Throw
-make_three:  FPushCtorD 1 "Three"
+make_three:  NewObjD "Three"
+             Dup
+             NullUninit
+             NullUninit
              String "third exception from throw_various"
-             FPassC 0
-             FCall 1
-             PopR
+             FCallCtor <LockWhileUnwinding> 1 1 "" - "" ""
+             PopC
+             LockObj
+             Throw
+           } .catch {
+             Dup
+             InstanceOfD "One"
+             JmpNZ on_one
+             Dup
+             InstanceOfD "Two"
+             JmpNZ on_two
+             Dup
+             InstanceOfD "Three"
+             JmpNZ on_three
+             Throw
+on_one:      String "one\n"
+             Print
+             PopC
+             Int 1
+             SetL $counter
+             PopC
+             PopC
+             Jmp repeat
+on_two:      PopC
+             String "two\n"
+             Print
+             PopC
+             Int 2
+             SetL $counter
+             PopC
+             Jmp repeat
+on_three:    String "three\n"
+             Print
+             PopC
              Throw
            }
-
-on_one:    String "one\n"
-           Print
-           PopC
-           Int 1
-           SetL $counter
-           Catch #weird
-           PopC
-           PopC
-           Jmp repeat
-on_two:    Catch
-           PopC
-           String "two\n"
-           Print
-           PopC
-           Int 2
-           SetL $counter
-           PopC
-           Jmp repeat
-on_three:  String "three\n"
-           Print
-           PopC
-           Catch
-           Throw
-
 }
 
 .function main() {
          False
          SetL $ever_caught
          PopC
+         NullUninit
+         NullUninit
+         NullUninit
+         String "foo"
 
-         .try_catch (Exception catcher) {
-            FPushFuncD 0 "foo"
-            FCall 0
-            PopR
-         }
-
-resume:  .try_catch (Exception catcher) {
-           FPushFuncD 0 "throw_various"
-           FCall 0
-           PopR
+resume:  .try {
+           FCallFunc <> 0 1 "" - ""
+           PopC
+           Jmp resume2
+         } .catch {
+           SetL $ex
+           PopC
+           String "top-level catch handler got: "
+           PushL $ex
+           NullUninit
+           NullUninit
+           FCallObjMethodD <> 0 1 "" - "" "" NullThrows "getMessage"
+           Concat
+           String "\n"
+           Concat
+           Print
+           PopC
+           # This might be illegal hhbc?
+           CGetL $ever_caught
+           True
+           SetL $ever_caught
+           PopC
+           JmpNZ resume2
+           NullUninit
+           NullUninit
+           NullUninit
+           String "throw_various"
+           Jmp resume
          }
 
 resume2: True
          RetC
-
-catcher: String "top-level catch handler got: "
-         Catch
-         FPushObjMethodD 0 "getMessage" NullThrows
-         FCall 0
-         UnboxR
-         Concat
-         String "\n"
-         Concat
-         Print
-         PopC
-         # This might be illegal hhbc?
-         CGetL $ever_caught
-         True
-         SetL $ever_caught
-         PopC
-         JmpZ resume
-         Jmp resume2
 }

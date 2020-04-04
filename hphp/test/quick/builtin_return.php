@@ -1,4 +1,4 @@
-<?php
+<?hh
 // Copyright 2004-2015 Facebook. All Rights Reserved.
 
 function foo(array $data) {
@@ -10,5 +10,6 @@ function foo(array $data) {
   }
   return $ret;
 }
-
-var_dump(foo(array()));
+<<__EntryPoint>> function main(): void {
+var_dump(foo(varray[]));
+}

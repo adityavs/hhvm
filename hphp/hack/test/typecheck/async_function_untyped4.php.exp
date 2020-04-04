@@ -1,10 +1,6 @@
-File "async_function_untyped4.php", line 7, characters 7-8:
-This object is of type C1 (Typing[4110])
-File "async_function_untyped4.php", line 7, characters 21-22:
-It is incompatible with this object of type I1
-because some declarations are incompatible.
-Read the following to see why:
-File "async_function_untyped4.php", line 4, characters 24-26:
-This is an int
 File "async_function_untyped4.php", line 8, characters 25-25:
-It is incompatible with an object of type Awaitable (result of 'async function')
+Member f has the wrong type (Typing[4341])
+File "async_function_untyped4.php", line 4, characters 24-26:
+Expected int
+File "async_function_untyped4.php", line 8, characters 25-25:
+But got Awaitable<_> (result of 'async function')

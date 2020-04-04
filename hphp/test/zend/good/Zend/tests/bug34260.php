@@ -1,4 +1,4 @@
-<?php
+<?hh
 class Faulty
 {
     function __call($Method,$Args)
@@ -13,16 +13,16 @@ class Faulty
 
     function NormalMethod($Args)
     {
-       echo "I heart me\n"; 
+       echo "I heart me\n";
     }
 }
-
+<<__EntryPoint>> function main(): void {
 $Faulty = new Faulty();
-$Array = array('Some junk','Some other junk');
+$Array = varray['Some junk','Some other junk'];
 
 // This causes a seg fault.
-$Failure = array_map(array($Faulty,'seg'),$Array);
+$Failure = array_map(varray[$Faulty,'seg'],$Array);
 
 // This does not.
-$Failure = array_map(array($Faulty,'NormalMethod'),$Array);
-?>
+$Failure = array_map(varray[$Faulty,'NormalMethod'],$Array);
+}

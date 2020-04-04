@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   private $c;
@@ -12,6 +12,7 @@ class A {
     echo $this->d."\n";
   }
 }
-
+<<__EntryPoint>> function main(): void {
 $a = new A;
 $a->f();
+}

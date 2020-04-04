@@ -1,42 +1,42 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-open Core
-open Utils
+open Core_kernel
+open Reordered_argument_collections
 
 let checkpoints = ref SMap.empty
 
 let process_updates updates =
   (* Appending changed files to each checkpoint in the map *)
-  checkpoints := SMap.map begin fun cur_set ->
-    Relative_path.Map.fold begin fun path _ acc ->
-      Relative_path.Set.add path acc
-    end updates cur_set
-  end !checkpoints
+  checkpoints :=
+    SMap.map !checkpoints (fun cur_set ->
+        Relative_path.Set.fold
+          updates
+          ~f:
+            begin
+              fun path acc ->
+              Relative_path.Set.add acc path
+            end
+          ~init:cur_set)
 
 let create_checkpoint x =
-  checkpoints := SMap.add x Relative_path.Set.empty !checkpoints
+  checkpoints := SMap.add !checkpoints ~key:x ~data:Relative_path.Set.empty
 
 let retrieve_checkpoint x =
-  match SMap.get x !checkpoints with
+  match SMap.find_opt !checkpoints x with
   | Some files ->
-      Some(
-        List.map
-          (Relative_path.Set.elements files)
-          Relative_path.to_absolute
-      )
+    Some (List.map (Relative_path.Set.elements files) Relative_path.to_absolute)
   | None -> None
 
 let delete_checkpoint x =
-  match SMap.get x !checkpoints with
+  match SMap.find_opt !checkpoints x with
   | Some _ ->
-      checkpoints := SMap.remove x !checkpoints;
-      true
+    checkpoints := SMap.remove !checkpoints x;
+    true
   | None -> false

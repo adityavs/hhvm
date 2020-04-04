@@ -1,4 +1,4 @@
-<?php
+<?hh
 /* Prototype: array get_included_files  ( void  )
  * Description: Returns an array with the names of included or required files
 
@@ -18,7 +18,6 @@ echo "\n-- List included files atfter including inc2 which will include inc3 whi
 var_dump(get_included_files());
 
 echo "\n-- Error cases --\n";
-var_dump(get_included_files(true));
+try { var_dump(get_included_files(true)); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 
-?>
-===DONE===
+echo "===DONE===\n";

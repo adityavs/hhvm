@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class B {
   function foo() {}
@@ -7,3 +7,4 @@ class B {
 abstract class C extends B {
   abstract function foo();
 }
+

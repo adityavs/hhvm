@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,12 +16,13 @@
 #ifndef incl_HPHP_VM_EVENT_HOOK_H_
 #define incl_HPHP_VM_EVENT_HOOK_H_
 
-#include "hphp/util/ringbuffer.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/rds-header.h"
+#include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/surprise-flags.h"
+#include "hphp/runtime/vm/act-rec.h"
+
+#include "hphp/util/ringbuffer.h"
 
 #include <atomic>
 
@@ -38,8 +39,7 @@ namespace HPHP {
  *  - pending out of memory exceptions
  *  - pending timeout exceptions
  */
-class EventHook {
- public:
+struct EventHook {
   enum {
     NormalFunc,
     PseudoMain,
@@ -51,6 +51,10 @@ class EventHook {
     ProfileDefault = 3,
     ProfileFramePointers = 4,
     ProfileConstructors = 8,
+    ProfileResumeAware = 16,
+    /* This flag enables access to $this when profiling instance methods. It
+     * is used for internal profiling tools. It *may break* in the future. */
+    ProfileThisObject = 32,
   };
 
 
@@ -62,6 +66,8 @@ class EventHook {
   static void DisableDebug();
   static void EnableIntercept();
   static void DisableIntercept();
+
+  static void DoMemoryThresholdCallback();
 
   /**
    * Event hooks -- interpreter entry points.
@@ -79,16 +85,36 @@ class EventHook {
     ringbufferEnter(ar);
     if (UNLIKELY(checkSurpriseFlags())) { onFunctionResumeYield(ar); }
   }
-  static void FunctionSuspendE(ActRec* suspending, const ActRec* resumableAR) {
+  static void FunctionSuspendAwaitEF(ActRec* suspending,
+                                     const ActRec* resumableAR) {
     ringbufferExit(resumableAR);
     if (UNLIKELY(checkSurpriseFlags())) {
-      onFunctionSuspendE(suspending, resumableAR);
+      onFunctionSuspendAwaitEF(suspending, resumableAR);
     }
   }
-  static void FunctionSuspendR(ActRec* suspending, ObjectData* child) {
+  static void FunctionSuspendAwaitEG(ActRec* suspending) {
     ringbufferExit(suspending);
     if (UNLIKELY(checkSurpriseFlags())) {
-      onFunctionSuspendR(suspending, child);
+      onFunctionSuspendAwaitEG(suspending);
+    }
+  }
+  static void FunctionSuspendAwaitR(ActRec* suspending, ObjectData* child) {
+    ringbufferExit(suspending);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendAwaitR(suspending, child);
+    }
+  }
+  static void FunctionSuspendCreateCont(ActRec* suspending,
+                                        const ActRec* resumableAR) {
+    ringbufferExit(resumableAR);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendCreateCont(suspending, resumableAR);
+    }
+  }
+  static void FunctionSuspendYield(ActRec* suspending) {
+    ringbufferExit(suspending);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendYield(suspending);
     }
   }
   static inline void FunctionReturn(ActRec* ar, TypedValue retval) {
@@ -104,8 +130,11 @@ class EventHook {
    * Event hooks -- JIT entry points.
    */
   static bool onFunctionCall(const ActRec* ar, int funcType);
-  static void onFunctionSuspendE(ActRec*, const ActRec*);
-  static void onFunctionSuspendR(ActRec*, ObjectData*);
+  static void onFunctionSuspendAwaitEF(ActRec*, const ActRec*);
+  static void onFunctionSuspendAwaitEG(ActRec*);
+  static void onFunctionSuspendAwaitR(ActRec*, ObjectData*);
+  static void onFunctionSuspendCreateCont(ActRec*, const ActRec*);
+  static void onFunctionSuspendYield(ActRec*);
   static void onFunctionReturn(ActRec* ar, TypedValue retval);
 
 private:
@@ -118,10 +147,11 @@ private:
   static void onFunctionResumeYield(const ActRec* ar);
   static void onFunctionUnwind(ActRec* ar, ObjectData* phpException);
 
-  static void onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags);
+  static void onFunctionEnter(const ActRec* ar, int funcType,
+                              ssize_t flags, bool isResume);
   static void onFunctionExit(const ActRec* ar, const TypedValue* retval,
                              bool unwind, ObjectData* phpException,
-                             size_t flags);
+                             size_t flags, bool isSuspend);
 
   static bool RunInterceptHandler(ActRec* ar);
   static const char* GetFunctionNameForProfiler(const Func* func,

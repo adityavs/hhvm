@@ -1,11 +1,11 @@
-<?php
+<?hh
 /* Prototype: int filegroup ( string $filename )
  * Description: Returns the group ID of the file, or FALSE in case of an error.
  */
 
-/* Creating soft and hard links to a file and applying filegroup() on links */ 
-
-$file_path = dirname(__FILE__);
+/* Creating soft and hard links to a file and applying filegroup() on links */
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 fclose( fopen($file_path."/filegroup_variation1.tmp", "w") );
 
 echo "*** Testing filegroup() with links ***\n";
@@ -20,11 +20,9 @@ var_dump( filegroup($file_path."/filegroup_variation1_link.tmp") );  // expected
 clearstatcache();
 
 echo "\n*** Done ***";
-?>
-<?php error_reporting(0); ?>
-<?php
-$file_path = dirname(__FILE__);
+error_reporting(0);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 unlink($file_path."/filegroup_variation1_symlink.tmp");
 unlink($file_path."/filegroup_variation1_link.tmp");
 unlink($file_path."/filegroup_variation1.tmp");
-?>
+}

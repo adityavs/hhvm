@@ -1,20 +1,20 @@
-<?php
+<?hh
 class A {
-	public function __call($m, $a) {
-		echo "__call\n";
-	}
+    public function __call($m, $a) {
+        echo "__call\n";
+    }
 }
 
 class B extends A {
-	public static function foo() {
-		echo "foo\n";
-	}
+    public static function foo() {
+        echo "foo\n";
+    }
 }
-
-if (is_callable(array('B', 'foo'))) {
-	call_user_func(array('B', 'foo'));
+<<__EntryPoint>> function main(): void {
+if (is_callable(varray['B', 'foo'])) {
+    call_user_func(varray['B', 'foo']);
 }
-if (is_callable(array('A', 'foo'))) {
-	call_user_func(array('A', 'foo'));
+if (is_callable(varray['A', 'foo'])) {
+    call_user_func(varray['A', 'foo']);
 }
-?>
+}

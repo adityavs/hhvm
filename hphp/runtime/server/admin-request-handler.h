@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,8 +23,32 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class AdminRequestHandler : public RequestHandler {
-public:
+/**
+ * Admin Command Ext allow you to register more admin commands that are not
+ * located in the admin command file.
+ */
+struct AdminCommandExt {
+  AdminCommandExt() {
+    next = s_head;
+    s_head = this;
+  }
+
+  virtual std::string usage() = 0;
+  virtual bool handleRequest(Transport* transport) = 0;
+
+  template <typename L>
+  static bool iterate(L lambda) {
+    for (auto p = s_head; p; p = p->next) {
+      if (lambda(p)) return true;
+    }
+    return false;
+  }
+
+  AdminCommandExt* next{nullptr};
+  static AdminCommandExt* s_head;
+};
+
+struct AdminRequestHandler : RequestHandler {
   static AccessLog &GetAccessLog() { return s_accessLog; }
 
 public:
@@ -45,10 +69,14 @@ private:
   bool handleProfileRequest(const std::string &cmd, Transport *transport);
   bool handleDumpCacheRequest (const std::string &cmd, Transport *transport);
   bool handleConstSizeRequest (const std::string &cmd, Transport *transport);
+  bool handleInvalidateUnitRequest(const std::string &cmd,
+                                   Transport *transport);
   bool handleStaticStringsRequest(const std::string &cmd,
                                   Transport *transport);
-  bool handleDumpStaticStrings(const std::string &cmd, Transport *transport,
-                               const std::string &filename);
+  bool handleDumpStaticStringsRequest(const std::string &cmd,
+                                      const std::string &filename);
+  bool handleRandomStaticStringsRequest(const std::string &cmd,
+                                        Transport *transport);
   bool handleVMRequest      (const std::string &cmd, Transport *transport);
   void handleProxyRequest(const std::string& cmd, Transport *transport);
   bool handleRandomApcRequest (const std::string &cmd, Transport *transport);
@@ -57,7 +85,7 @@ private:
   bool handleCPUProfilerRequest (const std::string &cmd, Transport *transport);
 #endif
 
-  static DECLARE_THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
+  static THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
   static AccessLog s_accessLog;
 
   static AccessLog::ThreadData* getAccessLogThreadData() {

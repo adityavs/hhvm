@@ -1,14 +1,14 @@
-<?hh // decl /* -*- php -*- */
+<?hh /* -*- php -*- */
 /**
  * Copyright (c) 2014, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the 'hack' directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the 'hack' directory of this source tree.
  *
  */
 
+<<__PHPStdLib>>
 class Redis {
   const int REDIS_NOT_FOUND = 0;
   const int REDIS_STRING = 1;
@@ -32,10 +32,10 @@ class Redis {
   public function __construct() {}
   public function connect($host, $port = 6379, $timeout = 0.0) {}
   public function psetex($key, $ttl, $value) {}
-  public function sScan($key, $iterator, $pattern = '', $count = 0) {}
-  public function scan($iterator, $pattern = '', $count = 0) {}
-  public function zScan($key, $iterator, $pattern = '', $count = 0) {}
-  public function hScan($key, $iterator, $pattern = '', $count = 0) {}
+  public function sScan($key, inout $iterator, $pattern = '', $count = 0) {}
+  public function scan(inout $iterator, $pattern = '', $count = 0) {}
+  public function zScan($key, inout $iterator, $pattern = '', $count = 0) {}
+  public function hScan($key, inout $iterator, $pattern = '', $count = 0) {}
   public function client($command, $arg = '') {}
   public function slowlog($command) {}
   public function open($host, $port = 6379, $timeout = 0.0) {}
@@ -153,8 +153,8 @@ class Redis {
   public function zRem($key, $member1, $member2 = null, $memberN = null) {}
   public function zDelete($key, $member1, $member2 = null, $memberN = null) {}
   public function zRevRange($key, $start, $end, $withscore = null) {}
-  public function zRangeByScore($key, $start, $end, array $options = array()) {}
-  public function zRevRangeByScore($key, $start, $end, array $options = array()) {}
+  public function zRangeByScore($key, $start, $end, array $options = darray[]) {}
+  public function zRevRangeByScore($key, $start, $end, array $options = darray[]) {}
   public function zCount($key, $start, $end) {}
   public function zRemRangeByScore($key, $start, $end) {}
   public function zDeleteRangeByScore($key, $start, $end) {}
@@ -166,8 +166,8 @@ class Redis {
   public function zRank($key, $member) {}
   public function zRevRank($key, $member) {}
   public function zIncrBy($key, $value, $member) {}
-  public function zUnion($Output, $ZSetKeys, array $Weights = [], $aggregateFunction = 'SUM') {}
-  public function zInter($Output, $ZSetKeys, array $Weights = [], $aggregateFunction = 'SUM') {}
+  public function zUnion($Output, $ZSetKeys, array $Weights = varray[], $aggregateFunction = 'SUM') {}
+  public function zInter($Output, $ZSetKeys, array $Weights = varray[], $aggregateFunction = 'SUM') {}
   public function hSet($key, $hashKey, $value) {}
   public function hSetNx($key, $hashKey, $value) {}
   public function hGet($key, $hashKey) {}
@@ -182,9 +182,9 @@ class Redis {
   public function hMset($key, $hashKeys) {}
   public function hMGet($key, $hashKeys) {}
   public function config($operation, $key, $value) {}
-  public function evaluate($script, $args = array(), $numKeys = 0) {}
-  public function evalSha($scriptSha, $args = array(), $numKeys = 0) {}
-  public function evaluateSha($scriptSha, $args = array(), $numKeys = 0) {}
+  public function evaluate($script, $args = varray[], $numKeys = 0) {}
+  public function evalSha($scriptSha, $args = varray[], $numKeys = 0) {}
+  public function evaluateSha($scriptSha, $args = varray[], $numKeys = 0) {}
   public function script($command, $script) {}
   public function getLastError() {}
   public function clearLastError() {}
@@ -194,37 +194,9 @@ class Redis {
   public function restore($key, $ttl, $value) {}
   public function migrate($host, $port, $key, $db, $timeout) {}
   public function time() {}
+  public function call__($fname, $args) {}
 }
 
+<<__PHPStdLib>>
 class RedisException extends RuntimeException {
-}
-
-class RedisArray {
-  public function __call($function_name, $arguments) {}
-  public function __construct($name = '', array $hosts = [], array $opts = []) {}
-  public function _distributor() {}
-  public function _function() {}
-  public function _hosts() {}
-  public function _instance() {}
-  public function _rehash() {}
-  public function _target() {}
-  public function bgsave() {}
-  public function del() {}
-  public function delete() {}
-  public function discard() {}
-  public function exec() {}
-  public function flushall() {}
-  public function flushdb() {}
-  public function getMultiple() {}
-  public function getOption() {}
-  public function info() {}
-  public function keys() {}
-  public function mget() {}
-  public function mset() {}
-  public function multi() {}
-  public function ping() {}
-  public function save() {}
-  public function select() {}
-  public function setOption() {}
-  public function unwatch() {}
 }

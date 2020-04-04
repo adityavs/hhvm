@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,7 @@
 */
 #include "hphp/util/arena.h"
 #include "hphp/util/assertions.h"
-#include "hphp/util/malloc-size-class.h"
+#include "hphp/util/jemalloc-util.h"
 
 namespace HPHP {
 
@@ -43,7 +43,7 @@ ArenaImpl<kChunkBytes>::ArenaImpl() {
   m_current = static_cast<char*>(malloc(kChunkBytes));
   m_ptrs.push_back(m_current);
   m_bypassSlabAlloc = s_bypassSlabAlloc;
-#ifdef DEBUG
+#ifndef NDEBUG
   m_externalAllocSize = 0;
 #endif
 }
@@ -61,7 +61,7 @@ ArenaImpl<kChunkBytes>::~ArenaImpl() {
 template<size_t kChunkBytes>
 size_t ArenaImpl<kChunkBytes>::size() const {
   size_t ret = m_ptrs.size() * kChunkBytes - slackEstimate();
-#ifdef DEBUG
+#ifndef NDEBUG
   ret += m_externalAllocSize;
 #endif
   return ret;
@@ -81,7 +81,7 @@ void* ArenaImpl<kChunkBytes>::allocSlow(size_t nbytes) {
 #endif
 
     char* ptr = static_cast<char*>(malloc(nbytes + extra));
-#ifdef DEBUG
+#ifndef NDEBUG
     m_externalAllocSize += nbytes + extra;
 #endif
     m_externalPtrs.push(ptr); // save ptr before aligning it
@@ -109,8 +109,8 @@ void ArenaImpl<kChunkBytes>::createSlab() {
 
 //////////////////////////////////////////////////////////////////////
 
-template class ArenaImpl<4096>;
-template class ArenaImpl<32 * 1024>;
+template struct ArenaImpl<4096>;
+template struct ArenaImpl<32 * 1024>;
 
 //////////////////////////////////////////////////////////////////////
 

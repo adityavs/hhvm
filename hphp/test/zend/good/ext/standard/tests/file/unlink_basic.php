@@ -1,9 +1,9 @@
-<?php
+<?hh
 /* Prototype : bool unlink ( string $filename [, resource $context] );
    Description : Deletes filename
 */
-
-$file_path = dirname(__FILE__);
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 
 echo "*** Testing unlink() on a file ***\n";
 $filename = "$file_path/unlink_basic.tmp";  // temp file name used here
@@ -28,4 +28,4 @@ var_dump( unlink($filename, $context) );  // using $context in second argument
 var_dump( file_exists($filename) );  // confirm file doesnt exist
 
 echo "Done\n";
-?>
+}

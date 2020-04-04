@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,13 +17,12 @@
 #include "hphp/runtime/vm/jit/trans-rec.h"
 
 #include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-
-#include <unordered_map>
+#include "hphp/runtime/vm/jit/prof-data.h"
 
 namespace HPHP { namespace jit {
 
 TransRec::TransRec(SrcKey                      _src,
+                   TransID                     transID,
                    TransKind                   _kind,
                    TCA                         _aStart,
                    uint32_t                    _aLen,
@@ -34,13 +33,12 @@ TransRec::TransRec(SrcKey                      _src,
                    RegionDescPtr               region,
                    std::vector<TransBCMapping> _bcMapping,
                    Annotations&&               _annotations,
-                   bool                        _isLLVM,
                    bool                        _hasLoop)
   : bcMapping(_bcMapping)
   , annotations(std::move(_annotations))
   , funcName(_src.func()->fullName()->data())
   , src(_src)
-  , md5(_src.func()->unit()->md5())
+  , sha1(_src.func()->unit()->sha1())
   , aStart(_aStart)
   , acoldStart(_acoldStart)
   , afrozenStart(_afrozenStart)
@@ -48,9 +46,8 @@ TransRec::TransRec(SrcKey                      _src,
   , acoldLen(_acoldLen)
   , afrozenLen(_afrozenLen)
   , bcStart(_src.offset())
-  , id(0)
+  , id(transID)
   , kind(_kind)
-  , isLLVM(_isLLVM)
   , hasLoop(_hasLoop)
 {
   if (funcName.empty()) funcName = "Pseudo-main";
@@ -60,7 +57,7 @@ TransRec::TransRec(SrcKey                      _src,
   assertx(!region->empty());
   for (auto& block : region->blocks()) {
     auto sk = block->start();
-    blocks.emplace_back(Block{sk.unit()->md5(), sk.offset(),
+    blocks.emplace_back(Block{sk.unit()->sha1(), sk.offset(),
                               block->last().advanced().offset()});
   }
 
@@ -70,8 +67,7 @@ TransRec::TransRec(SrcKey                      _src,
   }
 }
 
-void
-TransRec::optimizeForMemory() {
+void TransRec::optimizeForMemory() {
   // Dump large annotations to disk.
   for (int i = 0 ; i < annotations.size(); ++i) {
     auto& annotation = annotations[i];
@@ -98,23 +94,25 @@ TransRec::optimizeForMemory() {
 
 TransRec::SavedAnnotation
 TransRec::writeAnnotation(const Annotation& annotation, bool compress) {
-  static std::unordered_map<std::string, bool> fileWritten;
+  static jit::fast_map<std::string, size_t> fileWritten;
   SavedAnnotation saved = {
-    folly::sformat("/tmp/tc_annotations.txt{}", compress ? ".gz" : ""),
+    folly::sformat("{}/tc_annotations.txt{}",
+                   RuntimeOption::EvalDumpTCPath,
+                   compress ? ".gz" : ""),
     0,
     0
   };
   auto const fileName = saved.fileName.c_str();
 
-  auto result = fileWritten.find(saved.fileName);
-  if (result == fileWritten.end()) {
+  if (fileWritten.emplace(saved.fileName, 0).second) {
     unlink(fileName);
-    fileWritten[saved.fileName] = true;
   }
+
+  auto& fileOffset = fileWritten.at(saved.fileName);
 
   FILE* file = fopen(fileName, "a");
   if (!file) return saved;
-  saved.offset = lseek(fileno(file), 0, SEEK_END);
+  saved.offset = fileOffset;
   if (saved.offset == (off_t)-1) {
     fclose(file);
     return saved;
@@ -135,12 +133,39 @@ TransRec::writeAnnotation(const Annotation& annotation, bool compress) {
     }
     fclose(file);
   }
+  fileOffset += saved.length;
 
   return saved;
 }
 
-std::string
-TransRec::print(uint64_t profCount) const {
+bool TransRec::isConsistent() const {
+  if (!isValid()) return true;
+
+  const auto aEnd       = aStart       + aLen;
+  const auto acoldEnd   = acoldStart   + acoldLen;
+  const auto afrozenEnd = afrozenStart + afrozenLen;
+
+  for (const auto& b : bcMapping) {
+    if (b.aStart < aStart             || b.aStart > aEnd         ||
+        b.acoldStart < acoldStart     || b.acoldStart > acoldEnd ||
+        b.afrozenStart < afrozenStart || b.afrozenStart > afrozenEnd) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TransRec::contains(TCA tca) const {
+  if (!isValid()) return false;
+  if (aStart <= tca && tca - aStart < aLen) return true;
+  if (acoldStart <= tca && tca - acoldStart < acoldLen) return true;
+  if (afrozenStart <= tca && tca - afrozenStart < afrozenLen) return true;
+  return false;
+}
+
+std::string TransRec::print() const {
+  if (!isValid()) return "Translation -1 {\n}\n\n";
+
   std::string ret;
   std::string funcName = src.func()->fullName()->data();
 
@@ -148,15 +173,15 @@ TransRec::print(uint64_t profCount) const {
   folly::format(
     &ret,
     "Translation {} {{\n"
-    "  src.md5 = {}\n"
+    "  src.sha1 = {}\n"
     "  src.funcId = {}\n"
     "  src.funcName = {}\n"
-    "  src.resumed = {}\n"
+    "  src.resumeMode = {}\n"
     "  src.bcStart = {}\n"
     "  src.blocks = {}\n",
-    id, md5, src.funcID(),
+    id, sha1, src.funcID(),
     funcName.empty() ? "Pseudo-main" : funcName,
-    (int32_t)src.resumed(),
+    (int32_t)src.resumeMode(),
     src.offset(),
     blocks.size());
 
@@ -164,7 +189,7 @@ TransRec::print(uint64_t profCount) const {
     folly::format(
       &ret,
       "    {} {} {}\n",
-      block.md5, block.bcStart, block.bcPast);
+      block.sha1, block.bcStart, block.bcPast);
   }
 
   folly::format( &ret, "  src.guards = {}\n", guards.size());
@@ -176,7 +201,6 @@ TransRec::print(uint64_t profCount) const {
   folly::format(
     &ret,
     "  kind = {} ({})\n"
-    "  isLLVM = {:d}\n"
     "  hasLoop = {:d}\n"
     "  aStart = {}\n"
     "  aLen = {:#x}\n"
@@ -185,28 +209,35 @@ TransRec::print(uint64_t profCount) const {
     "  frozenStart = {}\n"
     "  frozenLen = {:#x}\n",
     static_cast<uint32_t>(kind), show(kind),
-    isLLVM, hasLoop,
+    hasLoop,
     aStart, aLen,
     acoldStart, acoldLen,
     afrozenStart, afrozenLen);
 
-  folly::format(&ret, "  annotations = {}\n", annotations.size());
+  // Prepend any target profile data to annotations list.
+  if (auto const profD = profData()) {
+    auto targetProfs = profD->getTargetProfiles(id);
+    folly::format(&ret, "  annotations = {}\n",
+                  annotations.size() + targetProfs.size());
+    for (auto const& tProf : targetProfs) {
+      folly::format(&ret, "     [\"TargetProfile {}: {}\"] = {}\n",
+                    tProf.key.bcOff, tProf.key.name->data(), tProf.debugInfo);
+    }
+  } else {
+    folly::format(&ret, "  annotations = {}\n", annotations.size());
+  }
   for (auto const& annotation : annotations) {
     folly::format(&ret, "     [\"{}\"] = {}\n",
                   annotation.first, annotation.second);
   }
 
-  folly::format(
-    &ret,
-    "  profCount = {}\n"
-    "  bcMapping = {}\n",
-    profCount, bcMapping.size());
+  folly::format(&ret, "  bcMapping = {}\n", bcMapping.size());
 
   for (auto const& info : bcMapping) {
     folly::format(
       &ret,
       "    {} {} {} {} {}\n",
-      info.md5, info.bcStart,
+      info.sha1, info.bcStart,
       info.aStart, info.acoldStart, info.afrozenStart);
   }
 

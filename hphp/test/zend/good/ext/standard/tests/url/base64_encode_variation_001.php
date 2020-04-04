@@ -1,8 +1,8 @@
-<?php
+<?hh
 /* Prototype  : proto string base64_encode(string str)
- * Description: Encodes string using MIME base64 algorithm 
+ * Description: Encodes string using MIME base64 algorithm
  * Source code: ext/standard/base64.c
- * Alias to functions: 
+ * Alias to functions:
  */
 
 echo "*** Testing base64_encode() : usage variations ***\n";
@@ -11,7 +11,7 @@ echo "*** Testing base64_encode() : usage variations ***\n";
 function test_error_handler($err_no, $err_msg, $filename, $linenum, $vars) {
 	echo "Error: $err_no - $err_msg, $filename($linenum)\n";
 }
-set_error_handler('test_error_handler');
+set_error_handler(fun('test_error_handler'));
 
 // Initialise function arguments not being substituted (if any)
 
@@ -20,7 +20,7 @@ $unset_var = 10;
 unset ($unset_var);
 
 //array of values to iterate over
-$values = array(
+$values = varray[
 
       // int data
       0,
@@ -36,11 +36,11 @@ $values = array(
       .5,
 
       // array data
-      array(),
-      array(0),
-      array(1),
-      array(1, 2),
-      array('color' => 'red', 'item' => 'pen'),
+      varray[],
+      varray[0],
+      varray[1],
+      varray[1, 2],
+      darray['color' => 'red', 'item' => 'pen'],
 
       // null data
       NULL,
@@ -64,14 +64,13 @@ $values = array(
 
       // unset data
       $unset_var,
-);
+];
 
 // loop through each element of the array for str
 
 foreach($values as $value) {
-      echo "\nArg value $value \n";
-      var_dump( base64_encode($value) );
+      echo "\nArg value $value\n";
+      try { var_dump( base64_encode($value) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 };
 
 echo "Done";
-?>

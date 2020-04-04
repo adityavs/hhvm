@@ -1,8 +1,8 @@
-<?php
+<?hh
 
 class :base {
   protected static function __xhpAttributeDeclaration() {
-    return [];
+    return darray[];
   }
 }
 
@@ -24,8 +24,12 @@ class :testclass extends :base {
   }
 }
 
+
 /*
  * This dumps the type numbers; values taken from
  * https://github.com/facebook/xhp/commit/177b52dddc03
  */
+<<__EntryPoint>>
+function main_attr_types() {
 var_dump(array_map($x ==> $x[0], :testclass::attrs()));
+}

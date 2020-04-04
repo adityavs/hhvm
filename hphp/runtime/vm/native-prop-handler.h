@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #define _incl_HPHP_RUNTIME_VM_NATIVE_PROP_HANDLER_H
 
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/hash-set.h"
 
 namespace HPHP { namespace Native {
 //////////////////////////////////////////////////////////////////////////////
@@ -26,7 +26,7 @@ namespace HPHP { namespace Native {
 struct NativePropHandler {
   typedef Variant (*GetFunc)(const Object& obj, const String& name);
   typedef Variant (*SetFunc)(const Object& obj, const String& name,
-                             Variant& value);
+                             const Variant& value);
   typedef Variant (*IssetFunc)(const Object& obj, const String& name);
   typedef Variant (*UnsetFunc)(const Object& obj, const String& name);
 
@@ -62,7 +62,7 @@ void registerNativePropHandler(const String& className,
  *
  * Example:
  *
- * class ElementPropHandler {
+ * struct ElementPropHandler {
  *   static Variant getProp(const Object& this_, const String& name) {
  *     // get `name` prop
  *   }
@@ -91,7 +91,7 @@ Variant nativePropHandlerGet(const Object& obj, const String& name) {
 template<class T>
 Variant nativePropHandlerSet(const Object& obj,
                              const String& name,
-                             Variant& value) {
+                             const Variant& value) {
   CHECK_NATIVE_PROP_SUPPORTED(name, "set")
   return T::setProp(obj, name, value);
 }
@@ -133,21 +133,20 @@ void registerNativePropHandler(const String& className) {
  * child classes.
  */
 struct BasePropHandler {
-  static Variant getProp(const Object& this_, const String& name) {
+  static Variant getProp(const Object& /*this_*/, const String& /*name*/) {
     return Native::prop_not_handled();
   }
-  static Variant setProp(const Object& this_,
-                         const String& name,
-                         Variant& value) {
+  static Variant setProp(const Object& /*this_*/, const String& /*name*/,
+                         const Variant& /*value*/) {
     return Native::prop_not_handled();
   }
-  static Variant issetProp(const Object& this_, const String& name) {
+  static Variant issetProp(const Object& /*this_*/, const String& /*name*/) {
     return Native::prop_not_handled();
   }
-  static Variant unsetProp(const Object& this_, const String& name) {
+  static Variant unsetProp(const Object& /*this_*/, const String& /*name*/) {
     return Native::prop_not_handled();
   }
-  static bool isPropSupported(const String& name, const String& op) {
+  static bool isPropSupported(const String& /*name*/, const String& /*op*/) {
     return false;
   }
 };
@@ -173,7 +172,7 @@ struct MapPropHandler : BasePropHandler {
 
   static Variant setProp(const Object& this_,
                          const String& name,
-                         Variant& value) {
+                         const Variant& value) {
     auto set = Derived::map.set(name);
     CHECK_ACCESSOR(set, "set", this_->getVMClass()->name(), name);
     set(this_, value);
@@ -199,7 +198,7 @@ struct MapPropHandler : BasePropHandler {
     return true;
   }
 
-  static bool isPropSupported(const String& name, const String& op) {
+  static bool isPropSupported(const String& name, const String& /*op*/) {
     return Derived::map.isPropSupported(name);
   }
 };
@@ -210,7 +209,7 @@ struct MapPropHandler : BasePropHandler {
 struct PropAccessor {
   const char* name;
   Variant (*get)(const Object& this_);
-  void    (*set)(const Object& this_, Variant& value);
+  void    (*set)(const Object& this_, const Variant& value);
   bool    (*isset)(const Object& this_);
   void    (*unset)(const Object& this_);
 };
@@ -249,7 +248,7 @@ struct PropAccessorMap :
   Variant (*get(const String& name))(const Object& this_);
 
   void    (*set(const String& name))(const Object& this_,
-                                     Variant& value);
+                                     const Variant& value);
 
   bool    (*isset(const String& name))(const Object& this_);
   void    (*unset(const String& name))(const Object& this_);
@@ -263,7 +262,7 @@ private:
  * Example: Native::getProp(this, propName);
  */
 Variant getProp(const Object& obj, const String& name);
-Variant setProp(const Object& obj, const String& name, Variant& value);
+Variant setProp(const Object& obj, const String& name, const Variant& value);
 Variant issetProp(const Object& obj, const String& name);
 Variant unsetProp(const Object& obj, const String& name);
 

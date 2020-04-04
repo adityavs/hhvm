@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   private static $priv = 7;
@@ -7,8 +7,7 @@ class A {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   (new A())->readVar();
   var_dump(isset(A::$priv));
 }
-main();

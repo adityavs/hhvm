@@ -1,8 +1,9 @@
 /*
+
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,8 +23,10 @@
 #include <stdarg.h>
 
 #include <folly/Format.h>
+#include <folly/portability/Unistd.h>
 
 #include "hphp/util/assertions.h"
+#include "hphp/util/compact-vector.h"
 #include "hphp/util/portability.h"
 #include "hphp/util/text-color.h"
 
@@ -88,62 +91,81 @@ namespace Trace {
 #define TRACE_MODULES \
       TM(tprefix)     /* Meta: prefix with string */  \
       TM(traceAsync)  /* Meta: lazy writes to disk */ \
+      TM(apc)           \
       TM(asmx64)        \
+      TM(asmppc64)      \
       TM(atomicvector)  \
       TM(bcinterp)      \
       TM(bisector)      \
-      TM(class_load)     \
+      TM(class_load)    \
+      TM(cti)           \
       TM(datablock)     \
-      TM(decreftype)    \
       TM(debugger)      \
       TM(debuggerflow)  \
       TM(debuginfo)     \
+      TM(decreftype)    \
+      TM(disas)         \
       TM(dispatchBB)    \
+      TM(ehframe)       \
       TM(emitter)       \
+      TM(extern_compiler) \
       TM(fixup)         \
       TM(fr)            \
       TM(gc)            \
-      TM(heap)          \
+      TM(heapgraph)     \
       TM(heapreport)    \
+      TM(hfsort)        \
       TM(hhas)          \
       TM(hhbbc)         \
+      TM(hhbbc_cfg)     \
       TM(hhbbc_dce)     \
       TM(hhbbc_dump)    \
+      TM(hhbbc_parse)   \
       TM(hhbbc_emit)    \
-      TM(hhbbc_index)   \
-      TM(hhbbc_time)    \
       TM(hhbbc_iface)   \
+      TM(hhbbc_index)   \
+      TM(hhbbc_stats)   \
+      TM(hhbbc_time)    \
       TM(hhbc)          \
-      TM(vasm)          \
-      TM(vasm_copy)     \
-      TM(vasm_phi)      \
       TM(hhir)          \
       TM(hhirTracelets) \
+      TM(hhir_alias)    \
       TM(hhir_cfg)      \
       TM(hhir_checkhoist) \
       TM(hhir_dce)      \
-      TM(hhir_store)    \
-      TM(hhir_alias)    \
-      TM(hhir_loop)     \
-      TM(hhir_load)     \
-      TM(hhir_refineTmps) \
+      TM(hhir_fixhint)  \
+      TM(hhir_fsm)      \
       TM(hhir_gvn)      \
-      TM(hhir_refcount) \
-      TM(layout)        \
       TM(hhir_licm)     \
-      TM(llvm)          \
-      TM(llvm_count)    \
+      TM(hhir_load)     \
+      TM(hhir_loop)     \
+      TM(hhir_phi)      \
+      TM(hhir_refcount) \
+      TM(hhir_refineTmps) \
+      TM(hhir_store)    \
+      TM(hhir_unreachable) \
+      TM(hhprof)        \
       TM(inlining)      \
       TM(instancebits)  \
       TM(intercept)     \
       TM(interpOne)     \
+      TM(irlower)       \
       TM(jittime)       \
+      TM(layout)        \
       TM(libxml)        \
+      TM(logging)       \
       TM(mcg)           \
       TM(mcgstats)      \
       TM(minstr)        \
+      TM(mm)            \
+      TM(objprof)       \
+      TM(perf_mem_event) \
       TM(pgo)           \
       TM(printir)       \
+      TM(printir_json)  \
+      TM(prof_branch)   \
+      TM(prof_array)    \
+      TM(prof_prop)     \
       TM(rat)           \
       TM(refcount)      \
       TM(regalloc)      \
@@ -153,10 +175,10 @@ namespace Trace {
       TM(runtime)       \
       TM(servicereq)    \
       TM(simplify)      \
-      TM(mm)            \
       TM(stat)          \
       TM(statgroups)    \
       TM(stats)         \
+      TM(strobelight)   \
       TM(targetcache)   \
       TM(tcspace)       \
       TM(trans)         \
@@ -166,10 +188,19 @@ namespace Trace {
       TM(typeProfile)   \
       TM(unwind)        \
       TM(ustubs)        \
+      TM(vasm)          \
+      TM(vasm_block_count) \
+      TM(vasm_copy)     \
+      TM(vasm_graph_color) \
+      TM(vasm_phi)      \
+      TM(watchman_autoload) \
       TM(xenon)         \
-      TM(objprof)       \
-      TM(heapgraph)     \
       TM(xls)           \
+      TM(xls_stats)     \
+      TM(pdce_inline)   \
+      TM(clisrv)        \
+      TM(factparse)     \
+      TM(bccache)       \
       /* Stress categories, to exercise rare paths */ \
       TM(stress_txInterpPct)  \
       TM(stress_txInterpSeed) \
@@ -282,6 +313,10 @@ struct BumpRelease {
     if (m_live) tl_levels[m_mod] += m_adjust;
   }
 
+  BumpRelease negate() const {
+    return BumpRelease{ m_mod, -m_adjust, m_live };
+  }
+
   BumpRelease(const BumpRelease&) = delete;
   BumpRelease& operator=(const BumpRelease&) = delete;
 
@@ -291,9 +326,11 @@ private:
   int m_adjust;
 };
 
+CompactVector<BumpRelease> bumpSpec(folly::StringPiece traceSpec);
+
 //////////////////////////////////////////////////////////////////////
 
-#if (defined(DEBUG) || defined(USE_TRACE)) /* { */
+#if (!defined(NDEBUG) || defined(USE_TRACE)) /* { */
 #  ifndef USE_TRACE
 #    define USE_TRACE 1
 #  endif
@@ -371,20 +408,27 @@ void vtrace(ATTRIBUTE_PRINTF_STRING const char *fmt, va_list args)
   ATTRIBUTE_PRINTF(1,0);
 void dumpRingbuffer();
 
+// Ensure a tracing output file has been opened.
+void ensureInit(std::string outFile);
+// Set tracing levels for this thread using a module:level,... specification.
+// If traceSpec is empty, all levels for this thread are zeroed.
+void setTraceThread(folly::StringPiece traceSpec);
+
 //////////////////////////////////////////////////////////////////////
 
-#else /* } (defined(DEBUG) || defined(USE_TRACE)) { */
+#else /* } (!defined(NDEBUG) || defined(USE_TRACE)) { */
 
 //////////////////////////////////////////////////////////////////////
 /*
  * Implementation for when tracing is disabled.
  */
 
-#define ONTRACE(...)    do { } while (0)
-#define TRACE(...)      do { } while (0)
-#define FTRACE(...)     do { } while (0)
-#define TRACE_MOD(...)  do { } while (0)
-#define FTRACE_MOD(...) do { } while (0)
+#define ONTRACE(...)      do { } while (0)
+#define TRACE(...)        do { } while (0)
+#define FTRACE(...)       do { } while (0)
+#define ONTRACE_MOD(...)  do { } while (0)
+#define TRACE_MOD(...)    do { } while (0)
+#define FTRACE_MOD(...)   do { } while (0)
 #define TRACE_SET_MOD(name) \
   DEBUG_ONLY static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
 
@@ -393,29 +437,37 @@ void dumpRingbuffer();
 struct Indent {
   Indent() {
     always_assert(true && "If this struct is completely empty we get unused "
-                  "variable warnings in code that uses it.");
+                          "variable warnings in code that uses it.");
   }
 };
-inline std::string indent() { return std::string(); }
+inline std::string indent() {
+  return std::string();
+}
 
 struct Bump {
-  Bump(Module mod, int adjust, bool condition = true) {
+  Bump(Module /*mod*/, int /*adjust*/, bool /*condition*/ = true) {
     always_assert(true && "If this struct is completely empty we get unused "
-                  "variable warnings in code that uses it.");
+                          "variable warnings in code that uses it.");
   }
 };
 
 const bool enabled = false;
 
-inline void trace(const char*, ...)      { }
-inline void trace(const std::string&)    { }
-inline void vtrace(const char*, va_list) { }
-inline bool moduleEnabled(Module t, int level = 1) { return false; }
-inline int moduleLevel(Module tm) { return 0; }
+inline void trace(const char*, ...) {}
+inline void trace(const std::string&) {}
+inline void vtrace(const char*, va_list) {}
+inline bool moduleEnabled(Module /*t*/, int /*level*/ = 1) {
+  return false;
+}
+inline int moduleLevel(Module /*tm*/) {
+  return 0;
+}
+inline void ensureInit(std::string /*outFile*/) {}
+inline void setTraceThread(const std::string& /*traceSpec*/) {}
 
 //////////////////////////////////////////////////////////////////////
 
-#endif /* } (defined(DEBUG) || defined(USE_TRACE)) */
+#endif /* } (!defined(NDEBUG) || defined(USE_TRACE)) */
 
 } // Trace
 
@@ -448,7 +500,7 @@ FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(has_toString, toString);
 
 namespace folly {
 template<typename Val>
-struct FormatValue<Val,
+class FormatValue<Val,
                    typename std::enable_if<
                      HPHP::has_toString<Val, std::string() const>::value &&
                      // This is here because MSVC decides that StringPiece matches
@@ -457,6 +509,7 @@ struct FormatValue<Val,
                      !std::is_same<Val, StringPiece>::value,
                      void
                    >::type> {
+ public:
   explicit FormatValue(const Val& val) : m_val(val) {}
 
   template<typename Callback> void format(FormatArg& arg, Callback& cb) const {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,6 +19,7 @@
 
 #include <vector>
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/file.h"
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
@@ -277,9 +278,10 @@ MagickBooleanType withMagickLocaleFix(
 
 std::vector<double> toDoubleArray(const Array& array) {
   std::vector<double> ret;
-  for (ArrayIter it(array); it; ++it) {
-    ret.push_back(it.secondRefPlus().toDouble());
-  }
+  ret.reserve(array.size());
+  IterateVNoInc(array.get(), [&](TypedValue v) {
+    ret.push_back(tvCastToDouble(v));
+  });
   return ret;
 }
 
@@ -288,19 +290,19 @@ std::vector<PointInfo> toPointInfoArray(const Array& coordinates) {
   int idx = 0;
 
   for (ArrayIter it(coordinates); it; ++it) {
-    const Variant& element = it.secondRefPlus();
-    if (!element.isArray()) {
+    auto const element = it.secondValPlus();
+    if (!isArrayLikeType(type(element))) {
       return {};
     }
 
-    const Array& coordinate = element.toCArrRef();
-    if (coordinate.size() != 2) {
+    auto const coordinate = val(element).parr;
+    if (coordinate->size() != 2) {
       return {};
     }
 
     for (ArrayIter jt(coordinate); jt; ++jt) {
       const String& key = jt.first().toString();
-      double value = jt.secondRefPlus().toDouble();
+      double value = tvCastToDouble(jt.secondValPlus());
       if (key == s_x) {
         ret[idx].x = value;
       } else if (key == s_y) {
@@ -328,6 +330,11 @@ void ImagickExtension::moduleInit() {
   loadImagickPixelClass();
   loadImagickPixelIteratorClass();
   loadSystemlib();
+  MagickWandGenesis();
+}
+
+void ImagickExtension::moduleShutdown() {
+  MagickWandTerminus();
 }
 
 void ImagickExtension::threadInit() {
@@ -347,7 +354,7 @@ bool ImagickExtension::hasProgressMonitor() {
   return s_ini_setting->m_progress_monitor;
 }
 
-IMPLEMENT_THREAD_LOCAL(ImagickExtension::ImagickIniSetting,
+RDS_LOCAL(ImagickExtension::ImagickIniSetting,
                        ImagickExtension::s_ini_setting);
 
 ImagickExtension s_imagick_extension;

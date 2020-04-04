@@ -1,7 +1,7 @@
 <?hh
 
 async function block() {
-  await RescheduleWaitHandle::create(0, 0);
+  await RescheduleWaitHandle::create(RescheduleWaitHandle::QUEUE_DEFAULT, 0);
 }
 
 async function bar($id) {
@@ -11,12 +11,16 @@ async function bar($id) {
 
 async function foo() {
   await block();
-  return await GenArrayWaitHandle::create(
+  return await \HH\Asio\m(
     array_map(
       async $id ==> await bar($id),
-      array(1,2,3,4),
+      varray[1,2,3,4],
     )
   );
 }
 
+
+<<__EntryPoint>>
+function main_lambda2() {
 var_dump(HH\Asio\join(foo()));
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,8 @@
 #include <string.h>
 #include <math.h>
 #include "hphp/runtime/base/string-buffer.h"
-#include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/util/rds-local.h"
 
 /*
  * This class reimplements the setlocale() and localeconv() functions
@@ -48,8 +48,8 @@
 
 namespace HPHP {
 
-IMPLEMENT_THREAD_LOCAL(ThreadSafeLocaleHandler, g_thread_safe_locale_handler);
-IMPLEMENT_THREAD_LOCAL(struct lconv, g_thread_safe_localeconv_data);
+RDS_LOCAL(ThreadSafeLocaleHandler, g_thread_safe_locale_handler);
+RDS_LOCAL(struct lconv, g_thread_safe_localeconv_data);
 
 static const locale_t s_null_locale = (locale_t) 0;
 
@@ -106,7 +106,7 @@ void ThreadSafeLocaleHandler::reset() {
 
 const char* ThreadSafeLocaleHandler::actuallySetLocale(
   int category, const char* locale_cstr) {
-  if (category < 0 || category > m_category_locale_map.size()) {
+  if (category < 0 || category >= m_category_locale_map.size()) {
     return nullptr;
   }
 

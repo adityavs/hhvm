@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,8 +16,12 @@
 #ifndef incl_HPHP_ALIAS_CLASS_H_
 #define incl_HPHP_ALIAS_CLASS_H_
 
-#include "hphp/runtime/vm/jit/alias-id-set.h"
+#include "hphp/runtime/base/rds.h"
+
 #include "hphp/runtime/vm/minstr-state.h"
+
+#include "hphp/runtime/vm/jit/alias-id-set.h"
+#include "hphp/runtime/vm/jit/stack-offsets.h"
 
 #include <folly/Optional.h>
 
@@ -48,65 +52,83 @@ struct SSATmp;
  *                         Unknown
  *                            |
  *                            |
- *                    +-------+-------+----------+
- *                    |               |          |
- *                 UnknownTV      IterPosAny  IterBaseAny
- *                    |               |          |
- *                    |              ...        ...
+ *                    +-------+-------+
+ *                    |               |
+ *                 UnknownTV       UIterAll
+ *                    |               |
+ *                    |             Iter*
  *                    |
- *      +---------+---+---------------+-------------------------+
+ *      +---------+---+---------------+-------------------------+----+
+ *      |         |                   |                         |    |
+ *      |         |                   |                         |    |
+ *      |         |                   |                         | RdsAny
+ *      |         |                   |                         |    |
+ *      |         |                HeapAny*                     |   ...
  *      |         |                   |                         |
- *      |         |                   |                         |
- *      |         |                   |                         |
- *      |         |                   |                         |
- *      |         |                HeapAny*                     |
- *      |         |                   |                         |
- *      |         |            +------+------+---------+        |
- *      |         |            |             |         |        |
- *   FrameAny  StackAny     ElemAny       PropAny   RefAny  MIStateAny
- *      |         |          /    \          |         |        |
- *     ...       ...   ElemIAny  ElemSAny   ...       ...       |
+ *      |         |            +------+------+                  |
+ *      |         |            |             |                  |
+ *   FrameAny  StackAny     ElemAny       PropAny           MIStateAny
+ *      |         |          /    \          |                  |
+ *     ...       ...   ElemIAny  ElemSAny   ...                 |
  *                        |         |                           |
- *                       ...       ...          ----------------+-------------
- *                                              |         |        |         |
- *                                         MITempBase  MITvRef  MITvRef2  MIBase
+ *                       ...       ...    +---------+--------+--+------+
+ *                                        |         |        |         |
+ *                                   MITempBase  MITvRef  MITvRef2     |
+ *                                                                     |
+ *                                                                     |
+ *                                                  +--------+---------+
+ *                                                  |        |
+ *                                               MIBase**  MIPropS**
  *
  *
- *   (*) AHeapAny contains some things other than ElemAny, PropAny and RefAny
+ *   (*) AHeapAny contains some things other than ElemAny, and PropAny
  *       that don't have explicit nodes in the lattice yet.  (Like the
  *       lvalBlackhole, etc.)  It's hard for this to matter to client code for
  *       now because we don't expose an intersection or difference operation.
+ *
+ *  (**) MIBase is a pointer, and MIPropS is an encoded value, so neither is
+ *       UnknownTV, but its hard to find the right spot for them in this
+ *       diagram.
  */
 struct AliasClass;
 
 //////////////////////////////////////////////////////////////////////
 
+namespace detail {
+FPRelOffset frame_base_offset(SSATmp* fp);
+}
+
+#define FRAME_RELATIVE(Name, T2, name2)                                       \
+  struct Name {                                                               \
+    Name(SSATmp* fp, T2 v) : base{detail::frame_base_offset(fp)}, name2{v} {} \
+    Name(FPRelOffset off, T2 v) : base{off}, name2{v} {}                      \
+    FPRelOffset base;                                                         \
+    T2 name2;                                                                 \
+  }
+
+
 /*
  * Special data for locations known to be a set of locals on the frame `fp'.
  */
-struct AFrame { SSATmp* fp; AliasIdSet ids; };
+FRAME_RELATIVE(AFrame, AliasIdSet, ids);
 
 /*
- * A specific php iterator's position value (m_pos).
+ * Iterator state. We track changes to each field of the iterator separately.
+ * Doing so isn't particularly useful right now, because IterInit / IterNext
+ * are monolithic ops that touch all iter fields, but it would be useful if
+ * specialize iterators based on base type. (Specialized code would write to
+ * each field directly, and load- and store- elim could kick in.)
  */
-struct AIterPos  { SSATmp* fp; uint32_t id; };
+FRAME_RELATIVE(AIterBase, uint32_t, id);
+FRAME_RELATIVE(AIterType, uint32_t, id);
+FRAME_RELATIVE(AIterPos, uint32_t, id);
+FRAME_RELATIVE(AIterEnd, uint32_t, id);
 
 /*
- * A specific php iterator's base and initialization state, for non-mutable
- * iterators.
- *
- * Instances of this AliasClass cover both the memory storing the pointer to
- * the object being iterated, and the initialization flags (itype and next
- * helper)---the reason for this is that nothing may load/store the
- * initialization state if it isn't also going to load/store the base pointer.
+ * A location inside of an object property, with base `obj' at physical index
+ * `index' from the ObjectData*.
  */
-struct AIterBase { SSATmp* fp; uint32_t id; };
-
-/*
- * A location inside of an object property, with base `obj' and byte offset
- * `offset' from the ObjectData*.
- */
-struct AProp  { SSATmp* obj; uint32_t offset; };
+struct AProp  { SSATmp* obj; uint16_t offset; };
 
 /*
  * A integer index inside of an array, with base `arr'.  The `arr' tmp is any
@@ -123,10 +145,25 @@ struct AElemS { SSATmp* arr; const StringData* key; };
 /*
  * A range of the stack, starting at `offset' from the outermost frame pointer,
  * and extending `size' slots deeper into the stack (toward lower memory
- * addresses).  The frame pointer is the same for all stack ranges in the IR
- * unit, and thus is not stored here.  The reason ranges extend downward is
- * that it is common to need to refer to the class of all stack locations below
- * some depth (this can be done by putting INT32_MAX in the size).
+ * addresses).  As an example, `acls = AStack { fp, FPRelOffset{-1}, 3 }`
+ * represents the following:
+ *
+ *         ___________________
+ *        | (i am an actrec)  |
+ *  high  |___________________| ___...fp points here        __
+ *    ^   |   local 0         |                               \
+ *    |   |___________________| ___...start counting here: 1  |
+ *    |   |   local 1         |                               | acls
+ *    |   |___________________| ___...2                       |
+ *    |   |   local 2         |                               |
+ *   low  |___________________| ___...3; we're done         __/
+ *        |   local 3         |
+ *        |___________________|
+ *
+ * The frame pointer is the same for all stack ranges in the IR unit, and thus
+ * is not stored here.  The reason ranges extend downward is that it is common
+ * to need to refer to the class of all stack locations below some depth (this
+ * can be done by putting INT32_MAX in the size).
  *
  * Some notes on how the evaluation stack is treated for alias analysis:
  *
@@ -144,20 +181,26 @@ struct AElemS { SSATmp* arr; const StringData* key; };
  *     HHBC-level semantics.)
  */
 struct AStack {
-  // We can create an AStack from either a stack pointer or a frame
-  // pointer. This constructor canonicalizes the offset to base on the
-  // outermost frame pointer.
-  explicit AStack(SSATmp* base, int32_t offset, int32_t size);
-  explicit AStack(int32_t o, int32_t s) : offset(o), size(s) {}
+  // We can create an AStack from either a stack pointer or a frame pointer.
+  // These constructors canonicalize the offset to be relative to the outermost
+  // frame pointer.
+  explicit AStack(SSATmp* fp, FPRelOffset offset, int32_t size);
+  explicit AStack(SSATmp* sp, IRSPRelOffset offset, int32_t size);
+  explicit AStack(FPRelOffset o, int32_t s) : offset(o), size(s) {}
 
-  int32_t offset;
+  FPRelOffset offset;
   int32_t size;
 };
 
 /*
- * A RefData referenced by a BoxedCell.
+ * A TypedValue stored in rds.
+ *
+ * Assumes this handle uniquely identifies a TypedValue in rds - it's
+ * not required that the tv is at the start of the rds storage.
  */
-struct ARef { SSATmp* boxed; };
+struct ARds { rds::Handle handle; };
+
+#undef FRAME_RELATIVE
 
 //////////////////////////////////////////////////////////////////////
 
@@ -166,27 +209,32 @@ struct AliasClass {
     BEmpty    = 0,
     // The relative order of the values are used in operator| to decide
     // which specialization is more useful.
-    BFrame    = 1 << 0,
-    BIterPos  = 1 << 1,
-    BIterBase = 1 << 2,
-    BProp     = 1 << 3,
-    BElemI    = 1 << 4,
-    BElemS    = 1 << 5,
-    BStack    = 1 << 6,
-    BRef      = 1 << 7,
+    BFrame          = 1U << 0,
+    BIterBase       = 1U << 1,
+    BIterType       = 1U << 2,
+    BIterPos        = 1U << 3,
+    BIterEnd        = 1U << 4,
+    BProp           = 1U << 5,
+    BElemI          = 1U << 6,
+    BElemS          = 1U << 7,
+    BStack          = 1U << 8,
+    BRds            = 1U << 9,
 
     // Have no specialization, put them last.
-    BMITempBase = 1 << 8,
-    BMITvRef    = 1 << 9,
-    BMITvRef2   = 1 << 10,
-    BMIBase     = 1 << 11,
+    BMITempBase = 1U << 11,
+    BMITvRef    = 1U << 12,
+    BMITvRef2   = 1U << 13,
+    BMIBase     = 1U << 14,
+    BMIPropS    = 1U << 15,
 
     BElem      = BElemI | BElemS,
-    BHeap      = BElem | BProp | BRef,
+    BHeap      = BElem | BProp,
     BMIStateTV = BMITempBase | BMITvRef | BMITvRef2,
-    BMIState   = BMIStateTV | BMIBase,
+    BMIState   = BMIStateTV | BMIBase | BMIPropS,
 
-    BUnknownTV = ~(BIterPos | BIterBase | BMIBase),
+    BIter      = BIterBase | BIterType | BIterPos | BIterEnd,
+
+    BUnknownTV = ~(BIter | BMIBase | BMIPropS),
 
     BUnknown   = static_cast<uint32_t>(-1),
   };
@@ -207,13 +255,15 @@ struct AliasClass {
    * where it is.
    */
   /* implicit */ AliasClass(AFrame);
-  /* implicit */ AliasClass(AIterPos);
   /* implicit */ AliasClass(AIterBase);
+  /* implicit */ AliasClass(AIterType);
+  /* implicit */ AliasClass(AIterPos);
+  /* implicit */ AliasClass(AIterEnd);
   /* implicit */ AliasClass(AProp);
   /* implicit */ AliasClass(AElemI);
   /* implicit */ AliasClass(AElemS);
   /* implicit */ AliasClass(AStack);
-  /* implicit */ AliasClass(ARef);
+  /* implicit */ AliasClass(ARds);
 
   /*
    * Exact equality.
@@ -241,6 +291,7 @@ struct AliasClass {
    * Guaranteed to be commutative.
    */
   AliasClass operator|(AliasClass o) const;
+  AliasClass& operator|=(AliasClass o) { return *this = *this | o; }
 
   /*
    * Returns whether this alias class is a non-strict-subset of another one.
@@ -264,14 +315,16 @@ struct AliasClass {
    *
    * Returns folly::none if this alias class has no specialization in that way.
    */
-  folly::Optional<AFrame>    frame() const;
-  folly::Optional<AIterPos>  iterPos() const;
-  folly::Optional<AIterBase> iterBase() const;
-  folly::Optional<AProp>     prop() const;
-  folly::Optional<AElemI>    elemI() const;
-  folly::Optional<AElemS>    elemS() const;
-  folly::Optional<AStack>    stack() const;
-  folly::Optional<ARef>      ref() const;
+  folly::Optional<AFrame>          frame() const;
+  folly::Optional<AIterBase>       iterBase() const;
+  folly::Optional<AIterType>       iterType() const;
+  folly::Optional<AIterPos>        iterPos() const;
+  folly::Optional<AIterEnd>        iterEnd() const;
+  folly::Optional<AProp>           prop() const;
+  folly::Optional<AElemI>          elemI() const;
+  folly::Optional<AElemS>          elemS() const;
+  folly::Optional<AStack>          stack() const;
+  folly::Optional<ARds>            rds() const;
 
   /*
    * Conditionally access specific known information, but also checking that
@@ -281,14 +334,16 @@ struct AliasClass {
    *
    *   cls <= AFooAny ? cls.foo() : folly::none
    */
-  folly::Optional<AFrame>    is_frame() const;
-  folly::Optional<AIterPos>  is_iterPos() const;
-  folly::Optional<AIterBase> is_iterBase() const;
-  folly::Optional<AProp>     is_prop() const;
-  folly::Optional<AElemI>    is_elemI() const;
-  folly::Optional<AElemS>    is_elemS() const;
-  folly::Optional<AStack>    is_stack() const;
-  folly::Optional<ARef>      is_ref() const;
+  folly::Optional<AFrame>          is_frame() const;
+  folly::Optional<AIterBase>       is_iterBase() const;
+  folly::Optional<AIterType>       is_iterType() const;
+  folly::Optional<AIterPos>        is_iterPos() const;
+  folly::Optional<AIterEnd>        is_iterEnd() const;
+  folly::Optional<AProp>           is_prop() const;
+  folly::Optional<AElemI>          is_elemI() const;
+  folly::Optional<AElemS>          is_elemS() const;
+  folly::Optional<AStack>          is_stack() const;
+  folly::Optional<ARds>            is_rds() const;
 
   /*
    * Like the other foo() and is_foo() methods, but since we don't have an
@@ -301,18 +356,19 @@ private:
   enum class STag {
     None,
     Frame,
-    IterPos,
     IterBase,
+    IterType,
+    IterPos,
+    IterEnd,
     Prop,
     ElemI,
     ElemS,
     Stack,
-    Ref,
+    Rds,
 
-    IterBoth,  // A union of base and pos for the same iter.
+    IterAll,  // The union of all fields for a given iterator.
   };
-  struct UIterBoth { SSATmp* fp; uint32_t id; };
-
+  struct UIterAll { FPRelOffset base; uint32_t id; };
 private:
   friend std::string show(AliasClass);
   friend AliasClass canonicalize(AliasClass);
@@ -323,10 +379,8 @@ private:
   bool diffSTagSubclassData(rep relevant_bits, AliasClass) const;
   bool maybeData(AliasClass) const;
   bool diffSTagMaybeData(rep relevant_bits, AliasClass) const;
-  folly::Optional<UIterBoth> asUIter() const;
+  folly::Optional<UIterAll> asUIter() const;
   bool refersToSameIterHelper(AliasClass) const;
-  static folly::Optional<AliasClass>
-    precise_diffSTag_unionData(rep newBits, AliasClass, AliasClass);
   static AliasClass unionData(rep newBits, AliasClass, AliasClass);
   static rep stagBits(STag tag);
 
@@ -334,43 +388,49 @@ private:
   rep m_bits;
   STag m_stag{STag::None};
   union {
-    AFrame    m_frame;
-    AIterPos  m_iterPos;
-    AIterBase m_iterBase;
-    AProp     m_prop;
-    AElemI    m_elemI;
-    AElemS    m_elemS;
-    AStack    m_stack;
-    ARef      m_ref;
+    AFrame          m_frame;
+    AIterBase       m_iterBase;
+    AIterType       m_iterType;
+    AIterPos        m_iterPos;
+    AIterEnd        m_iterEnd;
+    AProp           m_prop;
+    AElemI          m_elemI;
+    AElemS          m_elemS;
+    AStack          m_stack;
+    ARds            m_rds;
 
-    UIterBoth m_iterBoth;
+    UIterAll        m_iterAll;
   };
 };
 
 //////////////////////////////////////////////////////////////////////
 
 /* General alias classes. */
-auto const AEmpty       = AliasClass{AliasClass::BEmpty};
-auto const AFrameAny    = AliasClass{AliasClass::BFrame};
-auto const AIterPosAny  = AliasClass{AliasClass::BIterPos};
-auto const AIterBaseAny = AliasClass{AliasClass::BIterBase};
-auto const APropAny     = AliasClass{AliasClass::BProp};
-auto const AHeapAny     = AliasClass{AliasClass::BHeap};
-auto const ARefAny      = AliasClass{AliasClass::BRef};
-auto const AStackAny    = AliasClass{AliasClass::BStack};
-auto const AElemIAny    = AliasClass{AliasClass::BElemI};
-auto const AElemSAny    = AliasClass{AliasClass::BElemS};
-auto const AElemAny     = AliasClass{AliasClass::BElem};
-auto const AMIStateTV   = AliasClass{AliasClass::BMIStateTV};
-auto const AMIStateAny  = AliasClass{AliasClass::BMIState};
-auto const AUnknownTV   = AliasClass{AliasClass::BUnknownTV};
-auto const AUnknown     = AliasClass{AliasClass::BUnknown};
+auto const AEmpty             = AliasClass{AliasClass::BEmpty};
+auto const AFrameAny          = AliasClass{AliasClass::BFrame};
+auto const AIterBaseAny       = AliasClass{AliasClass::BIterBase};
+auto const AIterTypeAny       = AliasClass{AliasClass::BIterType};
+auto const AIterPosAny        = AliasClass{AliasClass::BIterPos};
+auto const AIterEndAny        = AliasClass{AliasClass::BIterEnd};
+auto const AIterAny           = AliasClass{AliasClass::BIter};
+auto const APropAny           = AliasClass{AliasClass::BProp};
+auto const AHeapAny           = AliasClass{AliasClass::BHeap};
+auto const AStackAny          = AliasClass{AliasClass::BStack};
+auto const ARdsAny            = AliasClass{AliasClass::BRds};
+auto const AElemIAny          = AliasClass{AliasClass::BElemI};
+auto const AElemSAny          = AliasClass{AliasClass::BElemS};
+auto const AElemAny           = AliasClass{AliasClass::BElem};
+auto const AMIStateTV         = AliasClass{AliasClass::BMIStateTV};
+auto const AMIStateAny        = AliasClass{AliasClass::BMIState};
+auto const AUnknownTV         = AliasClass{AliasClass::BUnknownTV};
+auto const AUnknown           = AliasClass{AliasClass::BUnknown};
 
 /* Alias classes for specific MInstrState fields. */
-auto const AMIStateTempBase = AliasClass{AliasClass::BMITempBase};
-auto const AMIStateTvRef    = AliasClass{AliasClass::BMITvRef};
-auto const AMIStateTvRef2   = AliasClass{AliasClass::BMITvRef2};
-auto const AMIStateBase     = AliasClass{AliasClass::BMIBase};
+auto const AMIStateTempBase   = AliasClass{AliasClass::BMITempBase};
+auto const AMIStateTvRef      = AliasClass{AliasClass::BMITvRef};
+auto const AMIStateTvRef2     = AliasClass{AliasClass::BMITvRef2};
+auto const AMIStateBase       = AliasClass{AliasClass::BMIBase};
+auto const AMIStatePropS      = AliasClass{AliasClass::BMIPropS};
 
 //////////////////////////////////////////////////////////////////////
 

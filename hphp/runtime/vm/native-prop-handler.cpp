@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,7 +29,7 @@ void registerNativePropHandler(const String& className,
                                NativePropHandler::IssetFunc isset,
                                NativePropHandler::UnsetFunc unset) {
 
-  assert(s_nativePropHandlerMap.find(className.get()) ==
+  assertx(s_nativePropHandlerMap.find(className.get()) ==
     s_nativePropHandlerMap.end());
 
   NativePropHandler propHandler;
@@ -71,7 +71,7 @@ Variant (*PropAccessorMap::get(const String& name))(const Object& this_) {
 }
 
 void (*PropAccessorMap::set(const String& name))
-     (const Object& this_, Variant& value) {
+     (const Object& this_, const Variant& value) {
   return (*lookupProp(name))->set;
 }
 
@@ -96,29 +96,29 @@ PropAccessorMap::const_iterator PropAccessorMap::lookupProp(
 
 Variant getProp(const Object& obj, const String& name) {
   auto nph = obj->getVMClass()->getNativePropHandler();
-  assert(nph);
-  assert(nph->get);
+  assertx(nph);
+  assertx(nph->get);
   return nph->get(obj, name);
 }
 
-Variant setProp(const Object& obj, const String& name, Variant& value) {
+Variant setProp(const Object& obj, const String& name, const Variant& value) {
   auto nph = obj->getVMClass()->getNativePropHandler();
-  assert(nph);
-  assert(nph->set);
+  assertx(nph);
+  assertx(nph->set);
   return nph->set(obj, name, value);
 }
 
 Variant issetProp(const Object& obj, const String& name) {
   auto nph = obj->getVMClass()->getNativePropHandler();
-  assert(nph);
-  assert(nph->isset);
+  assertx(nph);
+  assertx(nph->isset);
   return nph->isset(obj, name);
 }
 
 Variant unsetProp(const Object& obj, const String& name) {
   auto nph = obj->getVMClass()->getNativePropHandler();
-  assert(nph);
-  assert(nph->unset);
+  assertx(nph);
+  assertx(nph->unset);
   return nph->unset(obj, name);
 }
 

@@ -1,10 +1,14 @@
 <?hh
 
-function block() { return RescheduleWaitHandle::create(1,1); };
-
+function block() {
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
+}
 async function test() {
-  $arr3 = array(1,2,3);
-  $arr5 = array(1,2,3,4,5);
+  $arr3 = varray[1,2,3];
+  $arr5 = varray[1,2,3,4,5];
   foreach ($arr3 as $x) {
     foreach ($arr5 as $y) {
       if ($x>=2 && $y==3) {
@@ -17,14 +21,18 @@ async function test() {
 
 async function test2() {
   await block();
-  $arr3 = array(1,2,3);
-  $arr5 = array(1,2,3,4,5);
+  $arr3 = varray[1,2,3];
+  $arr5 = varray[1,2,3,4,5];
   foreach ($arr3 as $x) {
     foreach ($arr5 as $y) {
       echo $y;
     }
   }
 }
+
+<<__EntryPoint>>
+function main_iterator() {
+;
 
 $t = test();
 echo "\n";
@@ -34,3 +42,4 @@ $t2 = test2();
 echo "\n";
 HH\Asio\join($t2);
 echo "\n";
+}

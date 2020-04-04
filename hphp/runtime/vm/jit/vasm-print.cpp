@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2013 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,10 @@
 
 #include "hphp/runtime/vm/jit/vasm-print.h"
 
+#include <sstream>
 #include <type_traits>
 
-#include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/vasm.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
@@ -29,6 +28,7 @@
 #include "hphp/runtime/vm/jit/vasm-visit.h"
 
 #include "hphp/util/abi-cxx.h"
+#include "hphp/util/arch.h"
 #include "hphp/util/ringbuffer.h"
 #include "hphp/util/stack-trace.h"
 
@@ -93,6 +93,11 @@ struct FormatVisitor {
   void imm(TCA* addr) {
     str << sep() << folly::format("{}", addr);
   }
+  template<typename T>
+  void imm(VdataPtr<T> ptr) {
+    str << folly::format("{}{}{}",
+                         sep(), ptr.getRaw(), ptr.bound() ? "" : "(unbound)");
+  }
   void imm(const CallSpec& call) {
     switch (call.kind()) {
     default:
@@ -101,11 +106,11 @@ struct FormatVisitor {
     case CallSpec::Kind::Direct:
     case CallSpec::Kind::Smashable:
       return imm((TCA)call.address());
-    case CallSpec::Kind::ArrayVirt:
-      str << sep() << folly::format("ArrayVirt({})", call.arrayTable());
-      break;
     case CallSpec::Kind::Destructor:
       str << sep() << folly::format("destructor({})", show(call.reg()));
+      break;
+    case CallSpec::Kind::ObjDestructor:
+      str << sep() << folly::format("obj-destructor({})", show(call.reg()));
       break;
     case CallSpec::Kind::Stub:
       return imm(call.stubAddr());
@@ -127,11 +132,7 @@ struct FormatVisitor {
       str << "nullptr";
     }
   }
-  void imm(ServiceRequest req) {
-    str << sep() << svcreq::to_name(req);
-  }
   void imm(TransFlags f) {
-    if (f.noinlineSingleton) str << sep() << "noinlineSingleton";
   }
   void imm(DestType dt) {
     str << sep() << destTypeName(dt);
@@ -141,6 +142,11 @@ struct FormatVisitor {
   }
   void imm(RoundDirection rd) {
     str << sep() << show(rd);
+  }
+  void imm(Vflags /*fl*/) {}
+
+  void imm(Reason r) {
+    str << sep() << show(r);
   }
 
   void imm(RegSet x) { print(x); }
@@ -219,41 +225,92 @@ std::string show(Vreg r) {
   if (!r.isValid()) return "%?";
   std::ostringstream str;
   if (r.isPhys()) {
-    mcg->backEnd().streamPhysReg(str, r);
+    str << show(r.physReg());
   } else {
     str << "%" << size_t(r);
   }
   return str.str();
 }
 
+std::string show(const VregSet& s) {
+  std::ostringstream str;
+  auto comma = false;
+  str << '{';
+  for (auto const r : s) {
+    if (comma) str << ", ";
+    comma = true;
+    str << show(r);
+  }
+  str << '}';
+  return str.str();
+}
+
+std::string show(const VregList& l) {
+  using namespace folly::gen;
+  return folly::sformat(
+    "[{}]",
+    from(l)
+    | map([] (Vreg r) { return show(r); })
+    | unsplit<std::string>(", ")
+  );
+}
+
 std::string show(Vptr p) {
-  // [%fs + %base + disp + %index * scale]
-  std::string str = "[";
-  auto prefix = false;
-  if (p.seg == Vptr::FS) {
-    str += "%fs";
-    prefix = true;
+  std::string str;
+  switch(arch()) {
+    case Arch::X64:
+    case Arch::ARM: {
+      // [%fs + %base + disp + %index * scale]
+      str = "[";
+      auto prefix = false;
+      if (p.seg == Segment::FS) {
+        str += "%fs";
+        prefix = true;
+      }
+      if (p.seg == Segment::GS) {
+        str += "%gs";
+        prefix = true;
+      }
+      if (p.base.isValid()) {
+        folly::toAppend(prefix ? " + " : "", show(p.base), &str);
+        prefix = true;
+      }
+      if (p.disp) {
+        folly::format(&str, "{}{:#x}",
+                      prefix ? p.disp < 0 ? " - " : " + " : "",
+                      prefix ? std::abs(p.disp) : p.disp);
+        prefix = true;
+      }
+      if (p.index.isValid()) {
+        folly::toAppend(prefix ? " + " : "", show(p.index), &str);
+        if (p.scale != 1) folly::toAppend(" * ", p.scale, &str);
+      }
+      str += ']';
+      return str;
+    }
+    case Arch::PPC64: {
+      auto prefix = false;
+      if (p.disp) {
+        folly::format(&str, "{}{:#x}",
+                      p.disp < 0 ? "-" : "+",
+                      std::abs(p.disp));
+        prefix = true;
+      }
+
+      if (p.base.isValid()) {
+        folly::toAppend(prefix ? "(" : "", show(p.base), &str);
+        if (prefix == true) {
+          folly::toAppend(")", &str);
+        }
+        prefix = true;
+      }
+      if (p.index.isValid()) {
+        folly::toAppend(prefix ? "," : "", show(p.index), &str);
+      }
+      return str;
+    }
   }
-  if (p.seg == Vptr::GS) {
-    str += "%gs";
-    prefix = true;
-  }
-  if (p.base.isValid()) {
-    folly::toAppend(prefix ? " + " : "", show(p.base), &str);
-    prefix = true;
-  }
-  if (p.disp) {
-    folly::format(&str, "{}{:#x}",
-                  prefix ? p.disp < 0 ? " - " : " + " : "",
-                  prefix ? std::abs(p.disp) : p.disp);
-    prefix = true;
-  }
-  if (p.index.isValid()) {
-    folly::toAppend(prefix ? " + " : "", show(p.index), &str);
-    if (p.scale != 1) folly::toAppend(" * ", p.scale, &str);
-  }
-  str += ']';
-  return str;
+  not_reached();
 }
 
 std::string show(Vconst c) {
@@ -270,9 +327,6 @@ std::string show(Vconst c) {
       break;
     case Vconst::Double:
       str += 'd';
-      break;
-    case Vconst::ThreadLocal:
-      str += "tl";
       break;
   }
   return str;
@@ -298,28 +352,29 @@ std::string show(const Vunit& unit, const Vinstr& inst) {
 }
 
 void printBlock(std::ostream& out, const Vunit& unit,
-                const PredVector& preds, Vlabel b) {
+                const PredVector& preds, Vlabel b,
+                const IRInstruction*& origin) {
   auto& block = unit.blocks[b];
   out << '\n' << color(ANSI_COLOR_MAGENTA);
-  out << folly::format(" B{: <11} {}", size_t(b),
-           area_names[int(block.area)]);
+  out << folly::format(" B{: <6} {} ({})", size_t(b),
+                       area_names[int(block.area_idx)],
+                       block.weight);
   for (auto p : preds[b]) out << ", B" << size_t(p);
-  out << color(ANSI_COLOR_END);
+  out << color(ANSI_COLOR_END) << '\n';
 
   if (block.code.empty()) {
     out << "        <empty>\n";
     return;
   }
 
-  if (!block.code.front().origin) out << '\n';
-
-  const IRInstruction* currentOrigin = nullptr;
   for (auto& inst : block.code) {
-    if (currentOrigin != inst.origin && inst.origin) {
-      currentOrigin = inst.origin;
-      out << "\n    " << currentOrigin->toString() << '\n';
+    out << "      ";
+    if (origin != inst.origin && inst.origin) {
+      origin = inst.origin;
+      out << folly::format("{:<45} # {}\n", show(unit, inst), *origin);
+    } else {
+      out << show(unit, inst) << '\n';
     }
-    out << "        " << show(unit, inst) << '\n';
   }
 }
 
@@ -362,8 +417,9 @@ std::string show(const Vunit& unit) {
 
   // Print reachable blocks first.
   auto reachableBlocks = sortBlocks(unit);
+  const IRInstruction* origin = nullptr;
   for (auto b : reachableBlocks) {
-    printBlock(out, unit, preds, b);
+    printBlock(out, unit, preds, b, origin);
     reachableSet.set(b);
   }
 
@@ -374,7 +430,9 @@ std::string show(const Vunit& unit) {
   if (Trace::moduleEnabledRelease(Trace::vasm, kVasmUnreachableLevel)) {
     out << "\nUnreachable blocks:\n";
     for (size_t b = 0; b < unit.blocks.size(); b++) {
-      if (!reachableSet.test(b)) printBlock(out, unit, preds, Vlabel{b});
+      if (!reachableSet.test(b)) {
+        printBlock(out, unit, preds, Vlabel{b}, origin);
+      }
     }
   } else {
     out << folly::format("\n{} unreachable blocks not shown. "

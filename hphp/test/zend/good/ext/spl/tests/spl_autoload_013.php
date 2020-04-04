@@ -1,7 +1,4 @@
-<?php
-$closure = function($class) {
-  echo "a called\n";
-};
+<?hh
 
 class Autoloader {
   private $dir;
@@ -12,15 +9,20 @@ class Autoloader {
     var_dump("{$this->dir}/$class.php");
   }
 }
+<<__EntryPoint>>
+function main_entry(): void {
+  $closure = function($class) {
+    echo "a called\n";
+  };
 
-$al1 = new Autoloader('d1');
-$al2 = new Autoloader('d2');
+  $al1 = new Autoloader('d1');
+  $al2 = new Autoloader('d2');
 
-spl_autoload_register($closure);
-spl_autoload_register($al1);
-spl_autoload_register($al2);
+  spl_autoload_register($closure);
+  spl_autoload_register($al1);
+  spl_autoload_register($al2);
 
-var_dump(spl_autoload_functions());
+  var_dump(spl_autoload_functions());
 
-?>
-===DONE===
+  echo "===DONE===\n";
+}

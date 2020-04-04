@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,14 +16,20 @@
 */
 
 #include "hphp/runtime/ext/pdo/pdo_driver.h"
+
+#include "hphp/util/hphp-config.h"
 #ifdef ENABLE_EXTENSION_PDO_SQLITE
 #include "hphp/runtime/ext/pdo_sqlite/pdo_sqlite.h"
 #endif
 #ifdef ENABLE_EXTENSION_PDO_MYSQL
 #include "hphp/runtime/ext/pdo_mysql/pdo_mysql.h"
 #endif
+#ifdef ENABLE_EXTENSION_PGSQL
+#include "hphp/runtime/ext/pgsql/pdo_pgsql.h"
+#endif
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/zend-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -37,6 +43,9 @@ static PDOSqlite s_sqlite_driver;
 #endif
 #ifdef ENABLE_EXTENSION_PDO_MYSQL
 static PDOMySql s_mysql_driver;
+#endif
+#ifdef ENABLE_EXTENSION_PGSQL
+static PDOPgSql s_pgsql_driver;
 #endif
 
 const StaticString s_general_error_code("HY000");
@@ -67,7 +76,7 @@ req::ptr<PDOResource> PDODriver::createResource(const String& datasource,
     bool hasError = conn->fetchErr(nullptr, err);
 
     if (hasError && !err.empty()) {
-      throw_pdo_exception(s_general_error_code, uninit_null(),
+      throw_pdo_exception(uninit_null(),
                           "[%" PRId64 "]: %s",
                           err[0].toInt64(), err[1].toString().data());
     }
@@ -79,80 +88,153 @@ req::ptr<PDOResource> PDODriver::createResource(const String& datasource,
 ///////////////////////////////////////////////////////////////////////////////
 // PDOConnection
 
-bool PDOConnection::support(SupportedMethod method) {
+bool PDOConnection::support(SupportedMethod /*method*/) {
   return false;
+}
+
+int PDOConnection::parseDataSource(const char *data_source,
+                                   int data_source_len,
+                                   struct pdo_data_src_parser *parsed,
+                                   int nparams,
+                                   folly::StringPiece separators/* = ";" */) {
+  int i, j;
+  int valstart = -1;
+  int semi = -1;
+  int optstart = 0;
+  int nlen;
+  int n_matches = 0;
+
+  char flags[256];
+  string_charmask(separators.data(), separators.size(), flags);
+
+  // Can always end with \0
+  flags[0] = 1;
+
+  i = 0;
+  while (i < data_source_len) {
+    /* looking for NAME= */
+
+    if (data_source[i] == '\0') {
+      break;
+    }
+
+    if (data_source[i] != '=') {
+      ++i;
+      continue;
+    }
+
+    valstart = ++i;
+
+    /* now we're looking for VALUE<separator> or just VALUE<NUL> */
+    semi = -1;
+    while (i < data_source_len) {
+      if (flags[(unsigned char)data_source[i]]) {
+        semi = i++;
+        break;
+      }
+      ++i;
+    }
+
+    if (semi == -1) {
+      semi = i;
+    }
+
+    /* find the entry in the array */
+    nlen = valstart - optstart - 1;
+    for (j = 0; j < nparams; j++) {
+      if (0 == strncmp(data_source + optstart, parsed[j].optname, nlen) &&
+          parsed[j].optname[nlen] == '\0') {
+        /* got a match */
+        if (parsed[j].freeme) {
+          free(parsed[j].optval);
+        }
+        parsed[j].optval = strndup(data_source + valstart, semi - valstart);
+        parsed[j].freeme = 1;
+        ++n_matches;
+        break;
+      }
+    }
+
+    while (i < data_source_len && isspace(data_source[i])) {
+      i++;
+    }
+
+    optstart = i;
+  }
+
+  return n_matches;
 }
 
 bool PDOConnection::closer() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOConnection::preparer(const String& sql, sp_PDOStatement *stmt,
-                             const Variant& options) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOConnection::preparer(const String& /*sql*/, sp_PDOStatement* /*stmt*/,
+                             const Variant& /*options*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-int64_t PDOConnection::doer(const String& sql) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+int64_t PDOConnection::doer(const String& /*sql*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return 0;
 }
 
-bool PDOConnection::quoter(const String& input, String &quoted,
-                           PDOParamType paramtype) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOConnection::quoter(const String& /*input*/, String& /*quoted*/,
+                           PDOParamType /*paramtype*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
 bool PDOConnection::begin() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
 bool PDOConnection::commit() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
 bool PDOConnection::rollback() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOConnection::setAttribute(int64_t attr, const Variant& value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOConnection::setAttribute(int64_t /*attr*/, const Variant& /*value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-String PDOConnection::lastId(const char *name) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+String PDOConnection::lastId(const char* /*name*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return String();
 }
 
-bool PDOConnection::fetchErr(PDOStatement* stmt, Array &info) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOConnection::fetchErr(PDOStatement* /*stmt*/, Array& /*info*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-int PDOConnection::getAttribute(int64_t attr, Variant &value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+int PDOConnection::getAttribute(int64_t /*attr*/, Variant& /*value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return -1;
 }
 
 bool PDOConnection::checkLiveness() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
@@ -179,9 +261,10 @@ PDOColumn::~PDOColumn() {
 // PDOBoundParam
 
 PDOBoundParam::PDOBoundParam()
-    : paramno(0), max_value_len(0), param_type(PDO_PARAM_NULL),
-      is_param(false), driver_data(NULL) {
-}
+  : paramno(0)
+  , param_type(PDO_PARAM_NULL)
+  , driver_ext_data(nullptr)
+{}
 
 PDOBoundParam::~PDOBoundParam() {
   sweep();
@@ -215,66 +298,67 @@ void PDOStatement::sweep() {
   // nothing, but kids can overwrite
 }
 
-bool PDOStatement::support(SupportedMethod method) {
+bool PDOStatement::support(SupportedMethod /*method*/) {
   return false;
 }
 
 bool PDOStatement::executer() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOStatement::fetcher(PDOFetchOrientation ori, long offset) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::fetcher(PDOFetchOrientation /*ori*/, long /*offset*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOStatement::describer(int colno) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::describer(int /*colno*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOStatement::getColumn(int colno, Variant &value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::getColumn(int /*colno*/, Variant& /*value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOStatement::paramHook(PDOBoundParam* param, PDOParamEvent event_type) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::paramHook(PDOBoundParam* /*param*/,
+                             PDOParamEvent /*event_type*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-bool PDOStatement::setAttribute(int64_t attr, const Variant& value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::setAttribute(int64_t /*attr*/, const Variant& /*value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
-int PDOStatement::getAttribute(int64_t attr, Variant &value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+int PDOStatement::getAttribute(int64_t /*attr*/, Variant& /*value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return -1;
 }
 
-bool PDOStatement::getColumnMeta(int64_t colno, Array &return_value) {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+bool PDOStatement::getColumnMeta(int64_t /*colno*/, Array& /*return_value*/) {
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
 bool PDOStatement::nextRowset() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }
 
 bool PDOStatement::cursorCloser() {
-  throw_pdo_exception(uninit_null(), uninit_null(),
+  throw_pdo_exception(uninit_null(),
                       "This driver doesn't support %s", __func__);
   return false;
 }

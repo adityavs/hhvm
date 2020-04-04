@@ -15,9 +15,9 @@ function reverse($input) {
 }
 
 function main() {
-  reverse(['foo', 'bar', 'baz']);
-  reverse(['a' => 'foo', 'b' => 'bar', 'c' => 'baz']);
-  reverse([10 => 'foo', 20 => 'bar', 30 => 'baz']);
+  reverse(varray['foo', 'bar', 'baz']);
+  reverse(darray['a' => 'foo', 'b' => 'bar', 'c' => 'baz']);
+  reverse(darray[10 => 'foo', 20 => 'bar', 30 => 'baz']);
   reverse(Vector {'foo', 'bar', 'baz'});
   reverse(Set {'foo', 'bar', 'baz'});
   reverse(Map { 'a' => 'foo', 'b' => 'bar', 'c' => 'baz'});
@@ -28,4 +28,8 @@ function main() {
   reverse(ImmMap { 10 => 'foo', 20 => 'bar', 30 => 'baz'});
 }
 
+
+<<__EntryPoint>>
+function main_array_reverse() {
 main();
+}

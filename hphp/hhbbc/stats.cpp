@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,17 +33,21 @@
 #include <folly/String.h>
 #include <folly/Format.h>
 #include <folly/ScopeGuard.h>
+#include <folly/portability/Stdlib.h>
 
-#include "hphp/util/trace.h"
 #include "hphp/runtime/vm/hhbc.h"
 
-#include "hphp/hhbbc/misc.h"
-#include "hphp/hhbbc/representation.h"
-#include "hphp/hhbbc/parallel.h"
+#include "hphp/util/trace.h"
+
+#include "hphp/hhbbc/analyze.h"
+#include "hphp/hhbbc/func-util.h"
 #include "hphp/hhbbc/index.h"
 #include "hphp/hhbbc/interp-internal.h"
 #include "hphp/hhbbc/interp.h"
-#include "hphp/hhbbc/analyze.h"
+#include "hphp/hhbbc/context.h"
+#include "hphp/hhbbc/misc.h"
+#include "hphp/hhbbc/parallel.h"
+#include "hphp/hhbbc/representation.h"
 
 namespace HPHP { namespace HHBBC {
 
@@ -51,12 +55,11 @@ namespace HPHP { namespace HHBBC {
 
 namespace {
 
+TRACE_SET_MOD(hhbbc_stats);
+
 //////////////////////////////////////////////////////////////////////
 
 #define STAT_TYPES                              \
-  X(Gen)                                        \
-  X(InitGen)                                    \
-  X(Ref)                                        \
   X(Cell)                                       \
   X(InitCell)                                   \
   X(Unc)                                        \
@@ -65,13 +68,10 @@ namespace {
   X(OptObj)                                     \
   X(Arr)                                        \
   X(SArr)                                       \
-  X(CArr)                                       \
   X(ArrE)                                       \
   X(ArrN)                                       \
   X(SArrN)                                      \
   X(SArrE)                                      \
-  X(CArrN)                                      \
-  X(CArrE)                                      \
   X(Null)                                       \
   X(Bottom)
 
@@ -110,12 +110,14 @@ using BuiltinInfo = tbb::concurrent_hash_map<
 struct Builtins {
   std::atomic<uint64_t> totalBuiltins;
   std::atomic<uint64_t> reducibleBuiltins;
-  BuiltinInfo builtinsInfo;
+  BuiltinInfo builtinsInfo{};
 };
 
 #define TAG(x) 1 +
 constexpr uint32_t kNumRATTags = REPO_AUTH_TYPE_TAGS 0 ;
 #undef TAG
+
+}
 
 struct Stats {
   std::array<std::atomic<uint64_t>,Op_count> op_counts;
@@ -124,11 +126,15 @@ struct Stats {
   std::atomic<uint64_t> ratL_specialized_array;
   std::atomic<uint64_t> ratStk_specialized_array;
   std::atomic<uint64_t> persistentClasses;
+  std::atomic<uint64_t> persistentRecords;
   std::atomic<uint64_t> persistentFunctions;
   std::atomic<uint64_t> uniqueClasses;
+  std::atomic<uint64_t> uniqueRecords;
   std::atomic<uint64_t> uniqueFunctions;
   std::atomic<uint64_t> totalClasses;
+  std::atomic<uint64_t> totalRecords;
   std::atomic<uint64_t> totalFunctions;
+  std::atomic<uint64_t> totalPseudoMains;
   std::atomic<uint64_t> totalMethods;
   std::atomic<uint64_t> persistentSPropsPub;
   std::atomic<uint64_t> persistentSPropsProt;
@@ -139,9 +145,10 @@ struct Stats {
   TypeStat privateStatics;
   TypeStat cgetmBase;
   TypeStat iterInitBase;
-  TypeStat iterInitKBase;
   Builtins builtins;
 };
+
+namespace {
 
 void type_stat_string(std::string& ret,
                       const std::string& prefix,
@@ -160,21 +167,22 @@ std::string show(const Builtins& builtins) {
   auto ret = std::string{};
 
   if (builtins.builtinsInfo.begin() != builtins.builtinsInfo.end()) {
-    ret += folly::format("Total number of builtin calls: {: >15}\n",
-                         builtins.totalBuiltins.load()).str();
-    ret += folly::format("Possible reducible builtins: {: >15}\n",
-                         builtins.reducibleBuiltins.load()).str();
+    folly::format(&ret, "Total number of builtin calls: {: >15}\n",
+                  builtins.totalBuiltins.load());
+    folly::format(&ret, "Possible reducible builtins: {: >15}\n",
+                  builtins.reducibleBuiltins.load());
 
     ret += "Builtins Info:\n";
     for (auto it = builtins.builtinsInfo.begin();
          it != builtins.builtinsInfo.end(); ++it) {
-      ret += folly::format(
+      folly::format(
+        &ret,
         "  {: >30} [tot:{: >8}, red:{: >8}]\t\ttype: {}\n",
         it->first,
         std::get<1>(it->second),
         std::get<2>(it->second),
         show(std::get<0>(it->second))
-      ).str();
+      );
     }
     ret += "\n";
   }
@@ -199,29 +207,36 @@ std::string show(const Stats& stats) {
   type_stat_string(ret, "priv_static",    stats.privateStatics);
   type_stat_string(ret, "cgetm_base",     stats.cgetmBase);
   type_stat_string(ret, "iterInit_base",  stats.iterInitBase);
-  type_stat_string(ret, "iterInitK_base", stats.iterInitKBase);
 
   folly::format(
     &ret,
     "       total_methods:  {: >8}\n"
+    "   total_pseudomains:  {: >8}\n"
     "         total_funcs:  {: >8}\n"
     "        unique_funcs:  {: >8}\n"
     "    persistent_funcs:  {: >8}\n"
     "       total_classes:  {: >8}\n"
     "      unique_classes:  {: >8}\n"
     "  persistent_classes:  {: >8}\n"
+    "       total_records:  {: >8}\n"
+    "      unique_records:  {: >8}\n"
+    "  persistent_records:  {: >8}\n"
     "\n"
     "        total_sprops:      {: >8}\n"
     "   persistent_sprops_pub:  {: >8}\n"
     "   persistent_sprops_prot: {: >8}\n"
     "   persistent_sprops_priv: {: >8}\n",
     stats.totalMethods.load(),
+    stats.totalPseudoMains.load(),
     stats.totalFunctions.load(),
     stats.uniqueFunctions.load(),
     stats.persistentFunctions.load(),
     stats.totalClasses.load(),
     stats.uniqueClasses.load(),
     stats.persistentClasses.load(),
+    stats.totalRecords.load(),
+    stats.uniqueRecords.load(),
+    stats.persistentRecords.load(),
     stats.totalSProps.load(),
     stats.persistentSPropsPub.load(),
     stats.persistentSPropsProt.load(),
@@ -277,44 +292,13 @@ struct StatsSS : ISS {
 
 //////////////////////////////////////////////////////////////////////
 
-template<class OpCode>
-bool in(StatsSS& env, const OpCode&) {
+template <class OpCode>
+bool in(StatsSS& /*env*/, const OpCode&) {
   return false;
 }
 
-bool in(StatsSS& env, const bc::IterInit& op) {
+bool in(StatsSS& env, const bc::IterInit& /*op*/) {
   add_type(env.stats.iterInitBase, topC(env));
-  return false;
-}
-
-bool in(StatsSS& env, const bc::IterInitK& op) {
-  add_type(env.stats.iterInitKBase, topC(env));
-  return false;
-}
-
-bool in(StatsSS& env, const bc::CGetM& op) {
-  auto const pops = op.numPop();
-  auto const ty = [&]() -> Type {
-    switch (op.mvec.lcode) {
-    case LL:
-      return env.state.locals[op.mvec.locBase->id];
-    case LC:
-    case LR:
-      return topT(env, pops - 1);
-    case LH:
-    case LGL:
-    case LGC:
-    case LNL:
-    case LNC:
-    case LSL:
-    case LSC:
-      return TTop;
-    case InvalidLocationCode:
-      break;
-    }
-    not_reached();
-  }();
-  add_type(env.stats.cgetmBase, ty);
   return false;
 }
 
@@ -333,7 +317,7 @@ bool in(StatsSS& env, const bc::FCallBuiltin& op) {
 
   default_dispatch(env, op);
 
-  auto builtin = op.str3;
+  auto builtin = op.str4;
   {
     BuiltinInfo::accessor acc;
     auto inserted = env.stats.builtins.builtinsInfo.insert(acc, builtin);
@@ -398,7 +382,7 @@ void collect_simple(Stats& stats, const Bytecode& bc) {
   }
 
   if (rat.mayHaveArrData()) {
-    if (rat.array()) {
+    if (rat.hasArrData()) {
       if (bc.op == Op::AssertRATL) {
         ++stats.ratL_specialized_array;
       } else {
@@ -410,12 +394,23 @@ void collect_simple(Stats& stats, const Bytecode& bc) {
 
 void collect_func(Stats& stats, const Index& index, php::Func& func) {
   if (!func.cls) {
-    ++stats.totalFunctions;
-    if (func.attrs & AttrPersistent) {
-      ++stats.persistentFunctions;
-    }
-    if (func.attrs & AttrUnique) {
-      ++stats.uniqueFunctions;
+    if (is_pseudomain(&func)) {
+      ++stats.totalPseudoMains;
+    } else {
+      ++stats.totalFunctions;
+      if (func.attrs & AttrPersistent) {
+        ++stats.persistentFunctions;
+      }
+      if (func.attrs & AttrUnique) {
+        if (!(func.attrs & AttrPersistent)) {
+          FTRACE(1, "Func unique but not persistent: {} : {}\n",
+                 func.name, func.unit->filename);
+        }
+        ++stats.uniqueFunctions;
+      } else {
+        FTRACE(1, "Func not unique: {} : {}\n",
+               func.name, func.unit->filename);
+      }
     }
   }
 
@@ -423,7 +418,9 @@ void collect_func(Stats& stats, const Index& index, php::Func& func) {
 
   add_type(stats.returns, ty);
 
-  for (auto& blk : func.blocks) {
+  for (auto const bid : func.blockRange()) {
+    auto const blk = func.blocks[bid].get();
+    if (blk->dead) continue;
     for (auto& bc : blk->hhbcs) {
       collect_simple(stats, bc);
     }
@@ -432,23 +429,43 @@ void collect_func(Stats& stats, const Index& index, php::Func& func) {
   if (!options.extendedStats) return;
 
   auto const ctx = Context { func.unit, &func, func.cls };
-  auto const fa  = analyze_func(index, ctx);
+  auto const fa  = analyze_func(index, ctx, CollectionOpts{});
   {
     Trace::Bump bumper{Trace::hhbbc, kStatsBump};
-    for (auto& blk : func.blocks) {
-      auto state = fa.bdata[blk->id].stateIn;
+    for (auto const bid : func.blockRange()) {
+      auto const blk = func.blocks[bid].get();
+      auto state = fa.bdata[bid].stateIn;
       if (!state.initialized) continue;
 
-      CollectedInfo collect { index, ctx, nullptr, nullptr };
-      Interp interp { index, ctx, collect, borrow(blk), state };
+      CollectedInfo collect {
+        index, ctx, nullptr, CollectionOpts {}, &fa
+      };
+      Interp interp { index, ctx, collect, bid, blk, state };
       for (auto& bc : blk->hhbcs) {
-        auto noop    = [] (php::Block&, const State&) {};
-        auto flags   = StepFlags {};
-        ISS env { interp, flags, noop };
+        auto noop    = [] (BlockId, const State*) {};
+        ISS env { interp, noop };
         StatsSS sss { env, stats };
         dispatch(sss, bc);
+        if (state.unreachable) break;
       }
     }
+  }
+}
+
+void collect_record(Stats& stats, const php::Record& rec) {
+  ++stats.totalRecords;
+  if (rec.attrs & AttrPersistent) {
+    ++stats.persistentRecords;
+  }
+  if (rec.attrs & AttrUnique) {
+    if (!(rec.attrs & AttrPersistent)) {
+      FTRACE(1, "Record unique but not persistent: {} : {}\n",
+             rec.name, rec.unit->filename);
+    }
+    ++stats.uniqueRecords;
+  } else {
+    FTRACE(1, "Record not unique: {} : {}\n",
+           rec.name, rec.unit->filename);
   }
 }
 
@@ -458,15 +475,22 @@ void collect_class(Stats& stats, const Index& index, const php::Class& cls) {
     ++stats.persistentClasses;
   }
   if (cls.attrs & AttrUnique) {
+    if (!(cls.attrs & AttrPersistent)) {
+      FTRACE(1, "Class unique but not persistent: {} : {}\n",
+             cls.name, cls.unit->filename);
+    }
     ++stats.uniqueClasses;
+  } else {
+    FTRACE(1, "Class not unique: {} : {}\n",
+           cls.name, cls.unit->filename);
   }
   stats.totalMethods += cls.methods.size();
 
   for (auto& kv : index.lookup_private_props(&cls)) {
-    add_type(stats.privateProps, kv.second);
+    add_type(stats.privateProps, kv.second.ty);
   }
   for (auto& kv : index.lookup_private_statics(&cls)) {
-    add_type(stats.privateStatics, kv.second);
+    add_type(stats.privateStatics, kv.second.ty);
   }
 
   for (auto& prop : cls.properties) {
@@ -493,6 +517,9 @@ void collect_stats(Stats& stats,
           collect_func(stats, index, *m);
         }
       }
+      for (auto& r : unit->records) {
+        collect_record(stats, *r);
+      }
       for (auto& x : unit->funcs) {
         collect_func(stats, index, *x);
       }
@@ -507,15 +534,42 @@ void collect_stats(Stats& stats,
 
 //////////////////////////////////////////////////////////////////////
 
-void print_stats(const Index& index, const php::Program& program) {
+StatsHolder::StatsHolder() {
   if (!Trace::moduleEnabledRelease(Trace::hhbbc_time, 1)) return;
+  stats = new Stats{};
+}
 
-  trace_time timer("stats");
+StatsHolder::~StatsHolder() {
+  delete stats;
+}
 
-  Stats stats{};
-  collect_stats(stats, index, program);
+StatsHolder allocate_stats() {
+  return StatsHolder();
+}
 
-  auto const str = show(stats);
+void collect_stats(const StatsHolder& stats,
+                   const Index& index,
+                   const php::Unit* unit) {
+  if (!stats) return;
+  for (auto& c : unit->classes) {
+    collect_class(*stats.stats, index, *c);
+    for (auto& m : c->methods) {
+      collect_func(*stats.stats, index, *m);
+    }
+  }
+  for (auto& r : unit->records) {
+    collect_record(*stats.stats, *r);
+  }
+  for (auto& x : unit->funcs) {
+    collect_func(*stats.stats, index, *x);
+  }
+  collect_func(*stats.stats, index, *unit->pseudomain);
+}
+
+void print_stats(const StatsHolder& stats) {
+  if (!stats) return;
+
+  auto const str = show(*stats.stats);
   if (Trace::moduleEnabledRelease(Trace::hhbbc_time, 2)) {
     std::cout << str;
   }

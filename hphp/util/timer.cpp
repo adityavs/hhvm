@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,23 @@
 
 #include <cassert>
 
-#ifdef __APPLE__
-#include <mach/clock.h>
-#include <mach/mach.h>
-#endif
-
-#include <sys/time.h>
-#include <sys/resource.h>
+#include <folly/ClockGettimeWrappers.h>
+#include <folly/portability/SysResource.h>
+#include <folly/portability/SysTime.h>
 
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
 
+#ifdef FACEBOOK
+#include "common/time/ClockGettimeNS.h" // nolint
+#endif
+
 namespace HPHP {
+///////////////////////////////////////////////////////////////////////////////
+
+__thread int64_t s_extra_request_nanoseconds;
+
+namespace {
 ///////////////////////////////////////////////////////////////////////////////
 
 #define PRINT_MSG(...)                          \
@@ -44,6 +49,9 @@ namespace HPHP {
       break;                                    \
     default: not_reached();                     \
   }
+
+///////////////////////////////////////////////////////////////////////////////
+}
 
 Timer::Timer(Type type, const char *name /* = NULL */, ReportType r)
   : m_type(type), m_report(r) {
@@ -72,27 +80,11 @@ void Timer::report() const {
 }
 
 void Timer::GetMonotonicTime(timespec &ts) {
-#ifndef __APPLE__
   gettime(CLOCK_MONOTONIC, &ts);
-#else
-  struct timeval tv;
-  gettimeofday(&tv, nullptr);
-  TIMEVAL_TO_TIMESPEC(&tv, &ts);
-#endif
 }
 
 void Timer::GetRealtimeTime(timespec &ts) {
-#ifndef __APPLE__
-  clock_gettime(CLOCK_REALTIME, &ts);
-#else
-  clock_serv_t cclock;
-  mach_timespec_t mts;
-  host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
-  clock_get_time(cclock, &mts);
-  mach_port_deallocate(mach_task_self(), cclock);
-  ts.tv_sec = mts.tv_sec;
-  ts.tv_nsec = mts.tv_nsec;
-#endif
+  gettime(CLOCK_REALTIME, &ts);
 }
 
 static int64_t to_usec(const timeval& tv) {
@@ -100,20 +92,20 @@ static int64_t to_usec(const timeval& tv) {
 }
 
 int64_t Timer::GetCurrentTimeMicros() {
-  struct timeval tv;
+  timeval tv;
   gettimeofday(&tv, 0);
   return to_usec(tv);
 }
 
-int64_t Timer::GetRusageMicros(Type t, int who) {
+int64_t Timer::GetRusageMicros(Type t, Who who) {
   assert(t != WallTime);
 
-  struct rusage ru;
+  rusage ru;
   memset(&ru, 0, sizeof(ru));
   auto DEBUG_ONLY ret = getrusage(who, &ru);
   assert(ret == 0);
 
-  switch (who) {
+  switch (t) {
     case SystemCPU: return to_usec(ru.ru_stime);
     case UserCPU:   return to_usec(ru.ru_utime);
     case TotalCPU:  return to_usec(ru.ru_stime) + to_usec(ru.ru_utime);
@@ -121,12 +113,16 @@ int64_t Timer::GetRusageMicros(Type t, int who) {
   }
 }
 
+int64_t Timer::GetThreadCPUTimeNanos() {
+  return gettime_ns(CLOCK_THREAD_CPUTIME_ID);
+}
+
 int64_t Timer::measure() const {
   if (m_type == WallTime) {
     return GetCurrentTimeMicros();
   }
 
-  return GetRusageMicros(m_type, RUSAGE_SELF);
+  return GetRusageMicros(m_type, Timer::Self);
 }
 
 const char *Timer::getName() const {
@@ -135,9 +131,8 @@ const char *Timer::getName() const {
   case SystemCPU: return "system cpu";
   case UserCPU:   return "user cpu";
   case TotalCPU:  return "total cpu";
-  default: assert(false);
   }
-  return nullptr;
+  always_assert(false);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -158,6 +153,60 @@ SlowTimer::~SlowTimer() {
 
 int64_t SlowTimer::getTime() const {
   return m_timer.getMicroSeconds() / 1000;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+int gettime(clockid_t clock, timespec* ts) {
+  if (clock != CLOCK_THREAD_CPUTIME_ID) {
+    return folly::chrono::clock_gettime(clock, ts);
+  }
+
+  constexpr uint64_t sec_to_ns = 1000000000;
+
+#ifdef FACEBOOK
+  uint64_t time;
+  if (!fb_perf_get_thread_cputime_ns(&time)) {
+    time += s_extra_request_nanoseconds;
+    ts->tv_sec = time / sec_to_ns;
+    ts->tv_nsec = time % sec_to_ns;
+    return 0;
+  }
+#endif
+
+  auto const ret = folly::chrono::clock_gettime(clock, ts);
+  always_assert(ts->tv_nsec < sec_to_ns);
+
+  ts->tv_sec += s_extra_request_nanoseconds / sec_to_ns;
+  auto res = ts->tv_nsec + s_extra_request_nanoseconds % sec_to_ns;
+  if (res > sec_to_ns) {
+    res -= sec_to_ns;
+    ts->tv_sec += 1;
+  }
+  ts->tv_nsec = res;
+
+  return ret;
+}
+
+int64_t gettime_ns(clockid_t clock) {
+  if (clock != CLOCK_THREAD_CPUTIME_ID) {
+    return folly::chrono::clock_gettime_ns(clock);
+  }
+
+#ifdef FACEBOOK
+  uint64_t time;
+  if (!fb_perf_get_thread_cputime_ns(&time)) {
+    return time + s_extra_request_nanoseconds;
+  }
+#endif
+
+  return folly::chrono::clock_gettime_ns(clock) + s_extra_request_nanoseconds;
+}
+
+int64_t gettime_diff_us(const timespec& start, const timespec& end) {
+  int64_t dsec = end.tv_sec - start.tv_sec;
+  int64_t dnsec = end.tv_nsec - start.tv_nsec;
+  return dsec * 1000000 + dnsec / 1000;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

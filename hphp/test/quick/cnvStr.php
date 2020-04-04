@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // disable array -> "Array" conversion notice
 error_reporting(error_reporting() & ~E_NOTICE);
@@ -13,7 +13,7 @@ var_dump(foo(true));
 var_dump(foo(1));
 var_dump(foo(1.1));
 var_dump(foo("abc"));
-var_dump(foo(array(123)));
+var_dump(foo(varray[123]));
 class C { public function __toString() { return "a C"; } }
 var_dump(foo(new C));
 
@@ -39,8 +39,8 @@ function bar($i) {
     $v7 = 1.1;
     $v8 = "abc";
     $v9 = new C();
-    $v10 = array();
-    $v11 = array(123);
+    $v10 = varray[];
+    $v11 = varray[123];
   }
   var_dump((string)$v1);
   var_dump((string)$v2);

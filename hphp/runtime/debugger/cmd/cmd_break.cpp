@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -65,7 +65,7 @@ void CmdBreak::sendImpl(DebuggerThriftBuffer& thrift) {
   // m_breakpoints is initially set to the breakpoints collection of the
   // client (in validate, which indirectly calls sendImpl). When received
   // via Thrift, m_breakpoints points to a copy that is placed in m_bps.
-  assert(m_breakpoints);
+  assertx(m_breakpoints);
   DebuggerCommand::sendImpl(thrift);
   BreakPointInfo::SendImpl(this->m_version, *m_breakpoints, thrift);
 }
@@ -299,7 +299,7 @@ void CmdBreak::processStatusChange(DebuggerClient& client) {
           action = "updated";
           bp->setState(BreakPointInfo::Disabled);
         } else {
-          assert(hasToggleArg(client));
+          assertx(hasToggleArg(client));
           action = "updated";
           bp->toggle();
         }
@@ -335,7 +335,7 @@ void CmdBreak::processStatusChange(DebuggerClient& client) {
         bpi->setState(BreakPointInfo::Disabled);
       }
       else {
-        assert(hasToggleArg(client));
+        assertx(hasToggleArg(client));
         bpi->toggle();
       }
     }
@@ -386,7 +386,7 @@ void CmdBreak::processStatusChange(DebuggerClient& client) {
     client.info("Breakpoint %d's state is changed to %s.", bpi->index(),
                  bpi->state(false).c_str());
   } else {
-    assert(hasToggleArg(client));
+    assertx(hasToggleArg(client));
     bpi->toggle();
     updateServer(client);
     client.info("Breakpoint %d's state is changed to %s.", bpi->index(),
@@ -410,7 +410,7 @@ void CmdBreak::updateServer(DebuggerClient& client) {
     auto& cbreakpoints = *client.getBreakPoints();
     auto& sbreakpoints = *serverReply->m_breakpoints;
     auto const csize = cbreakpoints.size();
-    assert(csize == sbreakpoints.size());
+    assertx(csize == sbreakpoints.size());
     for (size_t i = 0; i < csize; ++i) {
       cbreakpoints[i]->m_bindState = sbreakpoints[i]->m_bindState;
     }

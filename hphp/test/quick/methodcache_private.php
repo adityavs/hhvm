@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class one {
   public function lol() {}
@@ -18,7 +18,7 @@ class two extends one {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $one = new one;
   $two = new two;
   $one->doit($two);
@@ -26,4 +26,3 @@ function main() {
   $one->doit($one);
   $one->doit($two);
 }
-main();

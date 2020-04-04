@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 class IntlChar {
   /**
@@ -122,7 +122,7 @@ class IntlChar {
   /**
    * Enumerate all named characters
    *
-   * @param (int|string) $start - The first codepoint to being iterating from
+   * @param (int|string) $start - The first codepoint to begin iterating from
    * @param (int|string) $limit - The codepoint after the last codepoint
    * @param callable $cb
    *   function (

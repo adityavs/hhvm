@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,35 +15,34 @@
 */
 #include "hphp/runtime/base/socket.h"
 
-#include <fcntl.h>
-#include <poll.h>
+#include <folly/portability/Fcntl.h>
+#include <folly/portability/Sockets.h>
 
-#include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/server-stats.h"
-#include "hphp/runtime/base/request-local.h"
 #include "hphp/util/logger.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-__thread int Socket::s_lastErrno;
+RDS_LOCAL(int, Socket::s_lastErrno);
 
 ///////////////////////////////////////////////////////////////////////////////
 // constructors and destructor
 
-SocketData::SocketData(
-  int port,
-  int type
-) : FileData(true), m_port(port), m_type(type) {
-}
+SocketData::SocketData(int port, int type, bool nonblocking)
+  : FileData(nonblocking)
+  , m_port(port)
+  , m_type(type)
+{}
 
 bool SocketData::closeImpl() {
-  s_pcloseRet = 0;
+  *s_pcloseRet = 0;
   if (valid() && !isClosed()) {
-    s_pcloseRet = ::close(getFd());
+    *s_pcloseRet = ::close(getFd());
     setIsClosed(true);
     setFd(-1);
   }
@@ -54,8 +53,8 @@ SocketData::~SocketData() {
   SocketData::closeImpl();
 }
 
-Socket::Socket()
-: File(std::make_shared<SocketData>(0, -1)),
+Socket::Socket(bool nonblocking /* = true*/)
+: File(std::make_shared<SocketData>(0, -1, nonblocking)),
   m_data(static_cast<SocketData*>(getFileData()))
 {
 }
@@ -64,26 +63,21 @@ Socket::Socket(std::shared_ptr<SocketData> data)
 : File(data),
   m_data(static_cast<SocketData*>(getFileData()))
 {
-  assert(data);
+  assertx(data);
   inferStreamType();
 }
 
-Socket::Socket(std::shared_ptr<SocketData> data,
-               int sockfd,
-               int type,
-               const char *address /* = NULL */,
-               int port /* = 0 */,
+Socket::Socket(std::shared_ptr<SocketData> data, int sockfd, int type,
+               const char* address /* = NULL */, int /*port*/ /* = 0 */,
                double timeout /* = 0 */,
                const StaticString& streamType /* = empty_string_ref */)
-: File(data, null_string, streamType),
-  m_data(data.get())
-{
+    : File(data, null_string, streamType), m_data(data.get()) {
   if (address) m_data->m_address = address;
   setFd(sockfd);
 
   struct timeval tv;
   if (timeout <= 0) {
-    tv.tv_sec = ThreadInfo::s_threadInfo.getNoCheck()->
+    tv.tv_sec = RequestInfo::s_requestInfo.getNoCheck()->
       m_reqInjectionData.getSocketDefaultTimeout();
     tv.tv_usec = 0;
   } else {
@@ -91,10 +85,10 @@ Socket::Socket(std::shared_ptr<SocketData> data,
     tv.tv_usec = (timeout - tv.tv_sec) * 1e6;
   }
   setsockopt(getFd(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  s_lastErrno = errno;
+  *s_lastErrno = errno;
   setsockopt(getFd(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-  s_lastErrno = errno;
-  setTimeout(tv);
+  *s_lastErrno = errno;
+  internalSetTimeout(tv);
   setIsLocal(type == AF_UNIX);
 
   // Attempt to infer stream type only if it was not explicitly specified.
@@ -103,9 +97,10 @@ Socket::Socket(std::shared_ptr<SocketData> data,
 
 Socket::Socket(int sockfd, int type, const char *address /* = NULL */,
                int port /* = 0 */, double timeout /* = 0 */,
-               const StaticString& streamType /* = empty_string_ref */)
+               const StaticString& streamType /* = empty_string_ref */,
+               bool nonblocking /* = true */)
 : Socket(
-    std::make_shared<SocketData>(port, type),
+    std::make_shared<SocketData>(port, type, nonblocking),
     sockfd, type, address, port, timeout, streamType)
 { }
 
@@ -120,19 +115,18 @@ void Socket::sweep() {
 ///////////////////////////////////////////////////////////////////////////////
 
 void Socket::setError(int err) {
-  s_lastErrno = m_data->m_error = err;
+  *s_lastErrno = m_data->m_error = err;
 }
 
-bool Socket::open(const String& filename, const String& mode) {
+bool Socket::open(const String& /*filename*/, const String& /*mode*/) {
   throw_not_supported(__func__, "cannot open socket this way");
 }
 
 bool Socket::close() {
-  invokeFiltersOnClose();
   return closeImpl();
 }
 
-void Socket::setTimeout(struct timeval &tv) {
+void Socket::internalSetTimeout(struct timeval &tv) {
   if (tv.tv_sec >= 0 && tv.tv_usec >= 0) {
     m_data->m_timeout = tv.tv_sec * 1000000 + tv.tv_usec;
   } else {
@@ -160,16 +154,6 @@ bool Socket::checkLiveness() {
   return true;
 }
 
-bool Socket::setBlocking(bool blocking) {
-  int flags = fcntl(getFd(), F_GETFL, 0);
-  if (blocking) {
-    flags &= ~O_NONBLOCK;
-  } else {
-    flags |= O_NONBLOCK;
-  }
-  return fcntl(getFd(), F_SETFL, flags) != -1;
-}
-
 bool Socket::waitForData() {
   m_data->m_timedOut = false;
   while (true) {
@@ -191,8 +175,8 @@ bool Socket::waitForData() {
 }
 
 int64_t Socket::readImpl(char *buffer, int64_t length) {
-  assert(getFd());
-  assert(length > 0);
+  assertx(getFd());
+  assertx(length > 0);
 
   IOStatusHelper io("socket::recv", m_data->m_address.c_str(), m_data->m_port);
 
@@ -216,8 +200,8 @@ int64_t Socket::readImpl(char *buffer, int64_t length) {
 }
 
 int64_t Socket::writeImpl(const char *buffer, int64_t length) {
-  assert(getFd());
-  assert(length > 0);
+  assertx(getFd());
+  assertx(length > 0);
   setEof(false);
   IOStatusHelper io("socket::send", m_data->m_address.c_str(), m_data->m_port);
   int64_t ret = send(getFd(), buffer, length, 0);
@@ -249,13 +233,20 @@ const StaticString
 Array Socket::getMetaData() {
   Array ret = File::getMetaData();
   ret.set(s_timed_out, m_data->m_timedOut);
-  ret.set(s_blocked, (bool)(fcntl(getFd(), F_GETFL, 0) & O_NONBLOCK));
+  ret.set(s_blocked, (fcntl(getFd(), F_GETFL, 0) & O_NONBLOCK) == 0);
   return ret;
 }
 
 int64_t Socket::tell() {
   return 0;
 }
+
+static const StaticString
+  s_tcp_socket("tcp_socket"),
+  s_tcp_socket_ssl("tcp_socket/ssl"),
+  s_udp_socket("udp_socket"),
+  s_unix_socket("unix_socket"),
+  s_udg_socket("udg_socket");
 
 // Tries to infer stream type based on getsockopt() values.
 // If no conclusive match can be found, leaves m_streamType
@@ -273,21 +264,15 @@ void Socket::inferStreamType() {
 
     if (m_data->m_type == AF_INET || m_data->m_type == AF_INET6) {
       if (type == SOCK_STREAM) {
-        if (RuntimeOption::EnableHipHopSyntax) {
-          setStreamType(StaticString("tcp_socket"));
-        } else {
-          // Note: PHP returns "tcp_socket/ssl" for this query,
-          // even though the socket is clearly not an SSL socket.
-          setStreamType(StaticString("tcp_socket/ssl"));
-        }
+        setStreamType(s_tcp_socket);
       } else if (type == SOCK_DGRAM) {
-        setStreamType(StaticString("udp_socket"));
+        setStreamType(s_udp_socket);
       }
     } else if (m_data->m_type == AF_UNIX) {
       if (type == SOCK_STREAM) {
-        setStreamType(StaticString("unix_socket"));
+        setStreamType(s_unix_socket);
       } else if (type == SOCK_DGRAM) {
-        setStreamType(StaticString("udg_socket"));
+        setStreamType(s_udg_socket);
       }
     }
 

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 /*
  * Get locale.
@@ -6,11 +6,11 @@
 
 function ut_main()
 {
-    $locales = array(
+    $locales = varray[
         'en_UK',
         'en_US@California',
         'uk',
-    );
+    ];
 
     $res_str = '';
 
@@ -25,7 +25,7 @@ function ut_main()
 }
 
 include_once( 'ut_common.inc' );
-
+<<__EntryPoint>> function main_entry(): void {
 // Run the test
 ut_run();
-?>
+}

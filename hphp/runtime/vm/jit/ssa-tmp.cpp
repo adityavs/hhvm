@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,8 +15,12 @@
 */
 
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
+
+#include <sstream>
+
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
+#include "hphp/util/low-ptr.h"
 
 namespace HPHP { namespace jit {
 
@@ -33,6 +37,8 @@ void SSATmp::setInstruction(IRInstruction* inst, int dstId) {
 
 namespace {
 int typeNeededWords(Type t) {
+  // Although we say we have zero registers, we always allocate 1 in
+  // reg-alloc.cpp.  In practice this doesn't mean much.
   if (t.subtypeOfAny(TUninit,
                      TInitNull,
                      TNullptr)) {
@@ -42,17 +48,24 @@ int typeNeededWords(Type t) {
   if (t.maybe(TNullptr)) {
     return typeNeededWords(t - TNullptr);
   }
-  if (t <= TCtx || t <= TPtrToGen) {
-    // Ctx and PtrTo* may be statically unknown but always need just 1 register.
+  if (t <= TPtrToCell) {
+    // PtrTo* may be statically unknown but always need just one
+    // register.
     return 1;
+  }
+  if (t <= TLvalToCell) {
+    // If tv_val<> is ever anything other than 1 or more normal pointers, this
+    // will need to change.
+    static_assert(sizeof(tv_lval) % 8 == 0, "");
+    return sizeof(tv_lval) / 8;
   }
   if (!t.isUnion()) {
     // Not a union type and not a special case: 1 register.
-    assertx(IMPLIES(t <= TStkElem, t.isKnownDataType()));
+    assertx(IMPLIES(t <= TCell, t.isKnownDataType()));
     return 1;
   }
 
-  assertx(t <= TStkElem);
+  assertx(t <= TCell);
 
   // XXX(t4592459): This will return 2 for TNull, even though it only
   // needs 1 register (one for the type, none for the value). This is to work
@@ -68,7 +81,8 @@ int SSATmp::numWords() const {
 }
 
 Variant SSATmp::variantVal() const {
-  switch (type().toDataType()) {
+  auto const dt = type().toDataType();
+  switch (dt) {
     case KindOfUninit:
     case KindOfNull:
       // Upon return both will converted to KindOfNull anyway.
@@ -79,18 +93,35 @@ Variant SSATmp::variantVal() const {
       return intVal();
     case KindOfDouble:
       return dblVal();
-    case KindOfStaticString:
+    case KindOfPersistentString:
+      return Variant{strVal(), Variant::PersistentStrInit{}};
+    case KindOfPersistentDArray:
+    case KindOfPersistentVArray:
+    case KindOfPersistentVec:
+    case KindOfPersistentDict:
+    case KindOfPersistentKeyset:
+    case KindOfPersistentArray:
+      return Variant{arrLikeVal(), dt, Variant::PersistentArrInit{}};
+    case KindOfClass:
+      return Variant{const_cast<Class*>(clsVal())};
+    case KindOfFunc:
+      return Variant{funcVal()};
+    case KindOfClsMeth:
+      if (use_lowptr) return Variant{clsmethVal()};
+      // fallthrough
     case KindOfString:
-      return Variant(const_cast<StringData*>(strVal()));
+    case KindOfVec:
+    case KindOfDict:
+    case KindOfKeyset:
+    case KindOfDArray:
+    case KindOfVArray:
     case KindOfArray:
-      return Variant{const_cast<ArrayData*>(arrVal())};
     case KindOfObject:
     case KindOfResource:
-    case KindOfRef:
-    case KindOfClass:
+    case KindOfRecord:
       break;
   }
-  not_reached();
+  always_assert(false);
 }
 
 std::string SSATmp::toString() const {

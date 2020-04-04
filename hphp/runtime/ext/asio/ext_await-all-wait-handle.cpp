@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,8 +17,9 @@
 
 #include "hphp/runtime/ext/asio/ext_await-all-wait-handle.h"
 
-#include "hphp/runtime/ext/closure/ext_closure.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/asio/ext_asio.h"
+#include "hphp/runtime/ext/collections/ext_collections-map.h"
+#include "hphp/runtime/ext/collections/ext_collections-vector.h"
 #include "hphp/runtime/ext/asio/asio-blockable.h"
 #include "hphp/runtime/ext/asio/asio-session.h"
 #include "hphp/runtime/ext/asio/ext_wait-handle.h"
@@ -27,24 +28,16 @@
 #include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/packed-array.h"
-#include "hphp/runtime/base/proxy-array.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 req::ptr<c_AwaitAllWaitHandle> c_AwaitAllWaitHandle::Alloc(int32_t cnt) {
   auto size = c_AwaitAllWaitHandle::heapSize(cnt);
-  auto mem = MM().objMalloc(size);
+  auto mem = tl_heap->objMalloc(size);
   auto handle = new (mem) c_AwaitAllWaitHandle(cnt);
-  assert(handle->hasExactlyOneRef());
+  assertx(handle->hasExactlyOneRef());
   return req::ptr<c_AwaitAllWaitHandle>::attach(handle);
-}
-
-void delete_AwaitAllWaitHandle(ObjectData* od, const Class*) {
-  auto const waitHandle = static_cast<c_AwaitAllWaitHandle*>(od);
-  auto bytes = waitHandle->heapSize();
-  waitHandle->~c_AwaitAllWaitHandle();
-  MM().objFree(waitHandle, bytes);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -52,72 +45,147 @@ void delete_AwaitAllWaitHandle(ObjectData* od, const Class*) {
 namespace {
   StaticString s_awaitAll("<await-all>");
 
-  NEVER_INLINE ATTRIBUTE_NORETURN
+  [[noreturn]] NEVER_INLINE
   void failArray() {
     SystemLib::throwInvalidArgumentExceptionObject(
       "Expected dependencies to be an array");
   }
 
-  NEVER_INLINE ATTRIBUTE_NORETURN
+  [[noreturn]] NEVER_INLINE
   void failMap() {
     SystemLib::throwInvalidArgumentExceptionObject(
       "Expected dependencies to be a Map");
   }
 
-  NEVER_INLINE ATTRIBUTE_NORETURN
+  [[noreturn]] NEVER_INLINE
   void failVector() {
     SystemLib::throwInvalidArgumentExceptionObject(
       "Expected dependencies to be a Vector");
   }
 
-  NEVER_INLINE ATTRIBUTE_NORETURN
+  [[noreturn]] NEVER_INLINE
   void failWaitHandle() {
     SystemLib::throwInvalidArgumentExceptionObject(
       "Expected dependencies to be a collection of WaitHandle instances");
+  }
+
+  [[noreturn]] NEVER_INLINE
+  void failNotContainer() {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Expected dependencies to be a container");
+  }
+
+  void failInvalidContainer() {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Dependencies cannot be a set-like container or Pair");
   }
 
   c_StaticWaitHandle* returnEmpty() {
     return c_StaticWaitHandle::CreateSucceeded(make_tv<KindOfNull>());
   }
 
-  void prepareChild(const Cell* src, context_idx_t& ctx_idx, int32_t& cnt) {
-    auto const waitHandle = c_WaitHandle::fromCell(src);
+  void prepareChild(TypedValue src, context_idx_t& ctx_idx, uint32_t& cnt) {
+    auto const waitHandle = c_Awaitable::fromTV(src);
     if (UNLIKELY(!waitHandle)) failWaitHandle();
     if (waitHandle->isFinished()) return;
+    assertx(isa<c_WaitableWaitHandle>(waitHandle));
     auto const child = static_cast<c_WaitableWaitHandle*>(waitHandle);
     ctx_idx = std::min(ctx_idx, child->getContextIdx());
     ++cnt;
   }
 
-  void addChild(const Cell* src, c_WaitableWaitHandle**& dst) {
-    auto const waitHandle = c_WaitHandle::fromCellAssert(src);
-    if (waitHandle->isFinished()) return;
+  bool addChild(TypedValue src, c_AwaitAllWaitHandle::Node*& dst, uint32_t& idx) {
+    auto const waitHandle = c_Awaitable::fromTVAssert(src);
+    if (waitHandle->isFinished()) return false;
+
     waitHandle->incRefCount();
-    *(--dst) = static_cast<c_WaitableWaitHandle*>(waitHandle);
+    (--dst)->m_child = static_cast<c_WaitableWaitHandle*>(waitHandle);
+    dst->m_index = idx--;
+    dst->m_child->getParentChain().addParent(dst->m_blockable,
+      AsioBlockable::Kind::AwaitAllWaitHandleNode);
+    return true;
   }
 }
 
-void c_AwaitAllWaitHandle::ti_setoncreatecallback(const Variant& callback) {
+void HHVM_STATIC_METHOD(AwaitAllWaitHandle, setOnCreateCallback,
+                        const Variant& callback) {
   AsioSession::Get()->setOnAwaitAllCreate(callback);
 }
 
-Object c_AwaitAllWaitHandle::ti_fromarray(const Array& dependencies) {
+template<typename Iter>
+Object c_AwaitAllWaitHandle::Create(Iter iter) {
+  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
+  uint32_t cnt = 0;
+
+  iter([&](TypedValue v) { prepareChild(v, ctx_idx, cnt); });
+
+  if (!cnt) {
+    return Object{returnEmpty()};
+  }
+
+  auto result = Alloc(cnt);
+  auto next = &result->m_children[cnt];
+  uint32_t idx = cnt - 1;
+
+  iter([&](TypedValue v) { addChild(v, next, idx); });
+
+  assertx(next == &result->m_children[0]);
+  result->initialize(ctx_idx);
+  return Object{std::move(result)};
+}
+
+ObjectData* c_AwaitAllWaitHandle::fromFrameNoCheck(
+  uint32_t total, uint32_t cnt, TypedValue* stk
+) {
+  assertx(cnt);
+
+  auto result = Alloc(cnt);
+  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
+  auto next = &result->m_children[cnt];
+  uint32_t idx = cnt;
+
+  for (int64_t i = 0; i < total; i++) {
+    auto const local = stk[-i];
+    if (tvIsNull(local)) continue;
+    auto const waitHandle = c_Awaitable::fromTVAssert(local);
+    if (waitHandle->isFinished()) continue;
+
+    auto const child = static_cast<c_WaitableWaitHandle*>(waitHandle);
+    ctx_idx = std::min(ctx_idx, child->getContextIdx());
+
+    child->incRefCount();
+    (--next)->m_child = child;
+    next->m_index = --idx;
+    next->m_child->getParentChain().addParent(
+      next->m_blockable,
+      AsioBlockable::Kind::AwaitAllWaitHandleNode
+    );
+
+    if (!idx) break;
+  }
+
+  assertx(next == &result->m_children[0]);
+  result->initialize(ctx_idx);
+  return result.detach();
+}
+
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromArray,
+                          const Array& dependencies) {
   auto ad = dependencies.get();
-  assert(ad);
+  assertx(ad);
+  assertx(ad->isPHPArrayType());
   if (!ad->size()) return Object{returnEmpty()};
 
-retry:
   switch (ad->kind()) {
     case ArrayData::kPackedKind:
-      return FromPackedArray(ad);
+      return c_AwaitAllWaitHandle::Create([=](auto fn) {
+        PackedArray::IterateV(ad, fn);
+      });
 
     case ArrayData::kMixedKind:
-    case ArrayData::kStructKind:
-      return FromMixedArray(MixedArray::asMixed(ad));
-
-    case ArrayData::kProxyKind:
-      ad = ProxyArray::innerArr(ad);
-      goto retry;
+      return c_AwaitAllWaitHandle::Create([=](auto fn) {
+        MixedArray::IterateV(MixedArray::asMixed(ad), fn);
+      });
 
     case ArrayData::kApcKind:
     case ArrayData::kGlobalsKind:
@@ -129,6 +197,16 @@ retry:
       // Handled by dependencies->size() check.
       not_reached();
 
+    case ArrayData::kVecKind:
+    case ArrayData::kDictKind:
+    case ArrayData::kKeysetKind:
+      // Shouldn't get Hack arrays
+      not_reached();
+
+    case ArrayData::kRecordKind:
+      // TODO: T47449944
+      not_reached();
+
     case ArrayData::kNumKinds:
       not_reached();
   }
@@ -136,195 +214,168 @@ retry:
   not_reached();
 }
 
-Object c_AwaitAllWaitHandle::ti_frommap(const Variant& dependencies) {
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromVec,
+                          const Array& dependencies) {
+  auto ad = dependencies.get();
+  assertx(ad);
+  assertx(ad->isVecArrayKind());
+  if (!ad->size()) return Object{returnEmpty()};
+  return c_AwaitAllWaitHandle::Create([=](auto fn) {
+    PackedArray::IterateV(ad, fn);
+  });
+}
+
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromDict,
+                          const Array& dependencies) {
+  auto ad = dependencies.get();
+  assertx(ad);
+  assertx(ad->isDictKind());
+  if (!ad->size()) return Object{returnEmpty()};
+  return c_AwaitAllWaitHandle::Create([=](auto fn) {
+    MixedArray::IterateV(MixedArray::asMixed(ad), fn);
+  });
+}
+
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromMap,
+                          const Variant& dependencies) {
   if (LIKELY(dependencies.isObject())) {
     auto obj = dependencies.getObjectData();
     if (LIKELY(obj->isCollection() && isMapCollection(obj->collectionType()))) {
       assertx(collections::isType(obj->getVMClass(), CollectionType::Map,
                                                      CollectionType::ImmMap));
-      return FromMap(static_cast<BaseMap*>(obj));
+      return c_AwaitAllWaitHandle::Create([=](auto fn) {
+        MixedArray::IterateV(static_cast<BaseMap*>(obj)->arrayData(), fn);
+      });
     }
   }
   failMap();
 }
 
-Object c_AwaitAllWaitHandle::ti_fromvector(const Variant& dependencies) {
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromVector,
+                          const Variant& dependencies) {
   if (LIKELY(dependencies.isObject())) {
     auto obj = dependencies.getObjectData();
     if (LIKELY(obj->isCollection() &&
                isVectorCollection(obj->collectionType()))) {
       assertx(collections::isType(obj->getVMClass(), CollectionType::Vector,
                                                   CollectionType::ImmVector));
-      return FromVector(static_cast<BaseVector*>(obj));
+      return c_AwaitAllWaitHandle::Create([=](auto fn) {
+        PackedArray::IterateV(static_cast<BaseVector*>(obj)->arrayData(), fn);
+      });
     }
   }
   failVector();
 }
 
-Object c_AwaitAllWaitHandle::FromPackedArray(const ArrayData* dependencies) {
-  auto const start = reinterpret_cast<const TypedValue*>(dependencies + 1);
-  auto const stop = start + dependencies->getSize();
-  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
-  int32_t cnt = 0;
-
-  for (auto iter = start; iter < stop; ++iter) {
-    prepareChild(tvToCell(iter), ctx_idx, cnt);
+Object HHVM_STATIC_METHOD(AwaitAllWaitHandle, fromContainer,
+                          const Variant& dependencies) {
+  switch (dependencies.getType()) {
+    case KindOfPersistentVec:
+    case KindOfVec:
+      return c_AwaitAllWaitHandle_ns_fromVec(self_, dependencies.asCArrRef());
+    case KindOfPersistentDict:
+    case KindOfDict:
+      return c_AwaitAllWaitHandle_ns_fromDict(self_, dependencies.asCArrRef());
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
+    case KindOfArray:
+      return c_AwaitAllWaitHandle_ns_fromArray(self_, dependencies.asCArrRef());
+    case KindOfObject: {
+      auto obj = dependencies.getObjectData();
+      if (LIKELY(obj->isCollection())) {
+        if (isVectorCollection(obj->collectionType())) {
+          return c_AwaitAllWaitHandle_ns_fromVector(self_, dependencies);
+        } else if (isMapCollection(obj->collectionType())) {
+          return c_AwaitAllWaitHandle_ns_fromMap(self_, dependencies);
+        }
+        failInvalidContainer();
+      }
+      failNotContainer();
+      break;
+    }
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      failInvalidContainer();
+      break;
+    case KindOfPersistentString:
+    case KindOfString:
+    case KindOfRecord:
+    case KindOfUninit:
+    case KindOfNull:
+    case KindOfBoolean:
+    case KindOfResource:
+    case KindOfInt64:
+    case KindOfDouble:
+    case KindOfFunc:
+    case KindOfClass:
+    case KindOfClsMeth:
+      failNotContainer();
+      break;
   }
-
-  if (!cnt) return Object{returnEmpty()};
-
-  auto result = Alloc(cnt);
-  auto next = &result->m_children[cnt];
-
-  for (auto iter = start; iter < stop; ++iter) {
-    addChild(tvToCell(iter), next);
-  }
-
-  assert(next == &result->m_children[0]);
-  result->initialize(ctx_idx);
-  return Object{std::move(result)};
-}
-
-Object c_AwaitAllWaitHandle::FromMixedArray(const MixedArray* dependencies) {
-  auto const start = dependencies->data();
-  auto const stop = start + dependencies->iterLimit();
-  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
-  int32_t cnt = 0;
-
-  for (auto iter = start; iter < stop; ++iter) {
-    if (MixedArray::isTombstone(iter->data.m_type)) continue;
-    prepareChild(tvToCell(&iter->data), ctx_idx, cnt);
-  }
-
-  if (!cnt) return Object{returnEmpty()};
-
-  auto result = Alloc(cnt);
-  auto next = &result->m_children[cnt];
-
-  for (auto iter = start; iter < stop; ++iter) {
-    if (MixedArray::isTombstone(iter->data.m_type)) continue;
-    addChild(tvToCell(&iter->data), next);
-  }
-
-  assert(next == &result->m_children[0]);
-  result->initialize(ctx_idx);
-  return Object{std::move(result)};
-}
-
-Object c_AwaitAllWaitHandle::FromMap(const BaseMap* dependencies) {
-  auto const start = dependencies->firstElm();
-  auto const stop = dependencies->elmLimit();
-  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
-  int32_t cnt = 0;
-
-  for (auto iter = start; iter != stop; iter = BaseMap::nextElm(iter, stop)) {
-    prepareChild(tvAssertCell(&iter->data), ctx_idx, cnt);
-  }
-
-  if (!cnt) return Object{returnEmpty()};
-
-  auto result = Alloc(cnt);
-  auto next = &result->m_children[cnt];
-
-  for (auto iter = start; iter != stop; iter = BaseMap::nextElm(iter, stop)) {
-    addChild(tvAssertCell(&iter->data), next);
-  }
-
-  assert(next == &result->m_children[0]);
-  result->initialize(ctx_idx);
-  return Object{std::move(result)};
-}
-
-Object c_AwaitAllWaitHandle::FromVector(const BaseVector* dependencies) {
-  auto const start = dependencies->data();
-  auto const stop = start + dependencies->size();
-  auto ctx_idx = std::numeric_limits<context_idx_t>::max();
-  int32_t cnt = 0;
-
-  for (auto iter = start; iter < stop; ++iter) {
-    prepareChild(tvAssertCell(iter), ctx_idx, cnt);
-  }
-
-  if (!cnt) return Object{returnEmpty()};
-
-  auto result = Alloc(cnt);
-  auto next = &result->m_children[cnt];
-
-  for (auto iter = start; iter < stop; ++iter) {
-    addChild(tvAssertCell(iter), next);
-  }
-
-  assert(next == &result->m_children[0]);
-  result->initialize(ctx_idx);
-  return Object{std::move(result)};
+  not_reached();
 }
 
 void c_AwaitAllWaitHandle::initialize(context_idx_t ctx_idx) {
   setState(STATE_BLOCKED);
   setContextIdx(ctx_idx);
-  assert(m_cur >= 0);
 
   if (UNLIKELY(AsioSession::Get()->hasOnAwaitAllCreate())) {
     auto vector = req::make<c_Vector>();
-    for (int32_t idx = m_cur; idx >= 0; --idx) {
-      TypedValue child = make_tv<KindOfObject>(m_children[idx]);
-      vector->add(&child);
+    for (int32_t idx = m_cap - 1; idx >= 0; --idx) {
+      auto const child = make_tv<KindOfObject>(m_children[idx].m_child);
+      vector->add(child);
     }
     AsioSession::Get()->onAwaitAllCreate(this, Variant(std::move(vector)));
   }
 
-  blockOnCurrent<false>();
   incRefCount();
 }
 
-void c_AwaitAllWaitHandle::onUnblocked() {
-  assert(m_cur >= 0);
-  assert(m_children[m_cur]->isFinished());
-  auto child = &m_children[m_cur];
+void c_AwaitAllWaitHandle::onUnblocked(uint32_t idx) {
+  assertx(idx <= m_unfinished);
+  assertx(getState() == STATE_BLOCKED);
 
-  do {
-    decRefObj(*child);
+  if (idx == m_unfinished) {
+    for (uint32_t next = idx - 1; next < idx; --next) {
+      auto const child = m_children[next].m_child;
+      if (!child->isFinished()) {
+        // Found the next unfinished child.
+        m_unfinished = next;
 
-    if (m_cur == 0) {
-      auto parentChain = getParentChain();
-      setState(STATE_SUCCEEDED);
-      tvWriteNull(&m_resultOrException);
-      parentChain.unblock();
-      decRefObj(this);
-      return;
+        // Make sure there's no cyclic dependencies.
+        try {
+          detectCycle(child);
+        } catch (const Object& cycle_exception) {
+          markAsFailed(cycle_exception);
+        }
+        return;
+      }
     }
-
-    --m_cur;
-    --child;
-  } while ((*child)->isFinished());
-
-  assert(child == &m_children[m_cur]);
-  blockOnCurrent<true>();
+    // All children finished.
+    markAsFinished();
+  }
 }
 
-template<bool checkCycle>
-void c_AwaitAllWaitHandle::blockOnCurrent() {
-  auto child = m_children[m_cur];
-  assert(!child->isFinished());
-
-  if (checkCycle) {
-    try {
-      detectCycle(child);
-    } catch (const Object& cycle_exception) {
-      markAsFailed(cycle_exception);
-      return;
-    }
-  }
-
-  child->getParentChain()
-    .addParent(m_blockable, AsioBlockable::Kind::AwaitAllWaitHandle);
+void c_AwaitAllWaitHandle::markAsFinished() {
+  auto parentChain = getParentChain();
+  setState(STATE_SUCCEEDED);
+  tvWriteNull(m_resultOrException);
+  parentChain.unblock();
+  decRefObj(this);
 }
 
 void c_AwaitAllWaitHandle::markAsFailed(const Object& exception) {
-  auto child = &m_children[m_cur];
-  while (m_cur-- >= 0) {
-    decRefObj(*(child--));
+  for (uint32_t idx = 0; idx < m_cap; idx++) {
+    auto const child = m_children[idx].m_child;
+    if (!child->isFinished()) {
+      // Remove the current AAWH from the parent chain of all children.
+      child->getParentChain().removeFromChain(&m_children[idx].m_blockable);
+    }
   }
+
   auto parentChain = getParentChain();
   setState(STATE_FAILED);
   tvWriteObject(exception.get(), &m_resultOrException);
@@ -337,9 +388,31 @@ String c_AwaitAllWaitHandle::getName() {
 }
 
 c_WaitableWaitHandle* c_AwaitAllWaitHandle::getChild() {
-  assert(getState() == STATE_BLOCKED);
-  assert(m_cur >= 0);
-  return m_children[m_cur];
+  assertx(getState() == STATE_BLOCKED);
+  assertx(m_unfinished < m_cap);
+  return m_children[m_unfinished].m_child;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void AsioExtension::initAwaitAllWaitHandle() {
+#define AAWH_SME(meth) \
+  HHVM_STATIC_MALIAS(HH\\AwaitAllWaitHandle, meth, AwaitAllWaitHandle, meth)
+  AAWH_SME(fromArray);
+  AAWH_SME(fromVec);
+  AAWH_SME(fromDict);
+  AAWH_SME(fromMap);
+  AAWH_SME(fromVector);
+  AAWH_SME(setOnCreateCallback);
+  AAWH_SME(fromContainer);
+#undef AAWH_SME
+  if (RuntimeOption::EvalHackArrDVArrs) {
+    HHVM_STATIC_MALIAS(HH\\AwaitAllWaitHandle, fromDArray, AwaitAllWaitHandle, fromDict);
+    HHVM_STATIC_MALIAS(HH\\AwaitAllWaitHandle, fromVArray, AwaitAllWaitHandle, fromVec);
+  } else {
+    HHVM_STATIC_MALIAS(HH\\AwaitAllWaitHandle, fromDArray, AwaitAllWaitHandle, fromArray);
+    HHVM_STATIC_MALIAS(HH\\AwaitAllWaitHandle, fromVArray, AwaitAllWaitHandle, fromArray);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

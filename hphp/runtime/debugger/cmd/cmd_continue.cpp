@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -35,16 +35,17 @@ void CmdContinue::help(DebuggerClient &client) {
   );
 }
 
-void CmdContinue::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
-  assert(!m_complete); // Complete cmds should not be asked to do work.
+void CmdContinue::onSetup(DebuggerProxy& /*proxy*/,
+                          CmdInterrupt& /*interrupt*/) {
+  assertx(!m_complete); // Complete cmds should not be asked to do work.
   // If there's a remaining count on this cmd then we want it left installed
   // in the proxy.
   m_complete = (decCount() == 0);
 }
 
-void CmdContinue::onBeginInterrupt(DebuggerProxy &proxy,
-                                   CmdInterrupt &interrupt) {
-  assert(!m_complete); // Complete cmds should not be asked to do work.
+void CmdContinue::onBeginInterrupt(DebuggerProxy& /*proxy*/,
+                                   CmdInterrupt& /*interrupt*/) {
+  assertx(!m_complete); // Complete cmds should not be asked to do work.
   m_complete = (decCount() == 0);
 }
 

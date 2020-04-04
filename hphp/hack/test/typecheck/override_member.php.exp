@@ -1,12 +1,8 @@
-File "override_member.php", line 16, characters 7-7:
-This object is of type Y (Typing[4110])
-File "override_member.php", line 16, characters 17-17:
-It is incompatible with this object of type X
-because some declarations are incompatible.
-Read the following to see why:
-File "override_member.php", line 17, characters 10-13:
+File "override_member.php", line 17, characters 15-16:
+Member x has the wrong type (Typing[4341])
+File "override_member.php", line 17, characters 15-16:
 Typing error
 File "override_member.php", line 13, characters 10-12:
-This is an int
+Expected int
 File "override_member.php", line 17, characters 10-13:
-It is incompatible with a bool
+But got bool

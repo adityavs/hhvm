@@ -1,23 +1,23 @@
-<?php
-
-$arr = array(
-	0 => array(
+<?hh
+<<__EntryPoint>> function main(): void {
+$arr = darray[
+	0 => varray[
 		"a",
 		1,
-	),
-	"a" => array(
-		2,
-		"b",
-		3 => array(
+	],
+	"a" => darray[
+		0 => 2,
+		1 => "b",
+		3 => varray[
 			4,
 			"c",
-		),
-		"3" => array(
+		],
+		"3" => varray[
 			4,
 			"c",
-		),
-	),
-);
+		],
+	],
+];
 
 $it = new RecursiveArrayIterator($arr);
 $it = new RecursiveTreeIterator($it);
@@ -48,5 +48,5 @@ foreach($it as $k => $v) {
 
 
 
-?>
-===DONE===
+echo "===DONE===\n";
+}

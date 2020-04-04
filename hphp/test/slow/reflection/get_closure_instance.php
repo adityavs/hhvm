@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   private $data;
@@ -29,6 +29,7 @@ class B { }
 function execute($class_name, $method_name, $instance) {
   try {
     $ref = new ReflectionMethod($class_name, $method_name);
+    $ref->setAccessible(true);
     $method = $ref->getClosure($instance);
     var_dump($method());
   } catch (Exception $e) {
@@ -37,12 +38,16 @@ function execute($class_name, $method_name, $instance) {
   }
 }
 
+
+<<__EntryPoint>>
+function main_get_closure_instance() {
 execute('A', 'M1', new A(true));
 execute('A', 'M2', new A(42));
-execute('A', 'M3', new A(array()));
+execute('A', 'M3', new A(varray[]));
 execute('A', 'M4', new A('NOT STATIC'));
 
 execute('A', 'M1', new B());
 execute('A', 'M2', new B());
 execute('A', 'M3', new B());
 execute('A', 'M4', new B('NOT STATIC'));
+}

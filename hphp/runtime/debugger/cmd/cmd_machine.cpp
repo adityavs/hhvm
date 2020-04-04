@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -198,7 +198,7 @@ void CmdMachine::UpdateIntercept(DebuggerClient &client,
                                  const std::string &host, int port) {
   CmdMachine cmd;
   cmd.m_body = "rpc";
-  cmd.m_rpcConfig = make_map_array
+  cmd.m_rpcConfig = make_darray
     (s_host_string, String(host),
      s_port, port ? port : RuntimeOption::DebuggerDefaultRpcPort,
      s_auth, String(RuntimeOption::DebuggerDefaultRpcAuth),
@@ -314,11 +314,12 @@ bool CmdMachine::onServer(DebuggerProxy &proxy) {
   if (m_body == "rpc") {
     String host = m_rpcConfig[s_host_string].toString();
     if (host.empty()) {
-      register_intercept("", false, uninit_null());
+      register_intercept("", false, uninit_null(), false, false);
     } else {
       int port = m_rpcConfig[s_port].toInt32();
       LibEventHttpClient::SetCache(host.data(), port, 1);
-      register_intercept("", "fb_rpc_intercept_handler", m_rpcConfig);
+      register_intercept("", "fb_rpc_intercept_handler",
+                         m_rpcConfig, false, false);
     }
     return proxy.sendToClient(this);
   }

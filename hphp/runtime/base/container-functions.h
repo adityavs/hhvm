@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,66 +17,108 @@
 #define incl_HPHP_CONTAINER_FUNCTIONS_H_
 
 #include "hphp/runtime/base/type-variant.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/base/collections.h"
+#include "hphp/runtime/ext/collections/ext_collections.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-inline bool isContainer(const Cell c) {
-  assert(cellIsPlausible(c));
-  return c.m_type == KindOfArray ||
+inline bool isContainer(const TypedValue c) {
+  assertx(tvIsPlausible(c));
+  return isArrayLikeType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isCollection());
 }
 
 inline bool isContainer(const Variant& v) {
-  return isContainer(*v.asCell());
+  return isContainer(*v.asTypedValue());
 }
 
-inline bool isContainerOrNull(const Cell c) {
-  assert(cellIsPlausible(c));
-  return isNullType(c.m_type) || c.m_type == KindOfArray ||
+inline bool isContainerOrNull(const TypedValue c) {
+  assertx(tvIsPlausible(c));
+  return isNullType(c.m_type) || isArrayLikeType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isCollection());
 }
 
 inline bool isContainerOrNull(const Variant& v) {
-  return isContainerOrNull(*v.asCell());
+  return isContainerOrNull(*v.asTypedValue());
 }
 
-inline bool isMutableContainer(const Cell c) {
-  assert(cellIsPlausible(c));
-  return c.m_type == KindOfArray ||
+inline bool isMutableContainer(const TypedValue c) {
+  assertx(tvIsPlausible(c));
+  return isArrayLikeType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isMutableCollection());
 }
 
 inline bool isMutableContainer(const Variant& v) {
-  return isMutableContainer(*v.asCell());
+  return isMutableContainer(*v.asTypedValue());
 }
 
-inline size_t getContainerSize(const Cell c) {
-  assert(isContainer(c));
-  if (c.m_type == KindOfArray) {
+inline size_t getContainerSize(const TypedValue c) {
+  assertx(isContainer(c));
+  if (isArrayLikeType(c.m_type)) {
     return c.m_data.parr->size();
   }
-  assert(c.m_type == KindOfObject && c.m_data.pobj->isCollection());
-  return getCollectionSize(c.m_data.pobj);
+  assertx(c.m_type == KindOfObject && c.m_data.pobj->isCollection());
+  return collections::getSize(c.m_data.pobj);
 }
 
 inline size_t getContainerSize(const Variant& v) {
-  return getContainerSize(*v.asCell());
+  return getContainerSize(*v.asTypedValue());
 }
 
-inline bool isPackedContainer(const Cell c) {
-  assert(isContainer(c));
-  if (c.m_type == KindOfArray) {
-    return c.m_data.parr->isPacked();
+inline bool isPackedContainer(const TypedValue c) {
+  assertx(isContainer(c));
+  if (isArrayLikeType(c.m_type)) {
+    return c.m_data.parr->hasVanillaPackedLayout();
   }
 
   return isVectorCollection(c.m_data.pobj->collectionType());
 }
 
+ALWAYS_INLINE
+const TypedValue container_as_tv(const Variant& container) {
+  const auto& cellContainer = *container.asTypedValue();
+  if (UNLIKELY(!isContainer(cellContainer))) {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Parameter must be a container (array or collection)");
+  }
+  return cellContainer;
+}
+
 //////////////////////////////////////////////////////////////////////
 
+/*
+ * clsmeth compact container helpers.
+ */
+inline bool isClsMethCompactContainer(const TypedValue c) {
+ return isContainer(c) || isClsMethType(c.m_type);
+}
+
+inline bool isClsMethCompactContainer(const Variant& v) {
+ return isClsMethCompactContainer(*v.asTypedValue());
+}
+
+inline size_t getClsMethCompactContainerSize(const TypedValue c) {
+ return isClsMethType(c.m_type) ? 2 : getContainerSize(c);
+}
+
+inline size_t getClsMethCompactContainerSize(const Variant& v) {
+ return getClsMethCompactContainerSize(*v.asTypedValue());
+}
+
+inline TypedValue* castClsmethToContainerInplace(TypedValue* c) {
+  if (isClsMethType(c->m_type)) {
+    if (RuntimeOption::EvalHackArrDVArrs) {
+      tvCastToVecInPlace(c);
+    } else {
+      tvCastToVArrayInPlace(c);
+    }
+  }
+  return c;
+}
+
+//////////////////////////////////////////////////////////////////////
 }
 
 #endif

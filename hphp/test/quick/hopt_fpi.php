@@ -1,4 +1,4 @@
-<?php
+<?hh
 // Copyright 2004-2015 Facebook. All Rights Reserved.
 
 class C {
@@ -35,5 +35,6 @@ function test($a, $f1, $f2) {
   echo $x;
   echo "\n";
 }
-
+<<__EntryPoint>> function main(): void {
 test(1, "f3", "f4");
+}

@@ -27,6 +27,7 @@
 #include "hphp/vixl/a64/disasm-a64.h"
 #include "hphp/util/text-color.h"
 
+#include <ostream>
 #include <folly/Format.h>
 
 namespace vixl {
@@ -36,6 +37,7 @@ Disassembler::Disassembler() {
   buffer_ = reinterpret_cast<char*>(malloc(buffer_size_));
   buffer_pos_ = 0;
   own_buffer_ = true;
+  code_address_offset_ = 0;
 }
 
 
@@ -44,6 +46,7 @@ Disassembler::Disassembler(char* text_buffer, int buffer_size) {
   buffer_ = text_buffer;
   buffer_pos_ = 0;
   own_buffer_ = false;
+  code_address_offset_ = 0;
 }
 
 
@@ -56,6 +59,11 @@ Disassembler::~Disassembler() {
 
 char* Disassembler::GetOutput() {
   return buffer_;
+}
+
+
+void Disassembler::setShouldDereferencePCRelativeLiterals(bool enable) {
+  dereferenceLiterals_ = enable;
 }
 
 
@@ -751,6 +759,23 @@ void Disassembler::VisitMoveWideImmediate(Instruction* instr) {
 }
 
 
+void Disassembler::VisitLseLdOp(Instruction* instr) {
+  const char *mnemonic = "";
+  const char *form = "";
+
+  if (instr->Rt() == 31) {
+    // alias when Rt is wzr/xzr
+    mnemonic = "st'lo'la'ls";
+    form = "'Rs, ['Xns]";
+  } else {
+    mnemonic = "ld'lo'la'ls";
+    form = "'Rs, 'Rt, ['Xns]";
+  }
+
+  Format(instr, mnemonic, form);
+}
+
+
 #define LOAD_STORE_LIST(V)    \
   V(STRB_w, "strb", "'Wt")    \
   V(STRH_w, "strh", "'Wt")    \
@@ -945,6 +970,46 @@ void Disassembler::VisitLoadStorePairNonTemporal(Instruction* instr) {
   Format(instr, mnemonic, form);
 }
 
+void Disassembler::VisitLoadStoreExclusive(Instruction* instr) {
+  const char *mnemonic = "unimplemented";
+  const char *form;
+  switch(instr->Mask(LoadStoreExclusiveMask)) {
+    case STXRB_w:  mnemonic = "stxrb";  form = "'Ws, 'Wt, ['Xns]"; break;
+    case STXRH_w:  mnemonic = "stxrh";  form = "'Ws, 'Wt, ['Xns]"; break;
+    case STXR_w:   mnemonic = "stxr";   form = "'Ws, 'Wt, ['Xns]"; break;
+    case STXR_x:   mnemonic = "stxr";   form = "'Ws, 'Xt, ['Xns]"; break;
+    case LDXRB_w:  mnemonic = "ldxrb";  form = "'Wt, ['Xns]"; break;
+    case LDXRH_w:  mnemonic = "ldxrh";  form = "'Wt, ['Xns]"; break;
+    case LDXR_w:   mnemonic = "ldxr";   form = "'Wt, ['Xns]"; break;
+    case LDXR_x:   mnemonic = "ldxr";   form = "'Xt, ['Xns]"; break;
+    case STXP_w:   mnemonic = "stxp";   form = "'Ws, 'Wt, 'Wt2, ['Xns]"; break;
+    case STXP_x:   mnemonic = "stxp";   form = "'Ws, 'Xt, 'Xt2, ['Xns]"; break;
+    case LDXP_w:   mnemonic = "ldxp";   form = "'Wt, 'Wt2, ['Xns]"; break;
+    case LDXP_x:   mnemonic = "ldxp";   form = "'Xt, 'Xt2, ['Xns]"; break;
+    case STLXRB_w: mnemonic = "stlxrb"; form = "'Ws, 'Wt, ['Xns]"; break;
+    case STLXRH_w: mnemonic = "stlxrh"; form = "'Ws, 'Wt, ['Xns]"; break;
+    case STLXR_w:  mnemonic = "stlxr";  form = "'Ws, 'Wt, ['Xns]"; break;
+    case STLXR_x:  mnemonic = "stlxr";  form = "'Ws, 'Xt, ['Xns]"; break;
+    case LDAXRB_w: mnemonic = "ldaxrb"; form = "'Wt, ['Xns]"; break;
+    case LDAXRH_w: mnemonic = "ldaxrh"; form = "'Wt, ['Xns]"; break;
+    case LDAXR_w:  mnemonic = "ldaxr";  form = "'Wt, ['Xns]"; break;
+    case LDAXR_x:  mnemonic = "ldaxr";  form = "'Xt, ['Xns]"; break;
+    case STLXP_w:  mnemonic = "stlxp";  form = "'Ws, 'Wt, 'Wt2, ['Xns]"; break;
+    case STLXP_x:  mnemonic = "stlxp";  form = "'Ws, 'Xt, 'Xt2, ['Xns]"; break;
+    case LDAXP_w:  mnemonic = "ldaxp";  form = "'Wt, 'Wt2, ['Xns]"; break;
+    case LDAXP_x:  mnemonic = "ldaxp";  form = "'Xt, 'Xt2, ['Xns]"; break;
+    case STLRB_w:  mnemonic = "stlrb";  form = "'Wt, ['Xns]"; break;
+    case STLRH_w:  mnemonic = "stlrh";  form = "'Wt, ['Xns]"; break;
+    case STLR_w:   mnemonic = "stlr";   form = "'Wt, ['Xns]"; break;
+    case STLR_x:   mnemonic = "stlr";   form = "'Xt, ['Xns]"; break;
+    case LDARB_w:  mnemonic = "ldarb";  form = "'Wt, ['Xns]"; break;
+    case LDARH_w:  mnemonic = "ldarh";  form = "'Wt, ['Xns]"; break;
+    case LDAR_w:   mnemonic = "ldar";   form = "'Wt, ['Xns]"; break;
+    case LDAR_x:   mnemonic = "ldar";   form = "'Xt, ['Xns]"; break;
+    default: form = "(LoadStoreExclusive)";
+  }
+  Format(instr, mnemonic, form);
+}
 
 void Disassembler::VisitFPCompare(Instruction* instr) {
   const char *mnemonic = "unimplemented";
@@ -1227,6 +1292,47 @@ void Disassembler::ProcessOutput(Instruction* /*instr*/) {
   // The base disasm does nothing more than disassembling into a buffer.
 }
 
+void Disassembler::MapCodeAddress(int64_t base_address,
+                                  const Instruction *instr_address) {
+  SetCodeAddressOffset(base_address -
+                          reinterpret_cast<intptr_t>(instr_address));
+}
+int64_t Disassembler::CodeRelativeAddress(const void *addr) {
+  return reinterpret_cast<intptr_t>(addr) + CodeAddressOffset();
+}
+
+void Disassembler::AppendCodeRelativeAddressToOutput(const Instruction *instr,
+                                                     const void *addr) {
+  USE(instr);
+  int64_t rel_addr = CodeRelativeAddress(addr);
+  if (rel_addr >= 0) {
+    AppendToOutput("(addr 0x%" PRIx64 ")", rel_addr);
+  } else {
+    AppendToOutput("(addr -0x%" PRIx64 ")", -rel_addr);
+  }
+}
+
+void Disassembler::AppendCodeRelativeLiteralToOutput(uint32_t literal_width,
+                                                     const void *addr) {
+  if (!dereferenceLiterals_) return;
+  intptr_t real_address = CodeRelativeAddress(addr);
+  switch (literal_width) {
+    case LDR_w_lit:
+      AppendToOutput(
+        " [value word 0x%" PRIx32 "]",
+        *reinterpret_cast<uint32_t*>(real_address)
+      );
+      break;
+    case LDR_x_lit:
+      AppendToOutput(
+        " [value dword 0x%" PRIx64 "]",
+        *reinterpret_cast<uint64_t*>(real_address)
+      );
+      break;
+    default:
+      break;
+  }
+}
 
 void Disassembler::Format(Instruction* instr, const char* mnemonic,
                           const char* format) {
@@ -1272,6 +1378,7 @@ int Disassembler::SubstituteField(Instruction* instr, const char* format) {
     case 'A': return SubstitutePCRelAddressField(instr, format);
     case 'B': return SubstituteBranchTargetField(instr, format);
     case 'O': return SubstituteLSRegOffsetField(instr, format);
+    case 'l': return SubstituteInstructionAttributes(instr, format);
     default: {
       not_reached();
       return 1;
@@ -1298,6 +1405,7 @@ int Disassembler::SubstituteRegisterField(Instruction* instr,
       }
       break;
     }
+    case 's': reg_num = instr->Rs(); break;
     default: not_reached();
   }
 
@@ -1482,12 +1590,17 @@ int Disassembler::SubstituteLiteralField(Instruction* instr,
                                          const char* format) {
   assert(strncmp(format, "LValue", 6) == 0);
   USE(format);
-
-  switch (instr->Mask(LoadLiteralMask)) {
+  const void* address = instr->LiteralAddress();
+  uint32_t literal_width = instr->Mask(LoadLiteralMask);
+  switch (literal_width) {
     case LDR_w_lit:
     case LDR_x_lit:
     case LDR_s_lit:
-    case LDR_d_lit: AppendToOutput("(addr %p)", instr->LiteralAddress()); break;
+    case LDR_d_lit:
+      AppendCodeRelativeAddressToOutput(instr, address);
+      AppendCodeRelativeLiteralToOutput(literal_width, address);
+      break;
+
     default: not_reached();
   }
 
@@ -1658,6 +1771,32 @@ int Disassembler::SubstitutePrefetchField(Instruction* instr,
   return 6;
 }
 
+
+int Disassembler::SubstituteInstructionAttributes(Instruction* instr,
+                                          const char* format) {
+  assert(format[0] == 'l');
+  const char* lse_op[] = { "add", "clr", "eor", "set", 
+                           "smax", "smin", "umax", "umin" };
+  const char* lse_size[] = { "b", "h", "", "" };
+  const char* lse_semantic[] = { "", "l", "a", "al" };
+
+  int idx;
+  switch (format[1]) {
+    case 'a':
+      idx = instr->Ar();
+      AppendToOutput("%s", lse_semantic[idx]);
+      break;
+    case 'o':
+      idx = instr->Opc();
+      AppendToOutput("%s", lse_op[idx]);
+      break;
+    case 's':
+      idx = instr->SizeLS();
+      AppendToOutput("%s", lse_size[idx]);
+      break;
+  }
+  return 2;
+}
 
 void Disassembler::ResetOutput() {
   buffer_pos_ = 0;

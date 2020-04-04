@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,14 @@
 
 #include "hphp/runtime/vm/jit/smashable-instr-x64.h"
 
-#include "hphp/runtime/vm/jit/align-x64.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/code-cache.h"
+#include "hphp/runtime/vm/jit/tc.h"
+#include "hphp/runtime/vm/jit/tc-internal.h"
 
 #include "hphp/util/asm-x64.h"
 #include "hphp/util/data-block.h"
+
+#include <folly/MicroSpinLock.h>
 
 namespace HPHP { namespace jit { namespace x64 {
 
@@ -40,55 +43,41 @@ namespace HPHP { namespace jit { namespace x64 {
 
 #define EMIT_BODY(cb, inst, Inst, ...)  \
   ([&] {                                \
-    align(cb, Alignment::Smash##Inst,   \
+    align(cb, &fixups,                  \
+          Alignment::Smash##Inst,       \
           AlignContext::Live);          \
-    auto const start = cb.frontier();   \
-    X64Assembler a { cb };              \
+    auto const theStart = cb.frontier();\
+    NEW_X64_ASM(a, cb);                 \
     a.inst(__VA_ARGS__);                \
-    return start;                       \
+    return theStart;                    \
   }())
 
-TCA emitSmashableMovq(CodeBlock& cb, uint64_t imm, PhysReg d) {
-  auto const start = EMIT_BODY(cb, movq, Movq, 0xdeadbeeffeedface, d);
+TCA emitSmashableMovq(CodeBlock& cb, CGMeta& fixups, uint64_t imm,
+                      PhysReg d) {
+  auto const start =
+    EMIT_BODY(cb, movq, Movq, 0xdeadbeeffeedface, d);
 
+  auto frontier = cb.toDestAddress(cb.frontier());
   auto immp = reinterpret_cast<uint64_t*>(
-    cb.frontier() - smashableMovqLen() + kSmashMovqImmOff
+    frontier - smashableMovqLen() + kSmashMovqImmOff
   );
   *immp = imm;
 
   return start;
 }
 
-TCA emitSmashableCmpq(CodeBlock& cb, int32_t imm, PhysReg r, int8_t disp) {
-  return EMIT_BODY(cb, cmpq, Cmpq, imm, r[disp]);
-}
-
-TCA emitSmashableCall(CodeBlock& cb, TCA target) {
+TCA emitSmashableCall(CodeBlock& cb, CGMeta& fixups, TCA target) {
   return EMIT_BODY(cb, call, Call, target);
 }
 
-TCA emitSmashableJmp(CodeBlock& cb, TCA target) {
+TCA emitSmashableJmp(CodeBlock& cb, CGMeta& fixups, TCA target) {
   return EMIT_BODY(cb, jmp, Jmp, target);
 }
 
-TCA emitSmashableJcc(CodeBlock& cb, TCA target, ConditionCode cc) {
+TCA emitSmashableJcc(CodeBlock& cb, CGMeta& fixups, TCA target,
+                     ConditionCode cc) {
   assertx(cc != CC_None);
   return EMIT_BODY(cb, jcc, Jcc, cc, target);
-}
-
-std::pair<TCA,TCA>
-emitSmashableJccAndJmp(CodeBlock& cb, TCA target, ConditionCode cc) {
-  assertx(cc != CC_None);
-
-  align(cb, Alignment::SmashJccAndJmp, AlignContext::Live);
-
-  X64Assembler a { cb };
-  auto const jcc = cb.frontier();
-  a.jcc(cc, target);
-  auto const jmp = cb.frontier();
-  a.jmp(target);
-
-  return std::make_pair(jcc, jmp);
 }
 
 #undef EMIT_BODY
@@ -107,45 +96,57 @@ void smashCmpq(TCA inst, uint32_t imm) {
 
 void smashCall(TCA inst, TCA target) {
   always_assert(is_aligned(inst, Alignment::SmashCall));
-  /*
-   * TODO(#7889486): We'd like this just to be:
-   *
-   *    X64Assembler::patchCall(inst, target);
-   *
-   * but presently this causes asserts to fire in MCGenerator because of a bug
-   * with PGO and relocation.
-   */
-  auto& cb = mcg->code.blockFor(inst);
-  CodeCursor cursor { cb, inst };
-  X64Assembler a { cb };
-  a.call(target);
+  X64AssemblerBase::patchCall(inst, inst, target);
 }
 
 void smashJmp(TCA inst, TCA target) {
   always_assert(is_aligned(inst, Alignment::SmashJmp));
 
-  auto& cb = mcg->code.blockFor(inst);
-  CodeCursor cursor { cb, inst };
-  X64Assembler a { cb };
+  // Smashing jmps can be tricky because we sometimes override the entire five
+  // byte instruction with a nop rather than updating the four byte immediate.
+  // In order to both leave the instruction in a valid state and avoid writing
+  // to someone else's bytes we perform a four and a one byte write. This should
+  // generally be safe (see below), but can be racy with multiple threads
+  // writing to the same jmp. Grab a spin lock to serialize smashJmp calls.
+  static folly::MicroSpinLock s_lock;
+  folly::MSLGuard g{s_lock};
 
   if (target > inst && target - inst <= smashableJmpLen()) {
-    a.emitNop(target - inst);
+    // Using emitNop here would write eight bytes to smash the 5 byte Jmp,
+    // unfortunately this is racy without the codeLock, so instead emit the
+    // nop using a single machine instruction writing four bytes (the final
+    // two bytes of the nop aren't required to be anything specific).
+    *reinterpret_cast<uint32_t*>(inst) = 0x00441f0f;
+
+    // While zeroing the final bytes is not a requirement intel does recommend
+    // that this canonical form be used. So as this is not required for
+    // correctness, it's okay for it to not be atomic with the above operation.
+    *reinterpret_cast<uint8_t*>(inst + 4) = 0x00;
   } else {
-    a.jmp(target);
+    // We may be unsmashing a nop. We have to be careful here, to ensure that
+    // we always leave the instruction in a consistent state.
+    auto const imm = safe_cast<int32_t>(target - (inst + 5));
+    if (inst[0] != 0xe9) {
+      assertx(inst[0] == 0x0f && inst[1] == 0x1f && inst[2] == 0x44);
+
+      auto const last = 0xff & (imm >> 24);
+      auto const first = 0xe9 | ((size_t(imm) & 0xffffffULL) << 8);
+
+      // As noted above, storing to the final two bytes of our five byte nop
+      // will still allow it to remain a nop, so we can write to the final byte
+      // and then atomically set the remaining four bytes, smashing in our new
+      // jmp instruction.
+      *reinterpret_cast<uint8_t*>(inst + 4) = last;
+      *reinterpret_cast<uint32_t*>(inst) = first;
+    } else {
+      *reinterpret_cast<uint32_t*>(inst + 1) = imm;
+    }
   }
 }
 
-void smashJcc(TCA inst, TCA target, ConditionCode cc) {
+void smashJcc(TCA inst, TCA target) {
   always_assert(is_aligned(inst, Alignment::SmashJcc));
-
-  if (cc == CC_None) {
-    X64Assembler::patchJcc(inst, target);
-  } else {
-    auto& cb = mcg->code.blockFor(inst);
-    CodeCursor cursor { cb, inst };
-    X64Assembler a { cb };
-    a.jcc(cc, target);
-  }
+  X64AssemblerBase::patchJcc(inst, inst, target);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -183,6 +184,20 @@ TCA smashableJccTarget(TCA inst) {
 
 ConditionCode smashableJccCond(TCA inst) {
   return DecodedInstruction(inst).jccCondCode();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+bool optimizeSmashedCall(TCA inst) {
+  return false;
+}
+
+bool optimizeSmashedJmp(TCA inst) {
+  return false;
+}
+
+bool optimizeSmashedJcc(TCA inst) {
+  return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class X {
   function __call($asd, ...$ry) {
@@ -8,4 +8,8 @@ class X {
 }
 
 
+
+<<__EntryPoint>>
+function main_magic_call() {
 (new X)->__call(new stdclass, new stdclass, new stdclass);
+}

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class X {
   protected function foo() { echo "X::foo\n"; }
@@ -21,6 +21,7 @@ class B extends X {
     $a->foo();
   }
 };
-
+<<__EntryPoint>> function main(): void {
 $b = new B;
 $b->foo();
+}

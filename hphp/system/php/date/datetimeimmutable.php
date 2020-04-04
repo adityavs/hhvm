@@ -1,4 +1,4 @@
-<?php
+<?hh // partial
 
 class DateTimeImmutable implements DateTimeInterface {
   public function __construct(
@@ -92,14 +92,21 @@ class DateTimeImmutable implements DateTimeInterface {
     DateTimeZone $timezone = null
   ): mixed {
     $out = new DateTimeImmutable();
-    $out->data = DateTime::createFromFormat($format, $time, $timezone);
-    if ($out->data === false) {
+    $data = DateTime::createFromFormat($format, $time, $timezone);
+    if ($data === false) {
       return false;
     }
+    $out->data = $data;
     return $out;
   }
 
-  public static function getLastErrors(): array {
+  public static function createFromMutable(DateTime $datetime) {
+    $out = new DateTimeImmutable();
+    $out->data = clone $datetime;
+    return $out;
+  }
+
+  public static function getLastErrors(): darray {
     return DateTime::getLastErrors();
   }
 

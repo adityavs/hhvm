@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function ut_run($mainFunc) {
     $GLOBALS['oo-mode'] = true;
@@ -31,20 +31,20 @@ function ut_coll_compare( $coll, $str1, $str2 )
     return $GLOBALS['oo-mode'] ?
       $coll->compare( $str1, $str2 ) : collator_compare( $coll, $str1, $str2 );
 }
-function ut_coll_sort_with_sort_keys( $coll, &$arr )
+function ut_coll_sort_with_sort_keys( $coll, inout $arr )
 {
     return $GLOBALS['oo-mode'] ?
-      $coll->sortWithSortKeys( $arr ) : collator_sort_with_sort_keys( $coll, $arr );
+      $coll->sortWithSortKeys( inout $arr ) : collator_sort_with_sort_keys( $coll, inout $arr );
 }
-function ut_coll_sort( $coll, &$arr, $sort_flag = Collator::SORT_REGULAR )
+function ut_coll_sort( $coll, inout $arr, $sort_flag = Collator::SORT_REGULAR )
 {
     return $GLOBALS['oo-mode'] ?
-      $coll->sort( $arr, $sort_flag ) : collator_sort( $coll, $arr, $sort_flag );
+      $coll->sort( inout $arr, $sort_flag ) : collator_sort( $coll, inout $arr, $sort_flag );
 }
-function ut_coll_asort( $coll, &$arr, $sort_flag = Collator::SORT_REGULAR )
+function ut_coll_asort( $coll, inout $arr, $sort_flag = Collator::SORT_REGULAR )
 {
     return $GLOBALS['oo-mode'] ?
-      $coll->asort( $arr, $sort_flag ) : collator_asort( $coll, $arr, $sort_flag );
+      $coll->asort( inout $arr, $sort_flag ) : collator_asort( $coll, inout $arr, $sort_flag );
 }
 function ut_coll_get_locale( $coll, $type )
 {
@@ -65,7 +65,6 @@ function ut_coll_set_default( $coll )
 {
     return $GLOBALS['oo-mode'] ? Collator::setDefault( $coll ) : collator_set_default( $coll );
 }
-$test_num = 1;
 function sort_arrays( $locale, $arrays, $sort_flag = Collator::SORT_REGULAR )
 {
     $res_str = '';
@@ -73,115 +72,112 @@ function sort_arrays( $locale, $arrays, $sort_flag = Collator::SORT_REGULAR )
     foreach( $arrays as $array )
     {
         // Sort array values
-        $res_val = ut_coll_sort( $coll, $array, $sort_flag );
+        $res_val = ut_coll_sort( $coll, inout $array, $sort_flag );
         // Concatenate the sorted array and function result
         // with output string.
         $res_dump = "\n" . dump( $array ) .
                     "\n Result: " . dump( $res_val );
         // Preppend test signature to output string
         $md5 = md5( $res_dump );
-        global $test_num;
+
 
         $res_str .= "\n\n".
-                    "Test $test_num.$md5:" .
+                    "Test ".ExtCollator1810::$test_num.".$md5:" .
                     $res_dump;
-        ++$test_num;
+        ++ExtCollator1810::$test_num;
     }
     return $res_str;
 }
 function ut_main1()
 {
-    global $test_num;
-    $test_num = 1;
+
+    ExtCollator1810::$test_num = 1;
     $res_str = '';
     // Sort an array in SORT_REGULAR mode using en_US locale.
-    $test_params = array(
-        array( 'abc', 'abd', 'aaa' ),
-        array( 'm'  , '1'  , '_'   ),
-        array( 'a'  , 'aaa', 'aa'  ),
-        array( 'ba' , 'b'  , 'ab'  ),
-        array( 'e'  , 'c'  , 'a'   ),
-        array( '100', '25' , '36'  ), // test 6
-        array( 5    , '30' , 2     ),
-        array( 'd'  , ''   , ' a'  ),
-        array( 'd ' , 'f ' , ' a'  ),
-        array( 'a'  , null , '3'   ),
-        array( 'y'  , 'k'  , 'i' )
-    );
+    $test_params = varray[
+        varray[ 'abc', 'abd', 'aaa' ],
+        varray[ 'm'  , '1'  , '_'   ],
+        varray[ 'a'  , 'aaa', 'aa'  ],
+        varray[ 'ba' , 'b'  , 'ab'  ],
+        varray[ 'e'  , 'c'  , 'a'   ],
+        varray[ '100', '25' , '36'  ], // test 6
+        varray[ 5    , '30' , 2     ],
+        varray[ 'd'  , ''   , ' a'  ],
+        varray[ 'd ' , 'f ' , ' a'  ],
+        varray[ 'a'  , null , '3'   ],
+        varray[ 'y'  , 'k'  , 'i' ]
+    ];
     $res_str .= sort_arrays( 'en_US', $test_params );
-    $test_params = array(
-        array( '100', '25' , '36'  ),
-        array( 5    , '30' , 2     ), // test 13
-        array( 'd'  , ''   , ' a'  ),
-        array( 'y'  , 'k'  , 'i' )
-    );
+    $test_params = varray[
+        varray[ '100', '25' , '36'  ],
+        varray[ 5    , '30' , 2     ], // test 13
+        varray[ 'd'  , ''   , ' a'  ],
+        varray[ 'y'  , 'k'  , 'i' ]
+    ];
     // Sort in en_US locale with SORT_STRING flag
     $res_str .= sort_arrays( 'en_US', $test_params, Collator::SORT_STRING );
     // Sort a non-ASCII array using ru_RU locale.
-    $test_params = array(
-        array( 'абг',                'абв',                'ааа',                'абв' ),
-        array( 'аа', 'ааа',               'а' )
-    );
+    $test_params = varray[
+        varray[ 'абг',                'абв',                'ааа',                'абв' ],
+        varray[ 'аа', 'ааа',               'а' ]
+    ];
     $res_str .= sort_arrays( 'ru_RU', $test_params );
     // Sort an array using Lithuanian locale.
-    $test_params = array(
-        array( 'y'  , 'k'  , 'i' )
-    );
+    $test_params = varray[
+        varray[ 'y'  , 'k'  , 'i' ]
+    ];
     $res_str .= sort_arrays( 'lt_LT', $test_params );
     return $res_str;
 }
-ut_run('ut_main1');
 function ut_main2() {
   $obj = ut_coll_create('en_US');
-  $arr0 = array( 100, 25, 36, '30.2', '30.12' );
+  $arr0 = varray[ 100, 25, 36, '30.2', '30.12' ];
  // test 6
-  $arr1 = array( '100', '25', '36'  );
+  $arr1 = varray[ '100', '25', '36'  ];
  // test 6
-  $arr2 = array( 11, 5, '2', 64, 17, '30', 10, 2, '54' );
+  $arr2 = varray[ 11, 5, '2', 64, 17, '30', 10, 2, '54' ];
   // strcmp 17 and 30, ret = 1
   // Comparing values 17 and 30, ret = 1
-  $arr3 = array( 11, 5, 2, 64, 17, 30, 10, 2, 54 );
+  $arr3 = varray[ 11, 5, 2, 64, 17, 30, 10, 2, 54 ];
   $arrA = $arr0;
   $arrB = $arr0;
   $arrC = $arr0;
-  ut_coll_sort($obj, $arrA, Collator::SORT_REGULAR);
-  ut_coll_sort($obj, $arrB, Collator::SORT_STRING);
-  ut_coll_sort($obj, $arrC, Collator::SORT_NUMERIC);
+  ut_coll_sort($obj, inout $arrA, Collator::SORT_REGULAR);
+  ut_coll_sort($obj, inout $arrB, Collator::SORT_STRING);
+  ut_coll_sort($obj, inout $arrC, Collator::SORT_NUMERIC);
   var_dump($arrA, $arrB, $arrC);
   $arrA = $arr1;
   $arrB = $arr1;
   $arrC = $arr1;
-  ut_coll_sort($obj, $arrA, Collator::SORT_REGULAR);
-  ut_coll_sort($obj, $arrB, Collator::SORT_STRING);
-  ut_coll_sort($obj, $arrC, Collator::SORT_NUMERIC);
+  ut_coll_sort($obj, inout $arrA, Collator::SORT_REGULAR);
+  ut_coll_sort($obj, inout $arrB, Collator::SORT_STRING);
+  ut_coll_sort($obj, inout $arrC, Collator::SORT_NUMERIC);
   var_dump($arrA, $arrB, $arrC);
   $arrA = $arr2;
   $arrB = $arr2;
   $arrC = $arr2;
-  ut_coll_sort($obj, $arrA, Collator::SORT_REGULAR);
-  ut_coll_sort($obj, $arrB, Collator::SORT_STRING);
-  ut_coll_sort($obj, $arrC, Collator::SORT_NUMERIC);
+  ut_coll_sort($obj, inout $arrA, Collator::SORT_REGULAR);
+  ut_coll_sort($obj, inout $arrB, Collator::SORT_STRING);
+  ut_coll_sort($obj, inout $arrC, Collator::SORT_NUMERIC);
   var_dump($arrA, $arrB, $arrC);
   $arrA = $arr3;
   $arrB = $arr3;
   $arrC = $arr3;
-  ut_coll_sort($obj, $arrA, Collator::SORT_REGULAR);
-  ut_coll_sort($obj, $arrB, Collator::SORT_STRING);
-  ut_coll_sort($obj, $arrC, Collator::SORT_NUMERIC);
+  ut_coll_sort($obj, inout $arrA, Collator::SORT_REGULAR);
+  ut_coll_sort($obj, inout $arrB, Collator::SORT_STRING);
+  ut_coll_sort($obj, inout $arrC, Collator::SORT_NUMERIC);
   var_dump($arrA, $arrB, $arrC);
 }
-ut_run('ut_main2');
 function ut_main3()
 {
     $res_str = '';
-    $locales = array(
+    $locales = varray[
         'EN-US-ODESSA',
         'UK_UA_ODESSA',
-        'uk-ua_CALIFORNIA@currency=;currency=GRN',
         '',
         'root',
         'uk@currency=EURO'
-    );
+    ];
     foreach( $locales as $locale )
     {
         // Create Collator with the current locale.
@@ -200,7 +196,6 @@ function ut_main3()
     }
     return $res_str;
 }
-ut_run('ut_main3');
 function test_COW( $locale, $test_array )
 {
     $res_str = '';
@@ -209,8 +204,8 @@ function test_COW( $locale, $test_array )
     $copy1 = $test_array;
     $copy2 = $test_array;
     // Sort given array and the first copy of it.
-    ut_coll_sort( $coll, $test_array );
-    ut_coll_sort( $coll, $copy1      );
+    ut_coll_sort( $coll, inout $test_array );
+    ut_coll_sort( $coll, inout $copy1      );
     // Return contents of all the arrays.
     // The second copy should remain unsorted.
     $res_str .= dump( $test_array ) . "\n";
@@ -221,14 +216,13 @@ function test_COW( $locale, $test_array )
 function ut_main4()
 {
     $res_str = '';
-    $a1 = array( 'b', 'a', 'c' );
-    $a2 = array( 'б', 'а', 'в' );
+    $a1 = varray[ 'b', 'a', 'c' ];
+    $a2 = varray[ 'б', 'а', 'в' ];
     $res_str .= test_COW( 'en_US', $a1 );
     $res_str .= test_COW( 'ru_RU', $a2 );
     return $res_str;
 }
-ut_run('ut_main4');
-function cmp_array( &$coll, $a )
+function cmp_array( inout $coll, $a )
 {
     $res = '';
     $prev = null;
@@ -247,16 +241,16 @@ function cmp_array( &$coll, $a )
     $res .= "\n";
     return $res;
 }
-function check_alternate_handling( &$coll )
+function check_alternate_handling( inout $coll )
 {
     $res = '';
     ut_coll_set_strength( $coll, Collator::TERTIARY );
     ut_coll_set_attribute( $coll, Collator::ALTERNATE_HANDLING, Collator::NON_IGNORABLE );
-    $res .= cmp_array( $coll, array( 'di Silva', 'Di Silva', 'diSilva', 'U.S.A.', 'USA' ) );
+    $res .= cmp_array( inout $coll, varray[ 'di Silva', 'Di Silva', 'diSilva', 'U.S.A.', 'USA' ] );
     ut_coll_set_attribute( $coll, Collator::ALTERNATE_HANDLING, Collator::SHIFTED );
-    $res .= cmp_array( $coll, array( 'di Silva', 'diSilva', 'Di Silva', 'U.S.A.', 'USA' ) );
+    $res .= cmp_array( inout $coll, varray[ 'di Silva', 'diSilva', 'Di Silva', 'U.S.A.', 'USA' ] );
     ut_coll_set_strength( $coll, Collator::QUATERNARY );
-    $res .= cmp_array( $coll, array( 'di Silva', 'diSilva', 'Di Silva', 'U.S.A.', 'USA' ) );
+    $res .= cmp_array( inout $coll, varray[ 'di Silva', 'diSilva', 'Di Silva', 'U.S.A.', 'USA' ] );
     $res .= "\n";
     return $res;
 }
@@ -264,9 +258,8 @@ function ut_main5()
 {
     $coll = ut_coll_create( 'en_US' );
     return
-        check_alternate_handling( $coll );
+        check_alternate_handling( inout $coll );
 }
-ut_run('ut_main5');
 function sort_arrays_with_sort_keys( $locale, $arrays )
 {
     $res_str = '';
@@ -274,7 +267,7 @@ function sort_arrays_with_sort_keys( $locale, $arrays )
     foreach( $arrays as $array )
     {
         // Sort array values
-        $res_val = ut_coll_sort_with_sort_keys( $coll, $array );
+        $res_val = ut_coll_sort_with_sort_keys( $coll, inout $array );
         // Concatenate the sorted array and function result
         // with output string.
         $res_dump = "\n" . dump( $array ) .
@@ -283,44 +276,58 @@ function sort_arrays_with_sort_keys( $locale, $arrays )
 
         // Preppend test signature to output string
         $md5 = md5( $res_dump );
-        global $test_num;
+
         $res_str .= "\n\n".
-                    "Test $test_num.$md5:" .
+                    "Test ".ExtCollator1810::$test_num.".$md5:" .
                     $res_dump;
-        ++$test_num;
+        ++ExtCollator1810::$test_num;
     }
     return $res_str;
 }
 function ut_main6()
 {
-    global $test_num;
-    $test_num = 1;
+
+    ExtCollator1810::$test_num = 1;
     $res_str = '';
     // Sort an array in SORT_REGULAR mode using en_US locale.
-    $test_params = array(
-        array( 'abc', 'abd', 'aaa' ),
-        array( 'm'  , '1'  , '_'   ),
-        array( 'a'  , 'aaa', 'aa'  ),
-        array( 'ba' , 'b'  , 'ab'  ),
-        array( 'e'  , 'c'  , 'a'   ),
-        array( 'd'  , ''   , ' a'  ),
-        array( 'd ' , 'f ' , ' a'  ),
-        array( 'a'  , null , '3'   ),
-        array( 'y'  , 'i'  , 'k'   )
-    );
+    $test_params = varray[
+        varray[ 'abc', 'abd', 'aaa' ],
+        varray[ 'm'  , '1'  , '_'   ],
+        varray[ 'a'  , 'aaa', 'aa'  ],
+        varray[ 'ba' , 'b'  , 'ab'  ],
+        varray[ 'e'  , 'c'  , 'a'   ],
+        varray[ 'd'  , ''   , ' a'  ],
+        varray[ 'd ' , 'f ' , ' a'  ],
+        varray[ 'a'  , null , '3'   ],
+        varray[ 'y'  , 'i'  , 'k'   ]
+    ];
     $res_str .= sort_arrays_with_sort_keys( 'en_US', $test_params );
     // Sort a non-ASCII array using ru_RU locale.
-    $test_params = array(
-        array( 'абг',                'абв',                'ааа',                'абв' ),
-        array( 'аа', 'ааа',               'а' )
-    );
+    $test_params = varray[
+        varray[ 'абг',                'абв',                'ааа',                'абв' ],
+        varray[ 'аа', 'ааа',               'а' ]
+    ];
     $res_str .= sort_arrays_with_sort_keys( 'ru_RU', $test_params );
     // Array with data for sorting.
-    $test_params = array(
-        array( 'y'  , 'i'  , 'k'   )
-    );
+    $test_params = varray[
+        varray[ 'y'  , 'i'  , 'k'   ]
+    ];
     // Sort an array using Lithuanian locale.
     $res_str .= sort_arrays_with_sort_keys( 'lt_LT', $test_params );
     return $res_str . "\n";
 }
+
+<<__EntryPoint>>
+function main_1810() {
+$test_num = 1;
+ut_run('ut_main1');
+ut_run('ut_main2');
+ut_run('ut_main3');
+ut_run('ut_main4');
+ut_run('ut_main5');
 ut_run('ut_main6');
+}
+
+abstract final class ExtCollator1810 {
+  public static $test_num;
+}

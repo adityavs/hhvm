@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/vm/tread-hash-map.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/atomic.h"
 #include "hphp/util/data-block.h"
 
@@ -52,7 +53,12 @@ namespace HPHP { namespace jit {
  *     and an offset from the start of the func for pc.  In the case of
  *     resumable frames the sp offset is relative to Stack::resumableStackBase.
  *
- *   - IndirectFixup: this is used for some shared stubs in the TC.
+ *   - IndirectFixup:
+ *
+ *     This can be used for some shared stubs in the TC, to avoid
+ *     setting up a full frame, on architectures where the calee's
+ *     frame is stored immediately under the caller's sp (currently
+ *     true of x64 but not arm or ppc).
  *
  *     In this case, some JIT'd code associated with the ActRec* we found made
  *     a call to a shared stub, and then that stub called C++.  The
@@ -61,9 +67,10 @@ namespace HPHP { namespace jit {
  *     shared stub can be found.  I.e., we're trying to chase back two return
  *     ips into the TC.
  *
- *     Note that this means IndirectFixups will not work for C++ code paths
- *     that need to do a fixup without making at least one other C++ call, but
- *     for the current use case this is fine.
+ *     Note that this means IndirectFixups will not work for C++ code
+ *     paths that need to do a fixup without making at least one other
+ *     C++ call (because of -momit-leaf-frame-pointers), but for the
+ *     current use case this is fine.
  *
  *     Here's a picture of the native stack in the indirect fixup situation:
  *
@@ -114,109 +121,68 @@ struct Fixup {
 
   Fixup() {}
 
-  bool isValid() const { return pcOffset >= 0 && spOffset >= 0; }
+  bool isValid() const { return spOffset >= 0; }
+
+  bool operator==(const Fixup& o) const {
+    return pcOffset == o.pcOffset && spOffset == o.spOffset;
+  }
+  bool operator!=(const Fixup& o) const {
+    return pcOffset != o.pcOffset || spOffset != o.spOffset;
+  }
 
   int32_t pcOffset{-1};
   int32_t spOffset{-1};
 };
 
-struct IndirectFixup {
-  explicit IndirectFixup(int retIpDisp) : returnIpDisp{retIpDisp} {}
-
-  /* FixupEntry uses magic to differentiate between IndirectFixup and Fixup. */
-  int32_t magic{-1};
-  int32_t returnIpDisp;
-};
-
 inline Fixup makeIndirectFixup(int dwordsPushed) {
   Fixup fix;
-  fix.spOffset = (2 + dwordsPushed) * 8;
+  fix.spOffset = kNativeFrameSize +
+                 AROFF(m_savedRip) +
+                 dwordsPushed * sizeof(uintptr_t);
   return fix;
 }
 
-struct FixupMap {
-  static constexpr unsigned kInitCapac = 128;
-  TRACE_SET_MOD(fixup);
+namespace FixupMap {
+/*
+ * Record a new fixup (or overwrite an existing fixup) at tca.
+ */
+void recordFixup(CTCA tca, const Fixup& fixup);
 
-  struct VMRegs {
-    PC pc;
-    TypedValue* sp;
-    const ActRec* fp;
-  };
+/*
+ * Find the fixup for tca if it exists (or return nullptr).
+ */
+const Fixup* findFixup(CTCA tca);
 
-  FixupMap() : m_fixups(kInitCapac) {}
+/*
+ * Number of entries in the fixup map.
+ */
+size_t size();
 
-  void recordFixup(CTCA tca, const Fixup& fixup) {
-    TRACE(3, "FixupMapImpl::recordFixup: tca %p -> (pcOff %d, spOff %d)\n",
-          tca, fixup.pcOffset, fixup.spOffset);
+/*
+ * Perform a fixup of the VM registers for a stack whose first frame is `rbp`.
+ *
+ * Returns whether we successfully performed the fixup.  (We assert on failure
+ * if `soft` is not set).
+ */
+bool fixupWork(ActRec* rbp, bool soft = false);
 
-    if (auto pos = m_fixups.find(tca)) {
-      *pos = FixupEntry(fixup);
-    } else {
-      m_fixups.insert(tca, FixupEntry(fixup));
-    }
-  }
+/*
+ * Returns true if calls to func should use an EagerVMRegAnchor.
+ */
+bool eagerRecord(const Func* func);
+}
 
-  const Fixup* findFixup(CTCA tca) const {
-    auto ent = m_fixups.find(tca);
-    if (!ent) return nullptr;
-    return &ent->fixup;
-  }
+namespace detail {
+void syncVMRegsWork(bool soft); // internal sync work for a dirty vm state
+}
 
-  bool getFrameRegs(const ActRec* ar, VMRegs* outVMRegs) const;
-
-  void fixup(ExecutionContext* ec) const;
-  void fixupWork(ExecutionContext* ec, ActRec* rbp) const;
-  void fixupWorkSimulated(ExecutionContext* ec) const;
-
-  static bool eagerRecord(const Func* func);
-
-private:
-  union FixupEntry {
-    explicit FixupEntry(Fixup f) : fixup(f) {}
-
-    /* Depends on the magic field in an IndirectFixup being -1. */
-    bool isIndirect() const {
-      static_assert(
-        offsetof(IndirectFixup, magic) == offsetof(FixupEntry, firstElem),
-        "Differentiates between Fixup and IndirectFixup by looking at magic."
-      );
-
-      return firstElem < 0;
-    }
-
-    int32_t firstElem;
-    Fixup fixup;
-    IndirectFixup indirect;
-  };
-
-private:
-  PC pc(const ActRec* ar, const Func* f, const Fixup& fixup) const {
-    assertx(f);
-    return f->getEntry() + fixup.pcOffset;
-  }
-
-  void regsFromActRec(CTCA tca, const ActRec* ar, const Fixup& fixup,
-                      VMRegs* outRegs) const {
-    const Func* f = ar->m_func;
-    assertx(f);
-    TRACE(3, "regsFromActRec:: tca %p -> (pcOff %d, spOff %d)\n",
-          (void*)tca, fixup.pcOffset, fixup.spOffset);
-    assertx(fixup.spOffset >= 0);
-    outRegs->pc = pc(ar, f, fixup);
-    outRegs->fp = ar;
-
-    if (UNLIKELY(ar->resumed())) {
-      TypedValue* stackBase = Stack::resumableStackBase(ar);
-      outRegs->sp = stackBase - fixup.spOffset;
-    } else {
-      outRegs->sp = (TypedValue*)ar - fixup.spOffset;
-    }
-  }
-
-private:
-  TreadHashMap<CTCA,FixupEntry,ctca_identity_hash> m_fixups;
-};
+/*
+ * Sync VM registers for the first TC frame in the callstack.
+ */
+inline void syncVMRegs(bool soft = false) {
+  if (tl_regState == VMRegState::CLEAN) return;
+  detail::syncVMRegsWork(soft);
+}
 
 //////////////////////////////////////////////////////////////////////
 

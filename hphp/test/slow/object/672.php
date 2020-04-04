@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class FOo {
   public function exclAIM() {
@@ -15,27 +15,31 @@ class TesT {
   public static function ExclAim() {
     $obj = new fOO();
     $obj->{
-__fUNCTION__}
+__FUNCTION__}
  = 1;
     $obj->{
-__cLASS__}
+__CLASS__}
  = 2;
     $obj->__FuNCTION__ = 3;
     $obj->__ClASS__ = 4;
     $obj->{
-__FUnCTION__}
+__FUNCTION__}
 ();
     $obj->{
-__CLaSS__}
+__CLASS__}
 ();
     $obj->__FUNcTION__();
     $obj->__CLAsS__();
-    $arr = array();
+    $arr = darray[];
     foreach ($obj as $k => $v) {
       $arr[$k] = $v;
     }
-    ksort($arr);
+    ksort(inout $arr);
     var_dump($arr);
   }
 }
+
+<<__EntryPoint>>
+function main_672() {
 tEst::eXclaiM();
+}

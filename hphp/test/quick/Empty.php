@@ -1,20 +1,23 @@
-<?php
+<?hh
 
+abstract final class quickEmpty {
+  public static $y;
+}
+
+<<__EntryPoint>>
 function f() {
-  $n = "x";
-  $g = "y";
-  global $$g;
 
   $x = 0;
-  $$g = 0;
-  print ":".empty($x).":\n";
-  print ":".empty($$n).":\n";
-  print ":".empty($$g).":\n";
+  $GLOBALS['y'] = 0;
+  quickEmpty::$y = 0;
+  print ":".!($x ?? false).":\n";
+  print ":".!($GLOBALS['y'] ?? false).":\n";
+  print ":".!(quickEmpty::$y ?? false).":\n";
 
   $x = 1;
-  $$g = 1;
-  print ":".empty($x).":\n";
-  print ":".empty($$n).":\n";
-  print ":".empty($$g).":\n";
+  $GLOBALS['y'] = 1;
+  quickEmpty::$y = 1;
+  print ":".!($x ?? false).":\n";
+  print ":".!($GLOBALS['y'] ?? false).":\n";
+  print ":".!(quickEmpty::$y ?? false).":\n";
 }
-f();

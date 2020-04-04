@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,7 @@
 #include "hphp/runtime/base/string-data.h"
 
 #include "hphp/util/functional.h"
-#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/util/hash-map.h"
 
 namespace HPHP {
 
@@ -32,8 +32,8 @@ namespace HPHP {
 
 template<class V, bool case_sensitive, class ExtraType = int32_t>
 struct FixedStringMap {
-  explicit FixedStringMap(int num) : m_table(0) { init(num); }
-  FixedStringMap() : m_mask(0), m_table(0) {}
+  explicit FixedStringMap(int num) : m_table(nullptr) { init(num); }
+  FixedStringMap() : m_mask(0), m_table(nullptr) {}
   ~FixedStringMap() { clear(); }
 
   FixedStringMap(const FixedStringMap&) = delete;
@@ -49,11 +49,17 @@ struct FixedStringMap {
   ExtraType& extra() { return m_extra; }
   const ExtraType& extra() const { return m_extra; }
 
+  ExtraType size() const { return m_extra; }
+
   static constexpr ptrdiff_t tableOff() {
     return offsetof(FixedStringMap, m_table);
   }
-  ExtraType size() const { return m_extra; }
-
+  static constexpr ptrdiff_t sizeOff() {
+    return offsetof(FixedStringMap, m_extra);
+  }
+  static constexpr size_t sizeSize() {
+    return sizeof(m_extra);
+  }
 private:
   struct Elm {
     LowStringPtr sd;

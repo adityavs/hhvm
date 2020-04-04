@@ -1,10 +1,10 @@
-<?php
+<?hh
 /* Prototype  : array file(string filename [, int flags[, resource context]])
  * Description: Read entire file into an array 
  * Source code: ext/standard/file.c
  * Alias to functions: 
  */
-
+<<__EntryPoint>> function main(): void {
 echo "*** Testing file() : variation ***\n";
 $mainDir = "fileVar8.dir";
 $subDir = "fileVar8Sub";
@@ -16,7 +16,7 @@ mkdir($absSubDir);
 $old_dir_path = getcwd();
 chdir(dirname(__FILE__));
 
-$allDirs = array(
+$allDirs = varray[
   // absolute paths
   "$absSubDir/",
   "$absSubDir/../".$subDir,
@@ -32,7 +32,7 @@ $allDirs = array(
   "./".$mainDir."/../".$mainDir."/".$subDir,
   "BADDIR",  
   
-);
+];
 
 $filename = 'FileGetContentsVar7.tmp';
 $absFile = $absSubDir.'/'.$filename;
@@ -53,4 +53,4 @@ rmdir($absSubDir);
 rmdir($absMainDir);
 
 echo "\n*** Done ***\n";
-?>
+}

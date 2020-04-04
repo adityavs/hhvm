@@ -1,31 +1,22 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-let go pos ty output_json =
-  if output_json
-  then begin
-    let ty_json = match ty with
-      | Some ty -> Hh_json.JString ty
-      | None -> Hh_json.JNull
+let go result output_json =
+  if output_json then
+    let response =
+      match result with
+      | None -> (None, None)
+      | Some (str, json) -> (Some str, Some json)
     in
-    let pos_json = match pos with
-      | Some pos -> Pos.json pos
-      | None -> Hh_json.JNull
-    in
-    print_endline (Hh_json.json_to_string
-                    (Hh_json.JAssoc [
-                      "type", ty_json;
-                      "pos", pos_json;
-                    ]))
-  end else begin
-    match ty with
-      | Some ty -> print_endline ty
-      | None -> print_endline "(unknown)"
-  end
+    Nuclide_rpc_message_printer.(
+      infer_type_response_to_json response |> print_json)
+  else
+    match result with
+    | Some (str, _) -> print_endline str
+    | None -> print_endline "(unknown)"

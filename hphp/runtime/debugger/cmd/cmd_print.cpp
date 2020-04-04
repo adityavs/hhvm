@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -91,7 +91,7 @@ std::string CmdPrint::FormatResult(const char* format, const Variant& ret) {
       return sb.data();
     }
 
-    assert(false);
+    assertx(false);
   }
 
   String sret = DebuggerClient::FormatVariable(ret);
@@ -124,7 +124,7 @@ std::string CmdPrint::FormatResult(const char* format, const Variant& ret) {
     return String(ts).data();
   }
 
-  assert(false);
+  assertx(false);
   return "";
 }
 
@@ -155,8 +155,12 @@ void CmdPrint::recvImpl(DebuggerThriftBuffer &thrift) {
   {
     String sdata;
     thrift.read(sdata);
-    int error = DebuggerWireHelpers::WireUnserialize(sdata, m_ret);
-    if (error) {
+    auto const error = DebuggerWireHelpers::WireUnserialize(sdata, m_ret);
+    if (error == DebuggerWireHelpers::ErrorMsg) {
+      assertx(m_ret.isString());
+      m_wireError = m_ret.asCStrRef().data();
+    }
+    if (error != DebuggerWireHelpers::NoError) {
       m_ret = uninit_null();
     }
     if (error == DebuggerWireHelpers::HitLimit) {
@@ -273,8 +277,8 @@ void CmdPrint::processClear(DebuggerClient &client) {
   watches.erase(watches.begin() + num);
 }
 
-Variant CmdPrint::processWatch(DebuggerClient &client, const char *format,
-                            const std::string &php) {
+Variant CmdPrint::processWatch(DebuggerClient& client, const char* /*format*/,
+                               const std::string& php) {
   m_body = php;
   m_frame = client.getFrame();
   m_noBreak = true;
@@ -325,7 +329,7 @@ void CmdPrint::onClient(DebuggerClient &client) {
   }
   m_bypassAccessCheck = client.getDebuggerClientBypassCheck();
   m_printLevel = client.getDebuggerClientPrintLevel();
-  assert(m_printLevel <= 0 || m_printLevel >= DebuggerClient::MinPrintLevel);
+  assertx(m_printLevel <= 0 || m_printLevel >= DebuggerClient::MinPrintLevel);
   m_frame = client.getFrame();
   auto res = client.xendWithNestedExecution<CmdPrint>(this);
   m_output = res->m_output;
@@ -340,18 +344,18 @@ void CmdPrint::onClient(DebuggerClient &client) {
 // can occur while we're doing the server-side work for a print.
 bool CmdPrint::onServer(DebuggerProxy &proxy) {
   PCFilter locSave;
-  auto& rid = ThreadInfo::s_threadInfo->m_reqInjectionData;
+  auto& rid = RequestInfo::s_requestInfo->m_reqInjectionData;
   locSave.swap(rid.m_flowFilter);
   g_context->debuggerSettings.bypassCheck = m_bypassAccessCheck;
   {
     EvalBreakControl eval(m_noBreak);
-    bool failed;
-    m_ret =
-      proxy.ExecutePHP(DebuggerProxy::MakePHPReturn(m_body),
-                       m_output, m_frame, failed,
-                       DebuggerProxy::ExecutePHPFlagsAtInterrupt |
-                       (!proxy.isLocal() ? DebuggerProxy::ExecutePHPFlagsLog :
-                        DebuggerProxy::ExecutePHPFlagsNone));
+    auto const ret = proxy.ExecutePHP(
+      DebuggerProxy::MakePHPReturn(m_body), m_output, m_frame,
+      DebuggerProxy::ExecutePHPFlagsAtInterrupt |
+        (!proxy.isLocal() ? DebuggerProxy::ExecutePHPFlagsLog :
+         DebuggerProxy::ExecutePHPFlagsNone)
+    );
+    m_ret = ret.second;
   }
   g_context->debuggerSettings.bypassCheck = false;
   locSave.swap(rid.m_flowFilter);

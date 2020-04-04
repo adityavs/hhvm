@@ -1,11 +1,10 @@
-<?hh // decl
+<?hh
 /**
  * Copyright (c) 2014, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  */
 class XMLReader {
@@ -48,7 +47,7 @@ class XMLReader {
   public string $xmlLang;
 
   public function __construct();
-  public function open(string $uri, ?string $encoding = null, int $options = 0): bool;
+  public function open(string $uri, ?string $encoding = null, int $options = 0): mixed;
   public function XML(string $source, ?string $encoding = null, int $options = 0): bool;
   public function close(): bool;
   public function read(): bool;
@@ -66,11 +65,10 @@ class XMLReader {
   public function moveToElement(): bool;
   public function moveToFirstAttribute(): bool;
   public function isValid(): bool;
-  public function __get($name);
   public function getParserProperty(int $property): bool;
   public function lookupNamespace(string $prefix): mixed;
   public function setSchema(string $source): bool;
   public function setParserProperty(int $property, bool $value): bool;
-  public function setRelaxNGSchema(string $filename): bool;
+  public function setRelaxNGSchema(string $filename): mixed;
   public function setRelaxNGSchemaSource(string $source): bool;
 }

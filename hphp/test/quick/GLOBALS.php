@@ -1,5 +1,5 @@
-<?php
-
+<?hh
+<<__EntryPoint>> function main(): void {
 print "Test begin\n";
 
 # Get a key that doesn't exist in $GLOBALS.
@@ -8,7 +8,7 @@ while (isset($GLOBALS[$k])) {
   $k .= 'k';
 }
 
-$a = $GLOBALS;
+$a = $GLOBALS['GLOBALS'];
 $GLOBALS[$k] = 42;
 if (isset($GLOBALS[$k])) {
   print "Key is set in \$GLOBALS\n";
@@ -23,3 +23,4 @@ if ($b[$k] == 43) {
 }
 
 print "Test end\n";
+}

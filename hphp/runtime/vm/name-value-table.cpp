@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 #include <limits>
 #include <folly/Bits.h>
 
+#include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/runtime.h"
 
@@ -33,7 +34,7 @@ NameValueTable::NameValueTable() {
 NameValueTable::NameValueTable(ActRec* fp)
   : m_fp(fp)
 {
-  assert(m_fp);
+  assertx(m_fp);
   const auto func = m_fp->m_func;
   const Id numNames = func->numNamedLocals();
 
@@ -44,10 +45,11 @@ NameValueTable::NameValueTable(ActRec* fp)
   reserve(numNames + 1);
 
   for (Id i = 0; i < numNames; ++i) {
-    assert(func->lookupVarId(func->localVarName(i)) == i);
+    if (!func->localVarName(i)) continue;
+    assertx(func->lookupVarId(func->localVarName(i)) == i);
 
     auto elm = insert(func->localVarName(i));
-    assert(elm && elm->m_tv.m_type == kInvalidDataType);
+    assertx(elm && elm->m_tv.m_type == kInvalidDataType);
     elm->m_tv.m_type = kNamedLocalDataType;
     elm->m_tv.m_data.num = i;
   }
@@ -58,7 +60,7 @@ NameValueTable::NameValueTable(const NameValueTable& nvTable, ActRec* fp)
   , m_elms(nvTable.m_elms)
 {
   allocate(nvTable.m_tabMask + 1);
-  assert(m_tabMask == nvTable.m_tabMask);
+  assertx(m_tabMask == nvTable.m_tabMask);
 
   for (int i = 0; i <= m_tabMask; ++i) {
     Elm& src = nvTable.m_table[i];
@@ -71,20 +73,19 @@ NameValueTable::NameValueTable(const NameValueTable& nvTable, ActRec* fp)
         dst.m_tv.m_type = kNamedLocalDataType;
         dst.m_tv.m_data.num = src.m_tv.m_data.num;
       } else {
-        tvDupFlattenVars(&src.m_tv, &dst.m_tv);
+        tvDup(src.m_tv, dst.m_tv);
       }
     }
   }
 }
 
 NameValueTable::~NameValueTable() {
-  if (!m_table) return;
-
+  if (leaked()) return;
   for (Elm* elm = &m_table[m_tabMask]; elm != &m_table[-1]; --elm) {
     if (elm->m_name) {
       decRefStr(const_cast<StringData*>(elm->m_name));
       if (elm->m_tv.m_type != kNamedLocalDataType) {
-        tvRefcountedDecRef(elm->m_tv);
+        tvDecRefGen(elm->m_tv);
       }
     }
   }
@@ -92,16 +93,16 @@ NameValueTable::~NameValueTable() {
 }
 
 void NameValueTable::suspend(const ActRec* oldFP, ActRec* newFP) {
-  assert(m_fp == oldFP);
-  assert(oldFP->func() == newFP->func());
-  assert(!oldFP->resumed());
-  assert(newFP->resumed());
+  assertx(m_fp == oldFP);
+  assertx(oldFP->func() == newFP->func());
+  assertx(!isResumed(oldFP));
+  assertx(isResumed(newFP));
 
   m_fp = newFP;
 }
 
 void NameValueTable::attach(ActRec* fp) {
-  assert(m_fp == nullptr);
+  assertx(m_fp == nullptr);
   m_fp = fp;
 
   const auto func = fp->m_func;
@@ -109,12 +110,13 @@ void NameValueTable::attach(ActRec* fp) {
   TypedValue* loc = frame_local(fp, 0);
 
   for (Id i = 0; i < numNames; ++i, --loc) {
-    assert(func->lookupVarId(func->localVarName(i)) == i);
+    if (!func->localVarName(i)) continue;
+    assertx(func->lookupVarId(func->localVarName(i)) == i);
 
     auto elm = insert(func->localVarName(i));
-    assert(elm);
+    assertx(elm);
     if (elm->m_tv.m_type != kInvalidDataType) {
-      assert(elm->m_tv.m_type != kNamedLocalDataType);
+      assertx(elm->m_tv.m_type != kNamedLocalDataType);
       tvCopy(elm->m_tv, *loc);
     }
 
@@ -124,7 +126,7 @@ void NameValueTable::attach(ActRec* fp) {
 }
 
 void NameValueTable::detach(ActRec* fp) {
-  assert(m_fp == fp);
+  assertx(m_fp == fp);
   m_fp = nullptr;
 
   const auto func = fp->m_func;
@@ -132,10 +134,11 @@ void NameValueTable::detach(ActRec* fp) {
   TypedValue* loc = frame_local(fp, 0);
 
   for (Id i = 0; i < numNames; ++i, --loc) {
-    assert(func->lookupVarId(func->localVarName(i)) == i);
+    if (!func->localVarName(i)) continue;
+    assertx(func->lookupVarId(func->localVarName(i)) == i);
 
     auto elm = findElm(func->localVarName(i));
-    assert(elm && elm->m_tv.m_type == kNamedLocalDataType);
+    assertx(elm && elm->m_tv.m_type == kNamedLocalDataType);
     tvCopy(*loc, elm->m_tv);
     tvDebugTrash(loc);
   }
@@ -146,27 +149,19 @@ void NameValueTable::leak() {
   m_tabMask = 0;
   req::free(m_table);
   m_table = nullptr;
+  assertx(leaked());
 }
 
-TypedValue* NameValueTable::set(const StringData* name, const TypedValue* val) {
+TypedValue* NameValueTable::set(const StringData* name, tv_rval val) {
   TypedValue* target = findTypedValue(name);
-  tvSet(*tvToCell(val), *target);
-  return target;
-}
-
-TypedValue* NameValueTable::bind(const StringData* name, TypedValue* val) {
-  TypedValue* target = findTypedValue(name);
-  if (val->m_type != KindOfRef) {
-    tvBox(val);
-  }
-  tvBind(val, target);
+  tvSet(*val, *target);
   return target;
 }
 
 void NameValueTable::unset(const StringData* name) {
   Elm* elm = findElm(name);
   if (!elm) return;
-  tvUnset(derefNamedLocal(&elm->m_tv));
+  tvUnset(*derefNamedLocal(&elm->m_tv));
 }
 
 TypedValue* NameValueTable::lookup(const StringData* name) {
@@ -179,9 +174,14 @@ TypedValue* NameValueTable::lookup(const StringData* name) {
 TypedValue* NameValueTable::lookupAdd(const StringData* name) {
   auto tv = findTypedValue(name);
   if (tv->m_type == KindOfUninit) {
-    tvWriteNull(tv);
+    tvWriteNull(*tv);
   }
   return tv;
+}
+
+ssize_t NameValueTable::lookupPos(const StringData* name) {
+  Elm* e = findElm(name);
+  return e ? e - m_table : (m_tabMask + 1);
 }
 
 void NameValueTable::reserve(size_t desiredSize) {
@@ -201,13 +201,13 @@ void NameValueTable::reserve(size_t desiredSize) {
 }
 
 void NameValueTable::allocate(const size_t newCapac) {
-  assert(folly::isPowTwo(newCapac));
-  assert(newCapac - 1 <= std::numeric_limits<uint32_t>::max());
+  assertx(folly::isPowTwo(newCapac));
+  assertx(newCapac - 1 <= std::numeric_limits<uint32_t>::max());
 
   Elm* oldTab = m_table;
   const size_t oldMask = m_tabMask;
 
-  m_table = static_cast<Elm*>(req::calloc(sizeof(Elm), newCapac));
+  m_table = req::calloc_raw_array<Elm>(newCapac);
   m_tabMask = uint32_t(newCapac - 1);
 
   if (oldTab) {
@@ -225,7 +225,7 @@ TypedValue* NameValueTable::derefNamedLocal(TypedValue* tv) const {
 TypedValue* NameValueTable::findTypedValue(const StringData* name) {
   Elm* elm = insert(name);
   if (elm->m_tv.m_type == kInvalidDataType) {
-    tvWriteNull(&elm->m_tv);
+    tvWriteNull(elm->m_tv);
     return &elm->m_tv;
   }
   return derefNamedLocal(&elm->m_tv);
@@ -235,7 +235,7 @@ NameValueTable::Elm* NameValueTable::insertImpl(const StringData* name) {
   Elm* elm = &m_table[name->hash() & m_tabMask];
   UNUSED size_t numProbes = 0;
   for (;;) {
-    assert(numProbes++ < m_tabMask + 1);
+    assertx(numProbes++ < m_tabMask + 1);
     if (nullptr == elm->m_name) {
       elm->m_name = name;
       elm->m_tv.m_type = kInvalidDataType;
@@ -263,7 +263,7 @@ NameValueTable::Elm* NameValueTable::insert(const StringData* name) {
 void NameValueTable::rehash(Elm* const oldTab, const size_t oldMask) {
   for (Elm* srcElm = &oldTab[oldMask]; srcElm != &oldTab[-1]; --srcElm) {
     if (srcElm->m_name) {
-      assert(srcElm->m_tv.m_type == kNamedLocalDataType ||
+      assertx(srcElm->m_tv.m_type == kNamedLocalDataType ||
              tvIsPlausible(srcElm->m_tv));
       Elm* dstElm = insertImpl(srcElm->m_name);
       dstElm->m_name = srcElm->m_name;
@@ -276,7 +276,7 @@ NameValueTable::Elm* NameValueTable::findElm(const StringData* name) const {
   Elm* elm = &m_table[name->hash() & m_tabMask];
   UNUSED size_t numProbes = 0;
   for (;;) {
-    assert(numProbes++ < m_tabMask + 1);
+    assertx(numProbes++ < m_tabMask + 1);
     if (UNLIKELY(nullptr == elm->m_name)) {
       return nullptr;
     }
@@ -317,7 +317,7 @@ NameValueTable::Iterator::Iterator(const NameValueTable* tab, ssize_t pos)
   : m_tab(tab)
   , m_idx(pos)
 {
-  assert(pos >= 0);
+  assertx(pos >= 0);
   if (!valid()) next();
 }
 
@@ -339,12 +339,12 @@ bool NameValueTable::Iterator::valid() const {
 }
 
 const StringData* NameValueTable::Iterator::curKey() const {
-  assert(valid());
+  assertx(valid());
   return m_tab->m_table[m_idx].m_name;
 }
 
 const TypedValue* NameValueTable::Iterator::curVal() const {
-  assert(valid());
+  assertx(valid());
   return m_tab->derefNamedLocal(&m_tab->m_table[m_idx].m_tv);
 }
 

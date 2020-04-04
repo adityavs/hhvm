@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -23,12 +23,13 @@
 #include <folly/ScopeGuard.h>
 
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/server/http-protocol.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/ext/soap/soap.h"
 #include "hphp/runtime/ext/soap/packet.h"
 #include "hphp/runtime/base/string-util.h"
@@ -51,7 +52,7 @@ const StaticString s___dorequest("__dorequest");
 Class* cls::getClass() {                                                       \
   if (s_class == nullptr) {                                                    \
     s_class = Unit::lookupClass(s_className.get());                            \
-    assert(s_class);                                                           \
+    assertx(s_class);                                                          \
   }                                                                            \
   return s_class;                                                              \
 }                                                                              \
@@ -61,8 +62,7 @@ Class* cls::getClass() {                                                       \
 
 using std::string;
 
-class SoapScope {
-public:
+struct SoapScope {
   SoapScope() {
     USE_SOAP_GLOBAL;
     m_old_handler = SOAP_GLOBAL(use_soap_error_handler);
@@ -88,8 +88,7 @@ private:
   int m_old_soap_version;
 };
 
-class SoapServerScope : public SoapScope {
-public:
+struct SoapServerScope : SoapScope {
   explicit SoapServerScope(ObjectData *server) {
     USE_SOAP_GLOBAL;
     SOAP_GLOBAL(error_code) = "Server";
@@ -97,8 +96,7 @@ public:
   }
 };
 
-class SoapClientScope : public SoapScope {
-public:
+struct SoapClientScope : SoapScope {
   explicit SoapClientScope(ObjectData *client) {
     USE_SOAP_GLOBAL;
     SOAP_GLOBAL(error_code) = "Client";
@@ -106,8 +104,7 @@ public:
   }
 };
 
-class SoapServiceScope {
-public:
+struct SoapServiceScope {
   explicit SoapServiceScope(SoapServer *server) {
     save();
     USE_SOAP_GLOBAL;
@@ -174,7 +171,7 @@ static Object create_soap_fault(const String& code, const String& fault) {
   return SystemLib::AllocSoapFaultObject(code, fault);
 }
 
-static Object create_soap_fault(Exception &e) {
+static Object create_soap_fault(Exception& e) {
   USE_SOAP_GLOBAL;
   return create_soap_fault(SOAP_GLOBAL(error_code), String(e.getMessage()));
 }
@@ -396,7 +393,7 @@ static xmlDocPtr serialize_function_call(SoapClient *client,
   if (head) {
     for (ArrayIter iter(soap_headers); iter; ++iter) {
       Object obj_header = iter.second().toObject();
-      assert(obj_header.instanceof(SoapHeader::getClass()));
+      assertx(obj_header.instanceof(SoapHeader::getClass()));
       SoapHeader *header = Native::data<SoapHeader>(obj_header);
 
       xmlNodePtr h;
@@ -553,7 +550,7 @@ const StaticString
   s_from_xml("from_xml");
 
 static encodeMapPtr soap_create_typemap_impl(sdl *sdl, Array &ht) {
-  encodeMapPtr typemap(new encodeMap());
+  auto typemap = std::make_shared<encodeMap>();
   for (ArrayIter iter(ht); iter; ++iter) {
     Variant tmp = iter.second();
     if (!tmp.isArray()) {
@@ -588,7 +585,7 @@ static encodeMapPtr soap_create_typemap_impl(sdl *sdl, Array &ht) {
         enc = get_encoder_ex(sdl, type_name.data());
       }
 
-      new_enc = encodePtr(new encode());
+      new_enc = std::make_shared<encode>();
       if (enc) {
         new_enc->details.type = enc->details.type;
         new_enc->details.ns = enc->details.ns;
@@ -682,7 +679,7 @@ static void deserialize_parameters(xmlNodePtr params, sdlFunction *function,
     }
   }
   if (params) {
-    int num_of_params = 0;
+    num_of_params = 0;
     xmlNodePtr trav = params;
     while (trav != nullptr) {
       if (trav->type == XML_ELEMENT_NODE) {
@@ -999,7 +996,6 @@ static std::shared_ptr<sdlFunction> deserialize_function_call
     while (trav != nullptr) {
       if (trav->type == XML_ELEMENT_NODE) {
         xmlNodePtr hdr_func = trav;
-        xmlAttrPtr attr;
         int mustUnderstand = 0;
 
         if (version == SOAP_1_1) {
@@ -1212,6 +1208,8 @@ static int serialize_response_call2(xmlNodePtr body, sdlFunction *function,
   return use;
 }
 
+const StaticString s_headerfault("headerfault");
+
 static xmlDocPtr serialize_response_call(
     std::shared_ptr<sdlFunction> function,
     const char *function_name,
@@ -1252,7 +1250,6 @@ static xmlDocPtr serialize_response_call(
     string fault_ns;
 
     if (!headers.empty()) {
-      xmlNodePtr head;
       encodePtr hdr_enc;
       int hdr_use = SOAP_LITERAL;
       Variant hdr_ret = obj->o_get("headerfault");
@@ -1285,14 +1282,14 @@ static xmlDocPtr serialize_response_call(
           }
         }
         hdr_ret = ht->m_data;
-        obj->o_set("headerfault", hdr_ret);
+        obj->setProp(nullptr, s_headerfault.get(), *hdr_ret.asTypedValue());
       }
 
       if (h->function) {
         if (serialize_response_call2(head, h->function,
                                      h->function_name.data(), uri,
                                      hdr_ret, version, 0) == SOAP_ENCODED) {
-          obj->o_set("headerfault", hdr_ret);
+          obj->setProp(nullptr, s_headerfault.get(), *hdr_ret.asTypedValue());
           use = SOAP_ENCODED;
         }
       } else {
@@ -1367,15 +1364,19 @@ static xmlDocPtr serialize_response_call(
         }
       }
       if (!obj->o_get("faultstring").toString().empty()) {
-        xmlNodePtr node = master_to_xml(get_conversion(KindOfString),
-                                        obj->o_get("faultstring"), SOAP_LITERAL,
-                                        param);
+        xmlNodePtr node = master_to_xml(
+          get_conversion(dataTypeToSoap(KindOfString)),
+          obj->o_get("faultstring"), SOAP_LITERAL,
+          param
+        );
         xmlNodeSetName(node, BAD_CAST("faultstring"));
       }
       if (!obj->o_get("faultactor").toString().empty()) {
-        xmlNodePtr node = master_to_xml(get_conversion(KindOfString),
-                                        obj->o_get("faultactor"), SOAP_LITERAL,
-                                        param);
+        xmlNodePtr node = master_to_xml(
+          get_conversion(dataTypeToSoap(KindOfString)),
+          obj->o_get("faultactor"), SOAP_LITERAL,
+          param
+        );
         xmlNodeSetName(node, BAD_CAST("faultactor"));
       }
       detail_name = "detail";
@@ -1398,8 +1399,11 @@ static xmlDocPtr serialize_response_call(
       }
       if (!obj->o_get("faultstring").toString().empty()) {
         xmlNodePtr node = xmlNewChild(param, ns, BAD_CAST("Reason"), nullptr);
-        node = master_to_xml(get_conversion(KindOfString), obj->o_get("faultstring"),
-                             SOAP_LITERAL, node);
+        node = master_to_xml(
+          get_conversion(dataTypeToSoap(KindOfString)),
+          obj->o_get("faultstring"),
+          SOAP_LITERAL, node
+        );
         xmlNodeSetName(node, BAD_CAST("Text"));
         xmlSetNs(node, ns);
       }
@@ -1437,15 +1441,15 @@ static xmlDocPtr serialize_response_call(
           if (fault->bindingAttributes) {
             sdlSoapBindingFunctionFaultPtr fb = fault->bindingAttributes;
             if (!fb->ns.empty()) {
-              xmlNsPtr ns = encode_add_ns(x, fb->ns.c_str());
-              xmlSetNs(x, ns);
+              xmlNsPtr ns2 = encode_add_ns(x, fb->ns.c_str());
+              xmlSetNs(x, ns2);
             }
           }
         } else {
           if (sparam->element) {
-            xmlNsPtr ns = encode_add_ns(x, sparam->element->namens.c_str());
+            xmlNsPtr ns2 = encode_add_ns(x, sparam->element->namens.c_str());
             xmlNodeSetName(x, BAD_CAST(sparam->element->name.c_str()));
-            xmlSetNs(x, ns);
+            xmlSetNs(x, ns2);
           }
         }
       }
@@ -1659,9 +1663,7 @@ static void type_to_string(sdlType *type, StringBuffer &buf, int level) {
   case XSD_TYPEKIND_COMPLEX:
   case XSD_TYPEKIND_RESTRICTION:
   case XSD_TYPEKIND_EXTENSION:
-    if (type->encode &&
-        (type->encode->details.type == KindOfArray ||
-         type->encode->details.type == SOAP_ENC_ARRAY)) {
+    if (type->encode && isSoapArrayType(type->encode->details.type)) {
       sdlAttributeMap::iterator iter;
       sdlExtraAttributeMap::iterator iterExtra;
       if (!type->attributes.empty() &&
@@ -1691,15 +1693,16 @@ static void type_to_string(sdlType *type, StringBuffer &buf, int level) {
         }
       } else {
         sdlTypePtr elementType;
-        sdlAttributeMap::iterator iter;
-        sdlExtraAttributeMap::iterator iterExtra;
+        sdlAttributeMap::iterator sdlIter;
+        sdlExtraAttributeMap::iterator sdlIterExtra;
         if (!type->attributes.empty() &&
-            ((iter = type->attributes.find(SOAP_1_2_ENC_NAMESPACE":itemType"))
+            (
+            (sdlIter = type->attributes.find(SOAP_1_2_ENC_NAMESPACE":itemType"))
              != type->attributes.end())) {
-          if ((iterExtra = iter->second->extraAttributes.find
+          if ((sdlIterExtra = sdlIter->second->extraAttributes.find
                (WSDL_NAMESPACE":itemType"))
-              != iter->second->extraAttributes.end()) {
-            auto ext = iterExtra->second;
+              != sdlIter->second->extraAttributes.end()) {
+            auto ext = sdlIterExtra->second;
             buf.append(ext->val);
             buf.append(' ');
           }
@@ -1714,12 +1717,13 @@ static void type_to_string(sdlType *type, StringBuffer &buf, int level) {
         }
         buf.append(type->name);
         if (!type->attributes.empty() &&
-            ((iter = type->attributes.find(SOAP_1_2_ENC_NAMESPACE":arraySize"))
+            (
+            (sdlIter = type->attributes.find(SOAP_1_2_ENC_NAMESPACE":arraySize"))
              != type->attributes.end())) {
-          if ((iterExtra = iter->second->extraAttributes.find
+          if ((sdlIterExtra = sdlIter->second->extraAttributes.find
                (WSDL_NAMESPACE":itemType"))
-              != iter->second->extraAttributes.end()) {
-            auto ext = iterExtra->second;
+              != sdlIter->second->extraAttributes.end()) {
+            auto ext = sdlIterExtra->second;
             buf.append('[');
             buf.append(ext->val);
             buf.append(']');
@@ -1780,14 +1784,13 @@ static void type_to_string(sdlType *type, StringBuffer &buf, int level) {
 
 static void model_to_string(sdlContentModelPtr model, StringBuffer &buf,
                             int level) {
-  int i;
   switch (model->kind) {
   case XSD_CONTENT_ELEMENT:
     type_to_string(model->u_element, buf, level);
     buf.append(";\n");
     break;
   case XSD_CONTENT_ANY:
-    for (i = 0;i < level;i++) {
+    for (int i = 0;i < level;i++) {
       buf.append(' ');
     }
     buf.append("<anyXML> any;\n");
@@ -1847,16 +1850,15 @@ static void send_soap_server_fault(
   xmlFreeDoc(doc_return);
 }
 
-static void send_soap_server_fault(
-    std::shared_ptr<sdlFunction> function,
-    Exception &e,
-    const req::ptr<soapHeader>& hdr) {
+static void
+send_soap_server_fault(std::shared_ptr<sdlFunction> /*function*/, Exception& e,
+                       const req::ptr<soapHeader>& /*hdr*/) {
   USE_SOAP_GLOBAL;
   if (SOAP_GLOBAL(use_soap_error_handler)) {
     send_soap_server_fault(
       std::shared_ptr<sdlFunction>(), create_soap_fault(e), nullptr);
   } else {
-    throw create_soap_fault(e); // assuming we are in "catch"
+    throw_object(create_soap_fault(e)); // assuming we are in "catch"
   }
 }
 
@@ -1927,7 +1929,8 @@ const StaticString
   s_compression("compression"),
   s_connection_timeout("connection_timeout"),
   s_user_agent("user_agent"),
-  s_soapaction("soapaction");
+  s_soapaction("soapaction"),
+  s_ssl_method("ssl_method");
 
 void HHVM_METHOD(SoapServer, __construct,
                  const Variant& wsdl,
@@ -2020,8 +2023,8 @@ void HHVM_METHOD(SoapServer, __construct,
     data->m_typemap = soap_create_typemap(data->m_sdl, typemap_ht);
   }
 
-  } catch (Exception &e) {
-    throw create_soap_fault(e);
+  } catch (Exception& e) {
+    throw_object(create_soap_fault(e));
   }
 }
 
@@ -2097,15 +2100,23 @@ Variant HHVM_METHOD(SoapServer, getfunctions) {
   } else if (data->m_type == SOAP_CLASS) {
     class_name = data->m_soap_class.name;
   } else if (data->m_soap_functions.functions_all) {
-    return Unit::getSystemFunctions() + Unit::getUserFunctions();
+    return (Unit::getSystemFunctions() + Unit::getUserFunctions()).toVArray();
   } else if (!data->m_soap_functions.ft.empty()) {
-    return array_keys_helper(data->m_soap_functions.ftOriginal);
+    return Variant::attach(
+      HHVM_FN(array_keys)(
+        make_array_like_tv(data->m_soap_functions.ftOriginal.get())
+      )
+    );
+  } else {
+    return empty_varray();
   }
 
+  assertx(class_name.get());
   Class* cls = Unit::lookupClass(class_name.get());
-  auto ret = Array::attach(MixedArray::MakeReserve(cls->numMethods()));
+  assertx(cls);
+  auto ret = Array::attach(PackedArray::MakeReserve(cls->numMethods()));
   Class::getMethodNames(cls, nullptr, ret);
-  return f_array_values(ret);
+  return ret.toVArray();
 }
 
 static bool valid_function(SoapServer *server, Object &soap_obj,
@@ -2119,9 +2130,13 @@ static bool valid_function(SoapServer *server, Object &soap_obj,
     return HHVM_FN(function_exists)(fn_name);
   } else if (!server->m_soap_functions.ft.empty()) {
     return server->m_soap_functions.ft.exists(HHVM_FN(strtolower)(fn_name));
+  } else {
+    return false;
   }
-  HPHP::Func* f = cls ? cls->lookupMethod(fn_name.get()) : nullptr;
-  return (f && f->isPublic()) || soap_obj->getAttribute(ObjectData::HasCall);
+
+  assertx(cls);
+  HPHP::Func* f = cls->lookupMethod(fn_name.get());
+  return (f && f->isPublic()) || cls->hasCall();
 }
 
 const StaticString
@@ -2163,7 +2178,7 @@ void HHVM_METHOD(SoapServer, handle,
   if (!request.isNull()) {
     req = request.toString();
   } else {
-    int size;
+    size_t size;
     const char *data = nullptr;
     if (transport) {
       data = (const char *)transport->getPostData(size);
@@ -2221,7 +2236,7 @@ void HHVM_METHOD(SoapServer, handle,
                                          data->m_actor.c_str(),
                                          function_name, params, soap_version,
                                          data->m_soap_headers);
-  } catch (Exception &e) {
+  } catch (Exception& e) {
     xmlFreeDoc(doc_request);
     send_soap_server_fault(function, e, nullptr);
     return;
@@ -2236,7 +2251,7 @@ void HHVM_METHOD(SoapServer, handle,
     try {
       soap_obj = create_object(data->m_soap_class.name,
                                data->m_soap_class.argv);
-    } catch (Exception &e) {
+    } catch (Exception& e) {
       send_soap_server_fault(function, e, nullptr);
       return;
     }
@@ -2257,11 +2272,11 @@ void HHVM_METHOD(SoapServer, handle,
       try {
         if (data->m_type == SOAP_CLASS || data->m_type == SOAP_OBJECT) {
           h->retval = vm_call_user_func
-            (make_packed_array(soap_obj, fn_name), h->parameters);
+            (make_vec_array(soap_obj, fn_name), h->parameters);
         } else {
           h->retval = vm_call_user_func(fn_name, h->parameters);
         }
-      } catch (Exception &e) {
+      } catch (Exception& e) {
         send_soap_server_fault(function, e, h);
         return;
       }
@@ -2282,11 +2297,11 @@ void HHVM_METHOD(SoapServer, handle,
     try {
       if (data->m_type == SOAP_CLASS || data->m_type == SOAP_OBJECT) {
         retval = vm_call_user_func
-          (make_packed_array(soap_obj, fn_name), params);
+          (make_vec_array(soap_obj, fn_name), params);
       } else {
         retval = vm_call_user_func(fn_name, params);
       }
-    } catch (Exception &e) {
+    } catch (Exception& e) {
       send_soap_server_fault(function, e, nullptr);
       return;
     }
@@ -2317,8 +2332,8 @@ void HHVM_METHOD(SoapServer, handle,
       send_soap_server_fault(function, e, nullptr);
       return;
     }
-    throw e;
-  } catch (Exception &e) {
+    throw_object(e);
+  } catch (Exception& e) {
     send_soap_server_fault(function, e, nullptr);
     return;
   }
@@ -2434,11 +2449,11 @@ void HHVM_METHOD(SoapClient, __construct,
 
   int64_t cache_wsdl = SOAP_GLOBAL(cache);
   if (!options.empty()) {
-    data->m_location = options[s_location];
+    data->m_location = options[s_location].toString();
 
     if (wsdl.isNull()) {
       /* Fetching non-WSDL mode options */
-      data->m_uri   = options[s_uri];
+      data->m_uri   = options[s_uri].toString();
       data->m_style = options[s_style].toInt32(); // SOAP_RPC || SOAP_DOCUMENT
       data->m_use   = options[s_use].toInt32(); // SOAP_LITERAL || SOAP_ENCODED
 
@@ -2493,6 +2508,7 @@ void HHVM_METHOD(SoapClient, __construct,
     }
     data->m_classmap = options[s_classmap].toArray();
     data->m_features = options[s_features].toInt32();
+    data->m_ssl_method = options[s_ssl_method].toInt32();
     data->m_connection_timeout = options[s_connection_timeout].toInt64();
     data->m_user_agent = options[s_user_agent].toString();
 
@@ -2536,17 +2552,16 @@ void HHVM_METHOD(SoapClient, __construct,
     }
   }
 
-  } catch (Exception &e) {
-    throw create_soap_fault(e);
+  } catch (Exception& e) {
+    throw_object(create_soap_fault(e));
   }
 }
 
-Variant HHVM_METHOD(SoapClient, __soapcall,
+Variant HHVM_METHOD(SoapClient, soapcallImpl,
                     const String& name,
                     const Array& args,
                     const Array& options = null_array,
-                    const Variant& input_headers = null_variant,
-                    VRefParam output_headers_ref = init_null()) {
+                    const Variant& input_headers = uninit_variant) {
   auto* data = Native::data<SoapClient>(this_);
   SoapClientScope ss(this_);
 
@@ -2584,9 +2599,6 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
   }
 
   Array output_headers;
-  SCOPE_EXIT {
-    output_headers_ref.assignIfRef(output_headers);
-  };
 
   if (data->m_trace) {
     data->m_last_request.unset();
@@ -2633,9 +2645,9 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
           ret = do_request(this_, request, location.data(), nullptr,
                            data->m_soap_version, one_way, response);
         }
-      } catch (Exception &e) {
+      } catch (Exception& e) {
         xmlFreeDoc(request);
-        throw create_soap_fault(e);
+        throw_object(create_soap_fault(e));
       }
       xmlFreeDoc(request);
 
@@ -2677,9 +2689,9 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
       try {
         ret = do_request(this_, request, location.c_str(), action.c_str(),
                          data->m_soap_version, 0, response);
-      } catch (Exception &e) {
+      } catch (Exception& e) {
         xmlFreeDoc(request);
-        throw create_soap_fault(e);
+        throw_object(create_soap_fault(e));
       }
       xmlFreeDoc(request);
       if (ret && response.isString()) {
@@ -2699,16 +2711,9 @@ Variant HHVM_METHOD(SoapClient, __soapcall,
     data->m_soap_fault = create_soap_fault("Client", "Unknown Error");
   }
   if (!data->m_soap_fault.isNull()) {
-    throw data->m_soap_fault.toObject();
+    throw_object(data->m_soap_fault.toObject());
   }
   return return_value;
-}
-
-Variant HHVM_METHOD(SoapClient, __call,
-                    const Variant& name,
-                    const Variant& args) {
-  return HHVM_MN(SoapClient, __soapcall)(this_, name.toString(),
-                                         args.toArray());
 }
 
 Variant HHVM_METHOD(SoapClient, __getlastrequest) {
@@ -2736,13 +2741,13 @@ Variant HHVM_METHOD(SoapClient, __getfunctions) {
   SoapClientScope ss(this_);
 
   if (data->m_sdl) {
-    Array ret = Array::Create();
-    for (auto& func: data->m_sdl->functionsOrder) {
+    VArrayInit ret(data->m_sdl->functionsOrder.size());
+    for (const auto& func: data->m_sdl->functionsOrder) {
       StringBuffer sb;
       function_to_string(data->m_sdl->functions[func], sb);
       ret.append(sb.detach());
     }
-    return ret;
+    return ret.toArray();
   }
   return init_null();
 }
@@ -2752,19 +2757,19 @@ Variant HHVM_METHOD(SoapClient, __gettypes) {
   SoapClientScope ss(this_);
 
   if (data->m_sdl) {
-    Array ret = Array::Create();
-    for (unsigned int i = 0; i < data->m_sdl->types.size(); i++) {
+    VArrayInit ret(data->m_sdl->types.size());
+    for (const auto& type: data->m_sdl->types) {
       StringBuffer sb;
-      type_to_string(data->m_sdl->types[i].get(), sb, 0);
+      type_to_string(type.get(), sb, 0);
       ret.append(sb.detach());
     }
-    return ret;
+    return ret.toArray();
   }
   return init_null();
 }
 
 static bool content_type_is_xml(const String& response,
-                                const std::vector<String>& responseHeaders) {
+                                const req::vector<String>& responseHeaders) {
   if (response.empty()) return false;
   for (auto header : responseHeaders) {
     auto cheader = header.c_str();
@@ -2864,8 +2869,30 @@ Variant HHVM_METHOD(SoapClient, __dorequest,
   }
   http.setStreamContextOptions(data->m_stream_context_options);
 
+  if(data->m_ssl_method > -1) {
+    http.setUseSSL(CURLUSESSL_ALL);
+    switch (data->m_ssl_method) {
+      case SOAP_SSL_METHOD_TLS : http.setSSLVersion(CURL_SSLVERSION_TLSv1);
+        break;
+      case SOAP_SSL_METHOD_SSLv2 : http.setSSLVersion(CURL_SSLVERSION_SSLv2);
+        break;
+      case SOAP_SSL_METHOD_SSLv3 : http.setSSLVersion(CURL_SSLVERSION_SSLv3);
+        break;
+      case SOAP_SSL_METHOD_SSLv23 : http.setSSLVersion(CURL_SSLVERSION_SSLv2);
+        break;
+      default: raise_warning("SoapClient(): ssl_method unrecognized"); break;
+    }
+    // Not done by PHP5/7, but using SSL nowadays is a very bad idea.
+    if (data->m_ssl_method != SOAP_SSL_METHOD_TLS) {
+      raise_warning(
+        "SoapClient() ssl_method: SSL is flawed and vulnerable;"
+        "Migrate to TLS as soon as possible."
+      );
+    }
+  }
+
   StringBuffer responseBuffer;
-  std::vector<String> responseHeaders;
+  req::vector<String> responseHeaders;
   int code = http.post(location.data(), buffer.data(), buffer.size(),
                        responseBuffer, &headers, &responseHeaders);
   String response = responseBuffer.detach();
@@ -2905,14 +2932,11 @@ Variant HHVM_METHOD(SoapClient, __setcookie,
                     const String& name,
                     const Variant& value /* = null_string */) {
   auto* data = Native::data<SoapClient>(this_);
+  // FIXME: data->m_cookies is a write-only value
   if (!value.isNull()) {
     data->m_cookies.set(name, make_packed_array(value.toString()));
   } else {
-    const Variant* t = this_->o_realProp("_cookies",
-                                         ObjectData::RealPropUnchecked);
-    if (t && t->isInitialized()) {
-      data->m_cookies.remove(name);
-    }
+    data->m_cookies.remove(name);
   }
   return init_null();
 }
@@ -2928,7 +2952,7 @@ Variant HHVM_METHOD(SoapClient, __setlocation,
 }
 
 bool HHVM_METHOD(SoapClient, __setsoapheaders,
-                 const Variant& headers /* = null_variant */) {
+                 const Variant& headers /* = uninit_variant */) {
   auto* data = Native::data<SoapClient>(this_);
   if (headers.isNull()) {
     data->m_default_headers.unset();
@@ -2980,12 +3004,20 @@ void HHVM_METHOD(SoapVar, __construct,
       return;
     }
   }
-  this_->o_set(s_enc_type, ntype);
-  if (data.toBoolean())        this_->o_set(s_enc_value,  data);
-  if (!type_name.empty())      this_->o_set(s_enc_stype,  type_name);
-  if (!type_namespace.empty()) this_->o_set(s_enc_ns,     type_namespace);
-  if (!node_name.empty())      this_->o_set(s_enc_name,   node_name);
-  if (!node_namespace.empty()) this_->o_set(s_enc_namens, node_namespace);
+  this_->setProp(nullptr, s_enc_type.get(), make_tv<KindOfInt64>(ntype));
+  if (data.toBoolean()) this_->setProp(nullptr, s_enc_value.get(), *data.asTypedValue());
+  if (!type_name.empty()) {
+    this_->setProp(nullptr, s_enc_stype.get(), type_name.asTypedValue());
+  }
+  if (!type_namespace.empty()) {
+    this_->setProp(nullptr, s_enc_ns.get(), type_namespace.asTypedValue());
+  }
+  if (!node_name.empty()) {
+    this_->setProp(nullptr, s_enc_name.get(), node_name.asTypedValue());
+  }
+  if (!node_namespace.empty()) {
+    this_->setProp(nullptr, s_enc_namens.get(), node_namespace.asTypedValue());
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3005,7 +3037,7 @@ void HHVM_METHOD(SoapParam, __construct,
     return;
   }
   nativeData->m_name = name;
-  nativeData->m_data = data;
+  nativeData->m_data = data.toString();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3043,10 +3075,11 @@ void HHVM_METHOD(SoapHeader, __construct,
   nativeData->m_data = data;
   nativeData->m_mustUnderstand = mustunderstand;
 
-  this_->o_set(s_namespace, ns);
-  this_->o_set(s_name, name);
-  this_->o_set(s_data, data);
-  this_->o_set(s_mustUnderstand, mustunderstand);
+  this_->setProp(nullptr, s_namespace.get(), ns.asTypedValue());
+  this_->setProp(nullptr, s_name.get(), name.asTypedValue());
+  this_->setProp(nullptr, s_data.get(), data.asInitTVTmp());
+  this_->setProp(nullptr, s_mustUnderstand.get(),
+                 make_tv<KindOfBoolean>(mustunderstand));
 
   if (actor.isInteger() &&
       (actor.toInt64() == SOAP_ACTOR_NEXT ||
@@ -3062,8 +3095,7 @@ void HHVM_METHOD(SoapHeader, __construct,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-static class SoapExtension final : public Extension {
-public:
+static struct SoapExtension final : Extension {
   SoapExtension() : Extension("soap", NO_EXTENSION_VERSION_YET) {}
   void moduleInit() override {
     HHVM_ME(SoapServer, __construct);
@@ -3079,8 +3111,7 @@ public:
                                                Native::NDIFlags::NO_SWEEP);
 
     HHVM_ME(SoapClient, __construct);
-    HHVM_ME(SoapClient, __call);
-    HHVM_ME(SoapClient, __soapcall);
+    HHVM_ME(SoapClient, soapcallImpl);
     HHVM_ME(SoapClient, __getlastrequest);
     HHVM_ME(SoapClient, __getlastresponse);
     HHVM_ME(SoapClient, __getlastrequestheaders);
@@ -3107,6 +3138,92 @@ public:
     HHVM_FE(use_soap_error_handler);
     HHVM_FE(is_soap_fault);
     HHVM_FE(_soap_active_version);
+
+    HHVM_RC_INT_SAME(SOAP_1_1);
+    HHVM_RC_INT_SAME(SOAP_1_2);
+    HHVM_RC_INT_SAME(SOAP_ACTOR_NEXT);
+    HHVM_RC_INT_SAME(SOAP_ACTOR_NONE);
+    HHVM_RC_INT_SAME(SOAP_ACTOR_UNLIMATERECEIVER);
+    HHVM_RC_INT_SAME(SOAP_AUTHENTICATION_BASIC);
+    HHVM_RC_INT_SAME(SOAP_AUTHENTICATION_DIGEST);
+    HHVM_RC_INT_SAME(SOAP_COMPRESSION_ACCEPT);
+    HHVM_RC_INT_SAME(SOAP_COMPRESSION_DEFLATE);
+    HHVM_RC_INT_SAME(SOAP_COMPRESSION_GZIP);
+    HHVM_RC_INT_SAME(SOAP_DOCUMENT);
+    HHVM_RC_INT_SAME(SOAP_ENCODED);
+    HHVM_RC_INT_SAME(SOAP_ENC_ARRAY);
+    HHVM_RC_INT_SAME(SOAP_ENC_OBJECT);
+    HHVM_RC_INT_SAME(SOAP_FUNCTIONS_ALL);
+    HHVM_RC_INT_SAME(SOAP_LITERAL);
+    HHVM_RC_INT_SAME(SOAP_PERSISTENCE_REQUEST);
+    HHVM_RC_INT_SAME(SOAP_PERSISTENCE_SESSION);
+    HHVM_RC_INT_SAME(SOAP_RPC);
+    HHVM_RC_INT_SAME(SOAP_SINGLE_ELEMENT_ARRAYS);
+    HHVM_RC_INT_SAME(SOAP_USE_XSI_ARRAY_TYPE);
+    HHVM_RC_INT_SAME(SOAP_WAIT_ONE_WAY_CALLS);
+
+    HHVM_RC_INT_SAME(UNKNOWN_TYPE);
+
+    HHVM_RC_INT_SAME(WSDL_CACHE_NONE);
+    HHVM_RC_INT_SAME(WSDL_CACHE_DISK);
+    HHVM_RC_INT_SAME(WSDL_CACHE_MEMORY);
+    HHVM_RC_INT_SAME(WSDL_CACHE_BOTH);
+
+    HHVM_RC_INT_SAME(XSD_STRING);
+    HHVM_RC_INT_SAME(XSD_BOOLEAN);
+    HHVM_RC_INT_SAME(XSD_DECIMAL);
+    HHVM_RC_INT_SAME(XSD_FLOAT);
+    HHVM_RC_INT_SAME(XSD_DOUBLE);
+    HHVM_RC_INT_SAME(XSD_DURATION);
+    HHVM_RC_INT_SAME(XSD_DATETIME);
+    HHVM_RC_INT_SAME(XSD_TIME);
+    HHVM_RC_INT_SAME(XSD_DATE);
+    HHVM_RC_INT_SAME(XSD_GYEARMONTH);
+    HHVM_RC_INT_SAME(XSD_GYEAR);
+    HHVM_RC_INT_SAME(XSD_GMONTHDAY);
+    HHVM_RC_INT_SAME(XSD_GDAY);
+    HHVM_RC_INT_SAME(XSD_GMONTH);
+    HHVM_RC_INT_SAME(XSD_HEXBINARY);
+    HHVM_RC_INT_SAME(XSD_BASE64BINARY);
+    HHVM_RC_INT_SAME(XSD_ANYURI);
+    HHVM_RC_INT_SAME(XSD_QNAME);
+    HHVM_RC_INT_SAME(XSD_NOTATION);
+    HHVM_RC_INT_SAME(XSD_NORMALIZEDSTRING);
+    HHVM_RC_INT_SAME(XSD_TOKEN);
+    HHVM_RC_INT_SAME(XSD_LANGUAGE);
+    HHVM_RC_INT_SAME(XSD_NMTOKEN);
+    HHVM_RC_INT_SAME(XSD_NAME);
+    HHVM_RC_INT_SAME(XSD_NCNAME);
+    HHVM_RC_INT_SAME(XSD_ID);
+    HHVM_RC_INT_SAME(XSD_IDREF);
+    HHVM_RC_INT_SAME(XSD_IDREFS);
+    HHVM_RC_INT_SAME(XSD_ENTITY);
+    HHVM_RC_INT_SAME(XSD_ENTITIES);
+    HHVM_RC_INT_SAME(XSD_INTEGER);
+    HHVM_RC_INT_SAME(XSD_NONPOSITIVEINTEGER);
+    HHVM_RC_INT_SAME(XSD_NEGATIVEINTEGER);
+    HHVM_RC_INT_SAME(XSD_LONG);
+    HHVM_RC_INT_SAME(XSD_INT);
+    HHVM_RC_INT_SAME(XSD_SHORT);
+    HHVM_RC_INT_SAME(XSD_BYTE);
+    HHVM_RC_INT_SAME(XSD_NONNEGATIVEINTEGER);
+    HHVM_RC_INT_SAME(XSD_UNSIGNEDLONG);
+    HHVM_RC_INT_SAME(XSD_UNSIGNEDINT);
+    HHVM_RC_INT_SAME(XSD_UNSIGNEDSHORT);
+    HHVM_RC_INT_SAME(XSD_UNSIGNEDBYTE);
+    HHVM_RC_INT_SAME(XSD_POSITIVEINTEGER);
+    HHVM_RC_INT_SAME(XSD_NMTOKENS);
+    HHVM_RC_INT_SAME(XSD_ANYTYPE);
+    HHVM_RC_INT_SAME(XSD_ANYXML);
+    HHVM_RC_INT_SAME(XSD_1999_TIMEINSTANT);
+
+    HHVM_RC_INT_SAME(SOAP_SSL_METHOD_TLS);
+    HHVM_RC_INT_SAME(SOAP_SSL_METHOD_SSLv2);
+    HHVM_RC_INT_SAME(SOAP_SSL_METHOD_SSLv3);
+    HHVM_RC_INT_SAME(SOAP_SSL_METHOD_SSLv23);
+
+    HHVM_RC_STR_SAME(XSD_NAMESPACE);
+    HHVM_RC_STR_SAME(XSD_1999_NAMESPACE);
 
     loadSystemlib();
   }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,16 +16,34 @@
 #ifndef incl_HPHP_JIT_IRGEN_BUILTIN_H_
 #define incl_HPHP_JIT_IRGEN_BUILTIN_H_
 
-namespace HPHP { namespace jit {
-struct SSATmp;
-struct IRGS;
-}}
+#include <cstdint>
 
-namespace HPHP { namespace jit { namespace irgen {
+namespace HPHP {
+
+struct Func;
+
+namespace jit {
+
+struct SSATmp;
+struct Type;
+
+namespace irgen {
+
+struct IRGS;
 
 //////////////////////////////////////////////////////////////////////
 
+// Returns the index of a parameter that should be a vanilla-array like,
+// or -1 if our optimized irgen for that builtin has no such requirement.
+int getBuiltinVanillaParam(const char* name);
+
 SSATmp* optimizedCallIsObject(IRGS&, SSATmp*);
+
+// The builtin's inferred return type (without taking into account coercion
+// failures). Appropriate for CallBuiltin. For regular PHP calls to a builtin,
+// use callReturnType() instead.
+Type builtinReturnType(const Func* builtin);
+Type builtinOutType(const Func* builtin, uint32_t i);
 
 //////////////////////////////////////////////////////////////////////
 

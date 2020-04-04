@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,20 +15,35 @@
 */
 #include "hphp/runtime/vm/jit/irgen-control.h"
 
+#include "hphp/runtime/vm/resumable.h"
+#include "hphp/runtime/vm/unwind.h"
+
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
+#include "hphp/runtime/vm/jit/switch-profile.h"
 #include "hphp/runtime/vm/jit/target-profile.h"
 
 #include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
+#include "hphp/runtime/vm/jit/irgen-interpone.h"
 
 namespace HPHP { namespace jit { namespace irgen {
 
+void surpriseCheck(IRGS& env) {
+  auto const ptr = resumeMode(env) != ResumeMode::None ? sp(env) : fp(env);
+  auto const exit = makeExitSlow(env);
+  gen(env, CheckSurpriseFlags, exit, ptr);
+}
+
 void surpriseCheck(IRGS& env, Offset relOffset) {
   if (relOffset <= 0) {
-    auto const ptr = resumed(env) ? sp(env) : fp(env);
-    auto const exit = makeExitSlow(env);
-    gen(env, CheckSurpriseFlags, exit, ptr);
+    surpriseCheck(env);
   }
+}
+
+void surpriseCheckWithTarget(IRGS& env, Offset targetBcOff) {
+  auto const ptr = resumeMode(env) != ResumeMode::None ? sp(env) : fp(env);
+  auto const exit = makeExitSurprise(env, targetBcOff);
+  gen(env, CheckSurpriseFlags, exit, ptr);
 }
 
 /*
@@ -44,7 +59,7 @@ Block* getBlock(IRGS& env, Offset offset) {
   // to the region, so we just create an exit block.
   if (!env.irb->hasBlock(sk)) return makeExit(env, offset);
 
-  return env.irb->makeBlock(sk);
+  return env.irb->makeBlock(sk, curProfCount(env));
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -58,15 +73,14 @@ void jmpImpl(IRGS& env, Offset offset) {
 void implCondJmp(IRGS& env, Offset taken, bool negate, SSATmp* src) {
   auto const target = getBlock(env, taken);
   assertx(target != nullptr);
-  auto const boolSrc = gen(env, ConvCellToBool, src);
-  gen(env, DecRef, src);
+  auto const boolSrc = gen(env, ConvTVToBool, src);
+  decRef(env, src);
   gen(env, negate ? JmpZero : JmpNZero, target, boolSrc);
 }
 
 //////////////////////////////////////////////////////////////////////
 
 void emitJmp(IRGS& env, Offset relOffset) {
-  surpriseCheck(env, relOffset);
   auto const offset = bcOff(env) + relOffset;
   jmpImpl(env, offset);
 }
@@ -76,13 +90,11 @@ void emitJmpNS(IRGS& env, Offset relOffset) {
 }
 
 void emitJmpZ(IRGS& env, Offset relOffset) {
-  surpriseCheck(env, relOffset);
   auto const takenOff = bcOff(env) + relOffset;
   implCondJmp(env, takenOff, true, popC(env));
 }
 
 void emitJmpNZ(IRGS& env, Offset relOffset) {
-  surpriseCheck(env, relOffset);
   auto const takenOff = bcOff(env) + relOffset;
   implCondJmp(env, takenOff, false, popC(env));
 }
@@ -91,10 +103,8 @@ void emitJmpNZ(IRGS& env, Offset relOffset) {
 
 static const StaticString s_switchProfile("SwitchProfile");
 
-void emitSwitch(IRGS& env,
-                const ImmVector& iv,
-                int64_t base,
-                SwitchKind kind) {
+void emitSwitch(IRGS& env, SwitchKind kind, int64_t base,
+                const ImmVector& iv) {
   auto bounded = kind == SwitchKind::Bounded;
   int nTargets = bounded ? iv.size() - 2 : iv.size();
 
@@ -124,8 +134,8 @@ void emitSwitch(IRGS& env,
     gen(env, Jmp, getBlock(env, zeroOff));
     return;
   }
-  if (type <= TArr) {
-    gen(env, DecRef, switchVal);
+  if (type <= TArrLike) {
+    decRef(env, switchVal);
     gen(env, Jmp, getBlock(env, defaultOff));
     return;
   }
@@ -151,9 +161,9 @@ void emitSwitch(IRGS& env,
     PUNT(Switch-UnknownType);
   }
 
-  auto const dataSize = iv.size() * sizeof(SwitchProfile::cases[0]);
+  auto const dataSize = SwitchProfile::extraSize(iv.size());
   TargetProfile<SwitchProfile> profile(
-    env.unit.context(), env.irb->curMarker(), s_switchProfile.get(),
+    env.unit, env.irb->curMarker(), s_switchProfile.get(),
     dataSize
   );
 
@@ -221,10 +231,10 @@ void emitSwitch(IRGS& env,
   }
 
   auto data = JmpSwitchData{};
-  data.cases       = iv.size();
-  data.targets     = &targets[0];
-  data.invSPOff    = invSPOff(env);
-  data.irSPOff     = offsetFromIRSP(env, BCSPOffset{0});
+  data.cases = iv.size();
+  data.targets = &targets[0];
+  data.spOffBCFromFP = spOffBCFromFP(env);
+  data.spOffBCFromIRSP = spOffBCFromIRSP(env);
 
   gen(env, JmpSwitchDest, data, index, sp(env), fp(env));
 }
@@ -261,21 +271,97 @@ void emitSSwitch(IRGS& env, const ImmVector& iv) {
   data.cases      = &cases[0];
   data.defaultSk  = SrcKey{curSrcKey(env),
                            bcOff(env) + iv.strvec()[iv.size() - 1].dest};
-  data.spOff      = invSPOff(env);
+  data.bcSPOff    = spOffBCFromFP(env);
 
   auto const dest = gen(env,
                         fastPath ? LdSSwitchDestFast
                                  : LdSSwitchDestSlow,
                         data,
                         testVal);
-  gen(env, DecRef, testVal);
+  decRef(env, testVal);
   gen(
     env,
     JmpSSwitchDest,
-    IRSPOffsetData { offsetFromIRSP(env, BCSPOffset{0}) },
+    IRSPRelOffsetData { spOffBCFromIRSP(env) },
     dest,
     sp(env),
     fp(env)
+  );
+}
+
+const StaticString s_nonexhaustive_switch(Strings::NONEXHAUSTIVE_SWITCH);
+
+void emitThrowNonExhaustiveSwitch(IRGS& env) {
+  switch (RuntimeOption::EvalThrowOnNonExhaustiveSwitch) {
+    case 0:
+      return;
+    case 1:
+      gen(env, RaiseWarning, cns(env, s_nonexhaustive_switch.get()));
+      return;
+    default:
+      interpOne(env);
+      return;
+  }
+  not_reached();
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void emitSelect(IRGS& env) {
+  auto const condSrc = popC(env);
+  auto const boolSrc = gen(env, ConvTVToBool, condSrc);
+  decRef(env, condSrc);
+
+  ifThenElse(
+    env,
+    [&] (Block* taken) { gen(env, JmpZero, taken, boolSrc); },
+    [&] { // True case
+      auto const val = popC(env, DataTypeCountness);
+      popDecRef(env, DataTypeCountness);
+      push(env, val);
+    },
+    [&] { popDecRef(env, DataTypeCountness); } // False case
+  );
+}
+
+//////////////////////////////////////////////////////////////////////
+
+void emitThrow(IRGS& env) {
+  auto const stackEmpty = spOffBCFromFP(env) == spOffEmpty(env) + 1;
+  auto const offset = findCatchHandler(curFunc(env), bcOff(env));
+  auto const srcTy = topC(env)->type();
+  auto const maybeThrowable =
+    srcTy.maybe(Type::SubObj(SystemLib::s_ExceptionClass)) ||
+    srcTy.maybe(Type::SubObj(SystemLib::s_ErrorClass));
+
+  if (!stackEmpty || !maybeThrowable || !(srcTy <= TObj)) return interpOne(env);
+
+  auto const handleThrow = [&] {
+    if (offset != kInvalidOffset) return jmpImpl(env, offset);
+    // There are no more catch blocks in this function, we are at the top
+    // level throw
+    auto const exn = popC(env);
+    auto const spOff = IRSPRelOffsetData { spOffBCFromIRSP(env) };
+    gen(env, EagerSyncVMRegs, spOff, fp(env), sp(env));
+    updateMarker(env);
+    gen(env, EnterTCUnwind, EnterTCUnwindData { true }, exn);
+  };
+
+  if (srcTy <= Type::SubObj(SystemLib::s_ThrowableClass)) return handleThrow();
+
+  ifThenElse(env,
+    [&] (Block* taken) {
+      assertx(srcTy <= TObj);
+      auto const srcClass = gen(env, LdObjClass, topC(env));
+      auto const ecdExc = ExtendsClassData { SystemLib::s_ExceptionClass };
+      auto const isException = gen(env, ExtendsClass, ecdExc, srcClass);
+      gen(env, JmpNZero, taken, isException);
+      auto const ecdErr = ExtendsClassData { SystemLib::s_ErrorClass };
+      auto const isError = gen(env, ExtendsClass, ecdErr, srcClass);
+      gen(env, JmpNZero, taken, isError);
+    },
+    [&] { gen(env, Jmp, makeExitSlow(env)); },
+    handleThrow
   );
 }
 

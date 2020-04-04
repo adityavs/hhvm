@@ -36,13 +36,13 @@
 
 1, float(-4.2)
 
-1, object(xhp_div)#1 (0) {
+1, object(xhp_div) (0) {
 }
 
-1, object(xhp_div)#1 (0) {
+1, object(xhp_div) (0) {
 }
 
 0, NULL
 
 
-Catchable fatal error: Argument 1 passed to f2() must implement interface XHPChild, null given in %s/test/slow/xhp/xhpchild.php on line 15
+Catchable fatal error: Argument 1 passed to f2() must implement interface XHPChild, null given in %s/test/slow/xhp/xhpchild.php on line 46

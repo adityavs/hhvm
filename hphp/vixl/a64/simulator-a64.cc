@@ -492,6 +492,11 @@ void Simulator::VisitUnallocated(Instruction* instr) {
 }
 
 
+void Simulator::VisitLseLdOp(Instruction* instr) {
+  VisitUnimplemented(instr);
+}
+
+
 void Simulator::VisitPCRelAddressing(Instruction* instr) {
   switch (instr->Mask(PCRelAddressingMask)) {
     case ADR:
@@ -824,6 +829,9 @@ void Simulator::VisitLoadStorePairNonTemporal(Instruction* instr) {
   LoadStorePairHelper(instr, Offset);
 }
 
+void Simulator::VisitLoadStoreExclusive(Instruction* instr) {
+  VisitUnimplemented(instr);
+}
 
 void Simulator::LoadStorePairHelper(Instruction* instr,
                                     AddrMode addrmode) {

@@ -8,12 +8,7 @@ all sub-suites.
   sure, your test doesn't belong here.
 * slow - Slower full featured tests. Grouped into sub-suites. By default put
   your test here.
-* spec - Tests associated with the official PHP language specification.
-  https://github.com/php/php-langspec/
 * zend/good - Passing tests from Zend's suite.
-* zend/bad - Failing tests from Zend. Fix these and move them to zend/good.
-* zend/flakey - Tests which mostly pass but have race conditions or can't be
-  parallelized.
 
 # Examples how to run them
 
@@ -25,9 +20,6 @@ all sub-suites.
 
 * Slow tests with the JIT in PGO mode -
 `test/run test/slow -m pgo`
-
-* PHP Specification tests with JIT -
-`test/run test/spec`
 
 * Run everything that is supposed to pass -
 `test/run all`
@@ -54,6 +46,7 @@ These are the allowed extensions:
 * `.php.in` - When you run the test, the input will be obtained from here.
 * `.php.out` - When you run the test, the output will be stored here.
 * `.php.opts` - Runtime options to pass to hhvm.
+* `.php.cli_args` - Command line arguments to the test file (e.g., `$argv` options).
 * `.php.serial` - The test will always be put in the serial bucket to be run sequentially with other serial tests so as to avoid any timing problems or collisions.
 * `.php.hphp_opts` - Options passed to hphp when generating a bytecode repo.
 * `.php.diff or hhas.diff` - The diff for .expect tests.

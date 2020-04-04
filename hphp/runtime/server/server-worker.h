@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,15 +20,15 @@
 #include "hphp/runtime/server/server.h"
 #include "hphp/runtime/server/job-queue-vm-stack.h"
 #include "hphp/runtime/server/server-stats.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/job-queue.h"
 #include "hphp/util/service-data.h"
 
 namespace HPHP {
 
-class Transport;
+struct Transport;
 
-class ServerJob {
-public:
+struct ServerJob {
   explicit ServerJob();
   virtual ~ServerJob() {}
 
@@ -47,15 +47,15 @@ struct ServerWorker
   : JobQueueWorker<JobPtr,Server*,true,false,JobQueueDropVMStack>
 {
   ServerWorker() {}
-  virtual ~ServerWorker() {}
+  ~ServerWorker() override {}
 
   /**
    * Request handler called by Server.
    */
-  virtual void doJob(JobPtr job) {
+  void doJob(JobPtr job) override {
     doJobImpl(job, false /*abort*/);
   }
-  virtual void abortJob(JobPtr job) {
+  void abortJob(JobPtr job) override {
     doJobImpl(job, true /*abort*/);
     m_requestsTimedOutOnQueue->addValue(1);
   }
@@ -63,16 +63,16 @@ struct ServerWorker
   /**
    * Called when thread enters and exits.
    */
-  virtual void onThreadEnter() {
-    assert(this->m_context);
+  void onThreadEnter() override {
+    assertx(this->m_context);
     m_handler = this->m_context->createRequestHandler();
     m_requestsTimedOutOnQueue =
-      ServiceData::createTimeseries("requests_timed_out_on_queue",
+      ServiceData::createTimeSeries("requests_timed_out_on_queue",
                                     {ServiceData::StatsType::COUNT});
   }
 
-  virtual void onThreadExit() {
-    assert(this->m_context);
+  void onThreadExit() override {
+    assertx(this->m_context);
     m_handler.reset();
   }
 
@@ -89,7 +89,9 @@ protected:
     bool error = true;
     std::string errorMsg;
 
-    assertx(MM().empty());
+    // rpc threads keep things live between requests, but other
+    // requests should not have allocated anything yet.
+    assertx(vmStack().isAllocated() || tl_heap->empty());
 
     SCOPE_EXIT { m_handler->teardownRequest(transport); };
 
@@ -112,13 +114,13 @@ protected:
         transport->onSendEnd();
         return;
       }
-    } catch (Exception &e) {
+    } catch (Exception& e) {
       if (Server::StackTraceOnError) {
         errorMsg = e.what();
       } else {
         errorMsg = e.getMessage();
       }
-    } catch (std::exception &e) {
+    } catch (std::exception& e) {
       errorMsg = e.what();
     } catch (...) {
       errorMsg = "(unknown exception)";

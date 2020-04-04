@@ -1,19 +1,19 @@
-<?php
+<?hh
 /* Prototype  : proto bool method_exists(object object, string method)
- * Description: Checks if the class method exists 
+ * Description: Checks if the class method exists
  * Source code: Zend/zend_builtin_functions.c
- * Alias to functions: 
+ * Alias to functions:
  */
 
 function __autoload($className) {
-	echo "In __autoload($className)\n";
+    echo "In __autoload($className)\n";
 }
 
 function test_error_handler($err_no, $err_msg, $filename, $linenum, $vars) {
-	echo "Error: $err_no - $err_msg, $filename($linenum)\n";
+    echo "Error: $err_no - $err_msg, $filename($linenum)\n";
 }
-set_error_handler('test_error_handler');
-
+<<__EntryPoint>> function main(): void {
+set_error_handler(fun('test_error_handler'));
 echo "*** Testing method_exists() : usage variations ***\n";
 
 // Initialise function arguments not being substituted (if any)
@@ -24,7 +24,7 @@ $unset_var = 10;
 unset ($unset_var);
 
 //array of values to iterate over
-$values = array(
+$values = varray[
 
       // int data
       0,
@@ -40,11 +40,11 @@ $values = array(
       .5,
 
       // array data
-      array(),
-      array(0),
-      array(1),
-      array(1, 2),
-      array('color' => 'red', 'item' => 'pen'),
+      varray[],
+      varray[0],
+      varray[1],
+      varray[1, 2],
+      darray['color' => 'red', 'item' => 'pen'],
 
       // null data
       NULL,
@@ -68,14 +68,14 @@ $values = array(
 
       // unset data
       $unset_var,
-);
+];
 
 // loop through each element of the array for method
 
 foreach($values as $value) {
-      echo "\nArg value $value \n";
-      var_dump( method_exists($object, $value) );
+      echo "\nArg value $value\n";
+      try { var_dump( method_exists($object, $value) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 };
 
 echo "Done";
-?>
+}

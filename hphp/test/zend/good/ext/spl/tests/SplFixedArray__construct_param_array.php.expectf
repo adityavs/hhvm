@@ -1,0 +1,2 @@
+
+Warning: SplFixedArray::setSize() expects parameter 1 to be long, array given in %s/SplFixedArray__construct_param_array.php on line 3

@@ -1,6 +1,6 @@
-<?php
-
-$array = array('a', 'b', 'c');
+<?hh
+<<__EntryPoint>> function main(): void {
+$array = varray['a', 'b', 'c'];
 $arrayIterator = new ArrayIterator($array);
 
 try {
@@ -21,5 +21,5 @@ try {
   print $e->getMessage() . "\n";
 }
 
-?>
-===DONE===
+echo "===DONE===\n";
+}

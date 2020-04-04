@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -31,10 +31,18 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant HHVM_FUNCTION(apache_note, const String& note_name,
-                      const String& note_value /* = null_string */) {
+                      const Variant& note_value /* = empty_string */) {
   String prev = ServerNote::Get(note_name);
-  if (!note_value.empty()) {
-    ServerNote::Add(note_name, note_value);
+  if (note_value.isNull()) {
+    ServerNote::Delete(note_name);
+  } else if (!note_value.isString()) {
+    raise_warning("apache_note() expects parameter 2 to be a nullable string");
+    return false;
+  } else {
+    auto const& value = note_value.asCStrRef();
+    if (!value.empty()) {
+      ServerNote::Add(note_name, value);
+    }
   }
   if (!prev.isNull()) {
     return prev;
@@ -42,33 +50,13 @@ Variant HHVM_FUNCTION(apache_note, const String& note_name,
   return false;
 }
 
-static Array get_headers(const HeaderMap& headers, bool allHeaders = false) {
-  ArrayInit ret(headers.size(), ArrayInit::Mixed{});
-  for (auto& iter : headers) {
-    const auto& values = iter.second;
-    if (auto size = values.size()) {
-      if (!allHeaders) {
-        ret.set(String(iter.first), String(values.back()));
-      } else {
-        PackedArrayInit dups(size);
-        for (auto& dup : values) {
-          dups.append(String(dup));
-        }
-        ret.set(String(toLower(iter.first)), dups.toArray());
-      }
-    }
-  }
-  return ret.toArray();
-}
-
 Array HHVM_FUNCTION(apache_request_headers) {
   Transport *transport = g_context->getTransport();
   if (transport) {
-    HeaderMap headers;
-    transport->getHeaders(headers);
+    auto const& headers = transport->getHeaders();
     return get_headers(headers);
   }
-  return empty_array();
+  return empty_darray();
 }
 
 Array HHVM_FUNCTION(apache_response_headers) {
@@ -78,11 +66,12 @@ Array HHVM_FUNCTION(apache_response_headers) {
     transport->getResponseHeaders(headers);
     return get_headers(headers);
   }
-  return empty_array();
+  return empty_darray();
 }
 
-bool HHVM_FUNCTION(apache_setenv, const String& variable, const String& value,
-                     bool walk_to_top /* = false */) {
+bool HHVM_FUNCTION(apache_setenv, const String& /*variable*/,
+                   const String& /*value*/,
+                   bool /*walk_to_top*/ /* = false */) {
   return false;
 }
 
@@ -101,10 +90,13 @@ Array HHVM_FUNCTION(apache_get_config) {
   if (HttpServer::Server) {
     workers = HttpServer::Server->getPageServer()->getActiveWorker();
     queued = HttpServer::Server->getPageServer()->getQueuedJobs();
+    queued -= HttpServer::QueueDiscount.load(std::memory_order_relaxed);
+    if (queued < 0)
+      queued = 0;
     health_level = (int)(ApacheExtension::GetHealthLevel());
   }
 
-  return make_map_array(
+  return make_darray(
     s_restart_time, HttpServer::StartTime,
     s_max_clients, RuntimeOption::ServerThreadCount,
     s_active_clients, workers,
@@ -116,39 +108,30 @@ Array HHVM_FUNCTION(apache_get_config) {
 Array HHVM_FUNCTION(get_headers_secure) {
   Transport *transport = g_context->getTransport();
   if (transport) {
-    HeaderMap headers;
-    transport->getHeaders(headers);
+    auto const& headers = transport->getHeaders();
     return get_headers(headers, true);
   }
-  return empty_array();
+  return empty_darray();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-
-bool ApacheExtension::Enable(true);
 
 ApacheExtension::ApacheExtension() : Extension("apache") {}
 
 ApacheExtension::~ApacheExtension() {}
 
 void ApacheExtension::moduleInit() {
-  if (Enable) {
-    HHVM_FE(apache_note);
-    HHVM_FE(apache_request_headers);
-    HHVM_FE(apache_response_headers);
-    HHVM_FE(apache_setenv);
-    HHVM_FALIAS(getallheaders, apache_request_headers);
-    HHVM_FE(apache_get_config);
-    HHVM_FALIAS(HH\\get_headers_secure, get_headers_secure);
-    loadSystemlib();
-  }
-}
+  HHVM_FE(apache_note);
+  HHVM_FE(apache_request_headers);
+  HHVM_FE(apache_response_headers);
+  HHVM_FE(apache_setenv);
+  HHVM_FALIAS(getallheaders, apache_request_headers);
+  HHVM_FE(apache_get_config);
+  HHVM_FALIAS(HH\\get_headers_secure, get_headers_secure);
 
-void ApacheExtension::moduleLoad(const IniSetting::Map& ini, Hdf config) {
-  Enable = RuntimeOption::ServerExecutionMode() ||
-           Config::GetBool(ini,
-                           config, "Apache.EnableInCLI",
-                           RuntimeOption::EnableHipHopSyntax);
+  HHVM_RC_INT(APACHE_MAP, 200);
+
+  loadSystemlib();
 }
 
 static ApacheExtension s_apache_extension;

@@ -1,26 +1,26 @@
-<?php
+<?hh
 
 switch ($_POST) {
-case array(): echo 'empty array';
+case varray[]: echo 'empty array';
  break;
 case $_GET:   echo 'get';
  break;
 default: echo 'default';
 }
-switch ($GLOBALS) {
-case array(): echo 'empty array';
+switch ($_SERVER) {
+case varray[]: echo 'empty array';
  break;
 default: echo 'default';
 }
 function ret_true($x) {
  return true;
- }
-switch ($GLOBALS) {
-case ret_true($GLOBALS['foo'] = 10): echo '1';
+}
+switch ($_SERVER) {
+case ret_true($_SERVER['foo'] = 10): echo '1';
  break;
-case array();
+case varray[];
  echo '2';
  break;
 default: echo '3';
 }
-var_dump($foo);
+var_dump($_SERVER['foo']);

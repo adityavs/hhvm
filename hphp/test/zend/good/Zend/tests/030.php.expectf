@@ -1,4 +1,4 @@
-object(Exception)#%d (7) {
+object(Exception) (8) {
   ["message":protected]=>
   string(3) "foo"
   ["string":"Exception":private]=>
@@ -10,7 +10,7 @@ object(Exception)#%d (7) {
   ["line":protected]=>
   int(%d)
   ["trace":"Exception":private]=>
-  array(1) {
+  array(2) {
     [0]=>
     array(6) {
       ["file"]=>
@@ -27,8 +27,18 @@ object(Exception)#%d (7) {
       array(0) {
       }
     }
+    [1]=>
+    array(2) {
+      ["function"]=>
+      string(4) "main"
+      ["args"]=>
+      array(0) {
+      }
+    }
   }
   ["previous":"Exception":private]=>
+  NULL
+  ["userMetadata":protected]=>
   NULL
 }
 'test' => '0'

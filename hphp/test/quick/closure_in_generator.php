@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   public function b() {
@@ -11,8 +11,9 @@ class A {
     return 'A';
   }
 }
-
+<<__EntryPoint>> function main(): void {
 $a = new A;
 foreach ($a->b() as $c) {
   print "$c\n";
+}
 }

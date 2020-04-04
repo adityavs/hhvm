@@ -1,4 +1,4 @@
-<?php 
+<?hh 
 
 $xml =<<<EOF
 <?xml version='1.0'?>
@@ -18,11 +18,10 @@ class SXETest extends SimpleXMLIterator
 	}
 }
 
-$sxe = new SXETest((binary)$xml);
+$sxe = new SXETest((string)$xml);
 
 var_dump(count($sxe));
 var_dump(count($sxe->elem1));
 var_dump(count($sxe->elem2));
 
-?>
-===DONE===
+echo "===DONE===\n";

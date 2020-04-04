@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -91,47 +91,40 @@ struct PureLoad       { AliasClass src; };
  * The effect of definitely storing `value' to a location, without performing
  * any other work.  Instructions with these memory effects can be removed if we
  * know the value being stored does not change the value of the location, or if
- * we know the location can never be loaded from again.
- */
-struct PureStore    { AliasClass dst; SSATmp* value; };
-
-/*
- * Spilling pre-live ActRecs are somewhat unusual, but effectively still just
- * pure stores.  They store to a range of stack slots, and don't store a PHP
- * value, so they get their own branch of the union.
+ * we know the location can never be loaded from again. `value' can be a
+ * nullptr, in which case the store can still be elided if it is known to never
+ * be loaded afterwards.
  *
- * The `stk' class is the entire stack range the instruction stores to, and the
- * `ctx' class is a subclass of `stk' that is the stack slot where it'll store
- * the context for the pre-live ActRec.
- *
- * The `stk' range should be interpreted as an exact AliasClass, not an upper
- * bound: it is guaranteed to be kNumActRecCells in size---no bigger than the
- * actual range of stack slots a SpillFrame instruction affects.
+ * dep is a "base" address that the store is relative to. This is used
+ * so we can mark stores altered across its definition (which can only
+ * happen in loops).
  */
-struct PureSpillFrame { AliasClass stk; AliasClass ctx; };
+struct PureStore    { AliasClass dst; SSATmp* value; SSATmp* dep; };
 
 /*
  * Calls are somewhat special enough that they get a top-level effect.
  *
- * The `destroys_locals' flag indicates whether the call can change locals in
- * the calling frame (e.g. extract() or parse_str(), when called with FCall).
- *
  * The `kills' set are locations that cannot be read by this instruction unless
  * it writes to them first, and which it generally may write to.  (This is used
- * for killing stack slots below the call depth.)
+ * for killing stack slots below the call depth and MInstrState locations)
  *
- * The `stack' set contains stack locations the call will read as arguments, as
- * well as stack locations it may read or write via other means
- * (e.g. debug_backtrace, or pointers to stack slots to a CallBuiltin).
- * Locations in any intersection between `stack' and `kills' may be assumed to
- * be killed.
+ * The `inputs' set contains stack locations the call will read as arguments.
+ *
+ * The `actrec' set contains stack locations the call will write ActRec to.
+ *
+ * The `outputs' set contains stack locations the call will write inout
+ * variables to.
+ *
+ * The `locals` set contains frame locations that the call might read.
  *
  * Note that calls that have been weakened to CallBuiltin use GeneralEffects,
  * not CallEffects.
  */
-struct CallEffects    { bool destroys_locals;
-                        AliasClass kills;
-                        AliasClass stack; };
+struct CallEffects    { AliasClass kills;
+                        AliasClass inputs;
+                        AliasClass actrec;
+                        AliasClass outputs;
+                        AliasClass locals; };
 
 /*
  * ReturnEffects is a return, either from the php function or an inlined
@@ -160,6 +153,32 @@ struct ReturnEffects  { AliasClass kills; };
 struct ExitEffects    { AliasClass live; AliasClass kills; };
 
 /*
+ * InlineEnterEffects indicate that an update to the vmfp for an inlined frame.
+ * In effect the instruction represents a move of inlStack locations to inlFrame
+ * locations. In actuality these alias locations occupy the same memory on the
+ * VM stack. Additionally the rbp chain is updated with actrec becoming the live
+ * frame.
+ *
+ * Stores to frame locations on the caller frame cannot be propagated passed
+ * an InlineEnterEffects unless they are moved after the corresponding
+ * InlineExitEffects instruction.
+ */
+struct InlineEnterEffects { AliasClass inlStack;
+                            AliasClass inlFrame;
+                            AliasClass actrec; };
+
+/*
+ * InlineExitEffects denotes the update of the vmfp for a return from an inlined
+ * frame. Logically it kills the inlStack, inlFrame, and inlMeta locations. In
+ * addition, following this instruction it is incorrect to propgate writes to
+ * inlFrame and inlMeta as they represent locations no longer accessible due to
+ * the reserved nature fo the frame pointer.
+ */
+struct InlineExitEffects { AliasClass inlStack;
+                           AliasClass inlFrame;
+                           AliasClass inlMeta; };
+
+/*
  * "Irrelevant" effects means it doesn't do anything we currently care about
  * for consumers of this module.  If you want to care about a new kind of
  * memory effect, you get to re-audit everything---have fun. :)
@@ -175,10 +194,11 @@ struct UnknownEffects {};
 using MemEffects = boost::variant< GeneralEffects
                                  , PureLoad
                                  , PureStore
-                                 , PureSpillFrame
                                  , CallEffects
                                  , ReturnEffects
                                  , ExitEffects
+                                 , InlineEnterEffects
+                                 , InlineExitEffects
                                  , IrrelevantEffects
                                  , UnknownEffects
                                  >;
@@ -200,7 +220,7 @@ MemEffects canonicalize(MemEffects);
 
 /*
  * Return an alias class representing the pointee of the given value, which
- * must be <= TPtrToGen.
+ * must be <= TMemToCell.
  */
 AliasClass pointee(const SSATmp*);
 
@@ -208,19 +228,6 @@ AliasClass pointee(const SSATmp*);
  * Produces a string about some MemEffects for debug-printing.
  */
 std::string show(MemEffects);
-
-//////////////////////////////////////////////////////////////////////
-
-/*
- * Get the frame from a DefInlineFP.
- *
- * Returns: an (uncanonicalized, precise) AliasClass containing the stack slots
- * corresponding to the ActRec that is being converted from a pre-live to a
- * live ActRec by this instruction.
- *
- * Pre: inst->is(DefInlineFP)
- */
-AliasClass inline_fp_frame(const IRInstruction* inst);
 
 //////////////////////////////////////////////////////////////////////
 

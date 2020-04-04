@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function __autoload($class) {
   echo "exiting\n";
@@ -10,4 +10,8 @@ function get_instance($name) {
   return new $classname;
 }
 
+
+<<__EntryPoint>>
+function main_autoload_exit() {
 get_instance('test');
+}

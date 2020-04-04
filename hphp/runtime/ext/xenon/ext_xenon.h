@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -29,16 +29,15 @@
   stack at that time (ie it flashes the code).
 
   How does it work?
-  There are two ways for Xenon to work: 1) always on, 2) via timer.
-  For the timer mode:  Xenon appends a timer to the already existing SIGVTALRM
-  handler.  When that timer fires it sets a semaphore so that others may
-  know.  We'd like to be able to record the status of every stack for every
-  thread at this point, but during a timer handler is not a reasonable place
-  to do this.
+  There are two ways for Xenon to work: 1) always on, 2) via timer. For the
+  timer mode: Xenon starts a timer that raises SIGPROF periodically. When that
+  timer fires it sets a semaphore so that others may know. We'd like to be able
+  to record the status of every stack for every thread at this point, but during
+  a timer handler is not a reasonable place to do this.
   Instead, Xenon has a pthread waiting for the semaphore.  When the semaphore
   is set in the handler, it wakes, sets the Xenon Surprise flag for every
   thread - this is the flash.
-  There are is a mechanism that hooks the enter/exit of every PHP function,
+  There is a mechanism that hooks the enter/exit of every PHP function,
   using the Surprise flags leverages that mechanism and calls logging.
   At this point, if the flag is set for this thread, the PHP and async stack
   will be logged for that thread.
@@ -61,50 +60,81 @@
 */
 
 namespace HPHP {
-class Xenon final {
-  public:
 
-    enum SampleType {
-      // Sample was taken during I/O wait and thus does not represent CPU time.
-      IOWaitSample,
+struct c_WaitableWaitHandle;
 
-      // Sample was taken before an async function was resumed at await opcode.
-      // The CPU time is attributed to the resumed async function, because the
-      // CPU time was spent by the scheduler on the behalf of the resumed
-      // function (preparing for reentry, unserializing result of external
-      // thread event, etc.).
-      ResumeAwaitSample,
+struct Xenon final {
+  enum SampleType {
+    // Sample was taken during I/O wait and thus does not represent CPU time.
+    IOWaitSample,
 
-      // Sample was taken before a function was called or a generator was
-      // resumed at yield opcode.
-      // The CPU time is attributed to the caller of the entered function.
-      EnterSample,
+    // Sample was taken before an async function was resumed at await opcode.
+    // The CPU time is attributed to the resumed async function, because the
+    // CPU time was spent by the scheduler on the behalf of the resumed
+    // function (preparing for reentry, unserializing result of external
+    // thread event, etc.).
+    ResumeAwaitSample,
 
-      // Sample was taken before a function returned, suspended or failed
-      // with an exception.
-      // The CPU time is attributed to the exited function.
-      ExitSample,
-    };
+    // Sample was taken before a function was called or a generator was
+    // resumed at yield opcode.
+    // The CPU time is attributed to the caller of the entered function.
+    // Inlined frames are skipped as they did not trigger EnterSample events
+    // to properly attribute their parent's cost.
+    EnterSample,
 
-    static Xenon& getInstance(void) noexcept;
+    // Sample was taken before a function returned, suspended or failed
+    // with an exception.
+    // The CPU time is attributed to the exited function.
+    ExitSample,
+  };
 
-    Xenon() noexcept;
-    ~Xenon() noexcept {};
-    Xenon(const Xenon&) = delete;
-    void operator=(const Xenon&) = delete;
+  static bool isCPUTime(SampleType t) {
+    switch (t) {
+      case IOWaitSample:
+        return false;
+      case ResumeAwaitSample:
+      case EnterSample:
+      case ExitSample:
+        return true;
+    }
+    always_assert(false);
+  }
 
-    void start(uint64_t msec);
-    void stop();
-    void log(SampleType t) const;
-    void surpriseAll();
-    void onTimer();
+  static const char* show(SampleType t) {
+    switch (t) {
+      case IOWaitSample: return "IOWait";
+      case ResumeAwaitSample: return "ResumeAwait";
+      case EnterSample: return "Enter";
+      case ExitSample: return "Exit";
+    }
+    always_assert(false);
+  }
 
-    bool      m_stopping;
-  private:
-    sem_t     m_timerTriggered;
+  static Xenon& getInstance(void) noexcept;
+
+  Xenon() noexcept;
+  ~Xenon() noexcept {};
+  Xenon(const Xenon&) = delete;
+  void operator=(const Xenon&) = delete;
+
+  void start(uint64_t msec);
+  void stop();
+  void incrementMissedSampleCount(ssize_t val);
+  int64_t getAndClearMissedSampleCount();
+  // Log a sample if XenonSignalFlag is set. Also clear it, unless
+  // in always-on mode.
+  void log(SampleType t, c_WaitableWaitHandle* wh = nullptr) const;
+  void surpriseAll();
+  void onTimer();
+  bool getIsProfiledRequest();
+  uint64_t getLastSurpriseTime();
+
+  bool      m_stopping;
+ private:
+  std::atomic<int64_t> m_lastSurprise;
+  std::atomic<int64_t> m_missedSampleCount;
 #if !defined(__APPLE__) && !defined(_MSC_VER)
-    pthread_t m_triggerThread;
-    timer_t   m_timerid;
+  timer_t   m_timerid;
 #endif
 };
 }

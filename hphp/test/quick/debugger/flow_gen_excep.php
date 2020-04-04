@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // Test stepping with exceptions in continuations. This is a very simple test
 // which simply confirms that exceptions flowing around continuations don't
@@ -21,7 +21,7 @@ function genFoo($a) {
 
 function foo($a) {
   $gen1 = genFoo($a);
-  $gen1->next();
+  $gen1->rewind();
   while ($gen1->valid()) {
     $val = $gen1->current();
     var_dump($val);

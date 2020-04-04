@@ -2,7 +2,7 @@
 
 class base {
   protected static function __xhpAttributeDeclaration(): array {
-    return [];
+    return darray[];
   }
 }
 
@@ -26,4 +26,8 @@ class :foo extends base {
   }
 }
 
+
+<<__EntryPoint>>
+function main_nullable_types() {
 :foo::dumpAttributes();
+}

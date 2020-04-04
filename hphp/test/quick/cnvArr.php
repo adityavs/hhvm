@@ -1,17 +1,9 @@
-<?php
+<?hh
 
 function foo($v) {
   return (array)$v;
 }
-
-var_dump(foo(null));
-var_dump(foo(true));
-var_dump(foo(1));
-var_dump(foo(1.1));
-var_dump(foo("abc"));
-var_dump(foo(array(123)));
 class C { public $foo = "bar"; }
-var_dump(foo(new C));
 
 function bar($i) {
   $v1 = "undefined";
@@ -35,8 +27,8 @@ function bar($i) {
     $v7 = 1.1;
     $v8 = "abc";
     $v9 = new C();
-    $v10 = array();
-    $v11 = array(123);
+    $v10 = varray[];
+    $v11 = varray[123];
   }
   var_dump((array)$v1);
   var_dump((array)$v2);
@@ -51,5 +43,16 @@ function bar($i) {
   var_dump((array)$v11);
 }
 
-bar(1);
+<<__EntryPoint>>
+function main_entry(): void {
 
+  var_dump(foo(null));
+  var_dump(foo(true));
+  var_dump(foo(1));
+  var_dump(foo(1.1));
+  var_dump(foo("abc"));
+  var_dump(foo(varray[123]));
+  var_dump(foo(new C));
+
+  bar(1);
+}

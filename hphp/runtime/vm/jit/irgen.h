@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,19 +13,52 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #ifndef incl_HPHP_JIT_IRGEN_H_
 #define incl_HPHP_JIT_IRGEN_H_
 
-#include <cstdint>
+#include "hphp/runtime/base/repo-auth-type.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/member-key.h"
+#include "hphp/runtime/vm/srckey.h"
+
+#include "hphp/runtime/vm/jit/bc-marker.h"
+#include "hphp/runtime/vm/jit/inline-state.h"
+#include "hphp/runtime/vm/jit/ir-builder.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/ir-unit.h"
+#include "hphp/runtime/vm/jit/irgen-state.h"
+#include "hphp/runtime/vm/jit/location.h"
+#include "hphp/runtime/vm/jit/region-selection.h"
+#include "hphp/runtime/vm/jit/stack-offsets.h"
+#include "hphp/runtime/vm/jit/types.h"
 
 #include "hphp/util/ringbuffer.h"
-#include "hphp/runtime/vm/jit/irgen-state.h"
-#include "hphp/runtime/vm/hhbc.h"
 
-namespace HPHP { struct SrcKey; }
-namespace HPHP { namespace jit {
+#include <cstdint>
+#include <utility>
+#include <vector>
 
-//////////////////////////////////////////////////////////////////////
+namespace HPHP {
+
+struct ArrayData;
+struct Func;
+struct ImmVector;
+struct StringData;
+
+namespace jit {
+
+struct Block;
+struct IRInstruction;
+struct NormalizedInstruction;
+struct SSATmp;
+
+namespace irgen {
+
+struct IRGS;
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * The public interface to the HHIR frontend is exported here.  Don't include
@@ -46,9 +79,7 @@ namespace HPHP { namespace jit {
  * we can just export functions that do the above two tasks.
  */
 
-namespace irgen {
-
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * The main function for generating new IRInstructions.  Attempts to append an
@@ -62,7 +93,7 @@ SSATmp* gen(IRGS& env, Opcode op, Args&&... args) {
   return makeInstruction(
     [&] (IRInstruction* inst) { return detail::genInstruction(env, inst); },
     op,
-    env.irb->curMarker(),
+    env.irb->nextBCContext(),
     std::forward<Args>(args)...
   );
 }
@@ -75,34 +106,20 @@ SSATmp* cns(IRGS& env, Args&&... args) {
   return env.unit.cns(std::forward<Args>(args)...);
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
 /*
- * Guards, checks and type assertions.  Guards and checks are the same thing,
- * except that guards must happen at the first bytecode offset in the region.
- *
- * TODO(#5706706): the stack versions should not be exported, except that
- * RegionDesc::Location::Stack needs some fixes first.
+ * Type checks and assertions.
  */
-void assertTypeStack(IRGS&, BCSPOffset, Type);
-void checkTypeStack(IRGS&, BCSPOffset, Type, Offset dest, bool outerOnly);
-void checkTypeLocal(IRGS&, uint32_t locId, Type, Offset dest, bool outerOnly);
-void assertTypeLocation(IRGS&, const RegionDesc::Location&, Type);
-void checkTypeLocation(IRGS&, const RegionDesc::Location&, Type, Offset dest,
-                       bool outerOnly);
+void checkType(IRGS&, const Location&, Type, Offset dest);
+void assertTypeStack(IRGS&, BCSPRelOffset, Type);
+void assertTypeLocal(IRGS&, uint32_t id, Type);
+void assertTypeLocation(IRGS&, const Location&, Type);
 
 /*
  * Type predictions.
  */
-void predictTypeLocation(IRGS&, const RegionDesc::Location&, Type);
-void predictTypeStack(IRGS&, int32_t offset, Type);
-void predictTypeLocal(IRGS&, uint32_t locId, Type);
-
-/*
- * Special type of guards for param-passing reffiness. These checks are needed
- * when an FPush* instruction is in a different region from its FCall, and we
- * don't know statically whether the callee will want arguments by reference.
- */
-void checkRefs(IRGS&, int64_t entryArDelta, const std::vector<bool>& mask,
-               const std::vector<bool>& vals, Offset);
+void predictType(IRGS&, const Location&, Type);
 
 /*
  * After all initial guards instructions have been emitted, the client of this
@@ -111,22 +128,21 @@ void checkRefs(IRGS&, int64_t entryArDelta, const std::vector<bool>& mask,
  */
 void prepareEntry(IRGS&);
 
-/*
- * Creates a no-op IR instruction that branches to an exit. These placeholder
- * instructions are later removed after any passes that want to use them for
- * their exits.
- */
-void makeExitPlaceholder(IRGS&);
-
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
- * Support for translation counters of various types, including reoptimization
- * (CheckCold).
+ * Support for Profiling counters, including reoptimization (CheckCold).
  */
-void incTransCounter(IRGS&);
 void incProfCounter(IRGS&, TransID);
 void checkCold(IRGS&, TransID);
+
+/*
+ * Exit if code coverage is enabled for the current function.
+ */
+void checkCoverage(IRGS& env);
+
+uint64_t curProfCount(const IRGS& env);
+uint64_t calleeProfCount(const IRGS& env, const RegionDesc& calleeRegion);
 
 /*
  * If ringbuffer tracing is enabled, generate a ringbuffer entry associated
@@ -136,29 +152,14 @@ void ringbufferEntry(IRGS&, Trace::RingBufferType, SrcKey, int level = 1);
 void ringbufferMsg(IRGS&, Trace::RingBufferType, const StringData*,
                    int level = 1);
 
-//////////////////////////////////////////////////////////////////////
-
-/*
- * For handling PUNT-based interpOnes.  When we PUNT, an exception is thrown
- * and the whole region is retried, with a bit set to interp the instruction
- * that failed.
- */
-void interpOne(IRGS&, const NormalizedInstruction&);
-
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * Before translating/processing each bytecode instruction, the driver
  * of the irgen module calls this function to move to the next
  * bytecode instruction (`newSk') to translate.
- *
- * The flag `lastBcInst' should be set if this is the last bytecode in
- * a region that's being translated.
  */
-void prepareForNextHHBC(IRGS&,
-                        const NormalizedInstruction*,
-                        SrcKey newSk,
-                        bool lastBcInst);
+void prepareForNextHHBC(IRGS&, SrcKey newSk);
 
 /*
  * After translating each bytecode instruction, the driver of the
@@ -181,101 +182,119 @@ void endBlock(IRGS&, Offset next);
  */
 void sealUnit(IRGS&);
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 /*
- * Called when we're starting to inline something.  Returns true iff
- * it succeeds.
+ * Returns whether `env' is currently inlining or not.
  */
-bool beginInlining(IRGS&,
-                   unsigned numParams,
-                   const Func* target,
-                   Offset returnBcOffset,
-                   Block* returnTarget,
-                   bool multipleReturns);
+bool isInlining(const IRGS& env);
 
 /*
- * Called when all blocks of the inner most inlined frame have been emitted
+ * Returns the current depth of inlining in `env`.
  */
-void endInlining(IRGS& env);
+uint16_t inlineDepth(const IRGS& env);
 
 /*
- * Returns whether the IRGS is currently inlining or not.
- */
-bool isInlining(const IRGS&);
-
-/*
- * We do two special-case optimizations to partially inline 'singleton'
- * accessor functions (functions that just return a static local or static
- * property if it's not null).
+ * Begin inlining. Always succeeds.
  *
- * This is exposed publically because the region translator drives inlining
- * decisions.
+ * When doing gen-time inlining, we set up a series of IR instructions that
+ * looks like this:
+ *
+ *   fp0  = DefFP
+ *   sp   = DefFrameRelSP<offset>/DefRegSP<offset>
+ *
+ *   // ... normal stuff happens ...
+ *   // ... probably some StStks due to argument expressions
+ *   // FCall*:
+ *             BeginInlining<offset> sp
+ *     fp2   = DefInlineFP<func,retBC,retSP,off> sp fp ctx
+ *
+ *         // ... callee body ...
+ *
+ *     InlineReturn fp2
+ *
+ * In DCE we attempt to remove the InlineReturn and DefInlineFP instructions if
+ * they aren't needed.
  */
-void inlSingletonSProp(IRGS&, const Func*, PC clsOp, PC propOp);
-void inlSingletonSLoc(IRGS&, const Func*, PC op);
-
-//////////////////////////////////////////////////////////////////////
+void beginInlining(IRGS& env,
+                   const Func* target,
+                   const FCallArgs& fca,
+                   SSATmp* ctx,
+                   bool dynamicCall,
+                   Op writeArOpc,
+                   SrcKey startSk,
+                   Offset callBcOffset,
+                   InlineReturnTarget returnTarget,
+                   int cost);
 
 /*
- * Several state-inspecition functions are used during translation or tracelet
- * formation.
+ * End the current inlined frame, after all its blocks have been emitted.
+ *
+ * This decrefs locals and $this and pushes the return value onto the caller's
+ * eval stack, in addition to the actual control transfer and bookkeeping done
+ * by implInlineReturn().
+ */
+bool endInlining(IRGS& env, const RegionDesc& calleeRegion);
+
+/*
+ * Begin inlining func into a dummy region used to measure the cost of
+ * inlining func. This will generate a region that cannot be executed.
+ *
+ * Simulating the inlining measures the cost of pushing a dummy frame (or not if
+ * we are able to elide it) and any effects that may have on alias analysis.
+ */
+void conjureBeginInlining(IRGS& env,
+                          const Func* func,
+                          SrcKey startSk,
+                          Type thisType,
+                          const std::vector<Type>& args,
+                          InlineReturnTarget returnTarget);
+
+/*
+ * Close an inlined function inserted using conjureBeginInlining; returns false
+ * if the inlined region would have been invalid for inlining. As with
+ * conjureBeginInlining, this function should not be used in a region that will
+ * be executed.
+ */
+bool conjureEndInlining(IRGS& env,
+                        const RegionDesc& calleeRegion,
+                        bool builtin);
+
+///////////////////////////////////////////////////////////////////////////////
+/*
+ * State introspection.
+ *
+ * These functions should only be used for inspecting state.  None of them
+ * constrain types, so if the type information is actually used, it must be
+ * constrained appropriately.
  */
 
 /*
- * The logical stack depth (from an hhbc perspective) in the current situation.
+ * Access the type of the top of the stack.
  */
-FPInvOffset logicalStackDepth(const IRGS& env);
+Type publicTopType(const IRGS& env, BCSPRelOffset);
 
 /*
- * Access the type of the top of the stack, without making any change to the
- * IRGS.  This means that the type returned is /not/ necessarily constrained.
+ * Return the proven or predicted Type for the given location.
  */
-Type publicTopType(const IRGS& env, BCSPOffset);
+Type provenType(const IRGS&, const Location&);
+Type predictedType(const IRGS&, const Location&);
 
-/*
- * Returns a predicted Type for the given location, used for tracelet analysis.
- */
-Type predictedTypeFromLocation(const IRGS&, const Location&);
-Type predictedTypeFromLocal(const IRGS&, uint32_t locId);
-Type predictedTypeFromStack(const IRGS&, BCSPOffset slot);
-
-/*
- * Returns the proven Type for the given location.
- */
-Type provenTypeFromLocation(const IRGS&, const Location&);
-Type provenTypeFromLocal(const IRGS&, uint32_t locId);
-Type provenTypeFromStack(const IRGS&, BCSPOffset slot);
-
-/*
- * Assuming env is ready to translate a member instruction, analyze the type of
- * the base value and return an appropriately-specialized TypeConstraint if a
- * supported operation is detected.
- */
-TypeConstraint mInstrBaseConstraint(const IRGS& env, Type predicted);
-
-/*
- * Returns the TypeConstraint that should be used to constrain baseType for an
- * Idx bytecode.
- */
-TypeConstraint idxBaseConstraint(Type baseType, Type keyType);
-
-//////////////////////////////////////////////////////////////////////
-
+///////////////////////////////////////////////////////////////////////////////
 /*
  * Forward-declare an irgen::emitFoo function for each bytecode Foo.
  *
  * The arguments to the functions are pre-unpacked bytecode immediates.
  */
 
-#define IMM_MA         int /* unused dummy placeholder */
 #define IMM_BLA        const ImmVector&
 #define IMM_SLA        const ImmVector&
-#define IMM_ILA        const ImmVector&
 #define IMM_VSA        const ImmVector&
-#define IMM_IVA        int32_t
+#define IMM_IVA        uint32_t
 #define IMM_I64A       int64_t
 #define IMM_LA         int32_t
+#define IMM_NLA        NamedLocal
+#define IMM_ILA        int32_t
 #define IMM_IA         int32_t
 #define IMM_DA         double
 #define IMM_SA         const StringData*
@@ -283,12 +302,18 @@ TypeConstraint idxBaseConstraint(Type baseType, Type keyType);
 #define IMM_AA         const ArrayData*
 #define IMM_BA         Offset
 #define IMM_OA(subop)  subop
+#define IMM_KA         MemberKey
+#define IMM_LAR        LocalRange
+#define IMM_ITA        IterArgs
+#define IMM_FCA        FCallArgs
 
 #define NA /*  */
 #define ONE(x0)              , IMM_##x0
 #define TWO(x0, x1)          , IMM_##x0, IMM_##x1
 #define THREE(x0, x1, x2)    , IMM_##x0, IMM_##x1, IMM_##x2
 #define FOUR(x0, x1, x2, x3) , IMM_##x0, IMM_##x1, IMM_##x2, IMM_##x3
+#define FIVE(x0, x1, x2, x3, x4) , IMM_##x0, IMM_##x1, IMM_##x2, IMM_##x3, IMM_##x4
+#define SIX(x0, x1, x2, x3, x4, x5) , IMM_##x0, IMM_##x1, IMM_##x2, IMM_##x3, IMM_##x4, IMM_##x5
 
 #define O(name, imms, ...) void emit##name(IRGS& imms);
   OPCODES
@@ -299,15 +324,18 @@ TypeConstraint idxBaseConstraint(Type baseType, Type keyType);
 #undef TWO
 #undef THREE
 #undef FOUR
+#undef FIVE
+#undef SIX
 
 #undef IMM_MA
 #undef IMM_BLA
 #undef IMM_SLA
-#undef IMM_ILA
 #undef IMM_VSA
 #undef IMM_IVA
 #undef IMM_I64A
 #undef IMM_LA
+#undef IMM_NLA
+#undef IMM_ILA
 #undef IMM_IA
 #undef IMM_DA
 #undef IMM_SA
@@ -315,13 +343,13 @@ TypeConstraint idxBaseConstraint(Type baseType, Type keyType);
 #undef IMM_AA
 #undef IMM_BA
 #undef IMM_OA
+#undef IMM_KA
+#undef IMM_LAR
+#undef IMM_ITA
+#undef IMM_FCA
 
-//////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
-}
-
-//////////////////////////////////////////////////////////////////////
-
-}}
+}}}
 
 #endif

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,8 +29,7 @@ namespace HPHP {
  * Implement this interface to report information to debugger or execute
  * debugger commands.
  */
-class IDebuggable {
-public:
+struct IDebuggable {
   enum Support {
     SupportInfo = 1,
     SupportDump = 2,
@@ -63,8 +62,7 @@ public:
   /**
    * Fill up vector with summary information.
    */
-  virtual void debuggerInfo(InfoVec& info) {
-  }
+  virtual void debuggerInfo(InfoVec& /*info*/) {}
 
   /**
    * Dump detailed information to return string.
@@ -76,8 +74,8 @@ public:
   /**
    * Execute a debugger action.
    */
-  virtual String debuggerVerb(const std::string& verb,
-                              const std::vector<std::string>& args) {
+  virtual String debuggerVerb(const std::string& /*verb*/,
+                              const std::vector<std::string>& /*args*/) {
     return String();
   }
 };

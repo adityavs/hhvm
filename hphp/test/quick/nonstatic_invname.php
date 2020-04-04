@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Blah {
   public function __call(string $a, $b) {
@@ -15,5 +15,6 @@ function heh() {
 function main(Blah $l) {
   $l->{heh()}();
 }
-
+<<__EntryPoint>> function main_entry(): void {
 main(new Blah);
+}

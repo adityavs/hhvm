@@ -1,0 +1,27 @@
+.hh_file 1;
+#
+# Can only use AddNewElemC on PHP arrays
+#
+
+.main {
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
+  Int 1
+  RetC
+}
+
+.function main {
+          NewDictArray 1
+          Int 100
+          AddNewElemC
+          SetL $v
+          PopC
+          String "Shouldn't get here...\n"
+          Print
+          PopC
+          True
+          RetC
+}

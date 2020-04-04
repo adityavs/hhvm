@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,10 +16,11 @@
 */
 
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/util/lock.h"
+#include "hphp/util/rds-local.h"
 
 #ifdef USE_EDITLINE
 #include <editline/readline.h>
@@ -30,22 +31,21 @@
 
 namespace HPHP {
 
-namespace {
 struct ReadlineVars {
   Variant completion;
   Array array;
 };
 
-IMPLEMENT_THREAD_LOCAL(ReadlineVars, s_readline);
+RDS_LOCAL(ReadlineVars, s_readline);
 
-}
-
-static Variant HHVM_FUNCTION(readline, const String& prompt) {
-  auto result = readline(prompt.data());
+static Variant HHVM_FUNCTION(readline, const Variant& prompt /* = null */) {
+  auto result = readline(
+    prompt.isString() ? prompt.toString().data() : nullptr
+  );
   if (result == nullptr) {
     return false;
   } else {
-    auto str = String::FromCStr(result);
+    auto str = Variant{result};
     free(result);
     return str;
   }
@@ -75,7 +75,7 @@ static char* _readline_command_generator(const char* text, int state) {
   }
   auto text_str = String(text);
   while (iter) {
-    auto value = iter.secondRef().toString();
+    auto value = tvCastToString(iter.secondVal());
     ++iter;
     if (text_str == value.substr(0, text_str.length())) {
       // readline frees this using free(), so we must use malloc() and not new
@@ -92,9 +92,9 @@ static char** readline_completion_cb(const char* text, int start, int end) {
   char** matches = nullptr;
   auto completion = vm_call_user_func(
       s_readline->completion,
-      make_packed_array(text, start, end));
+      make_vec_array(text, start, end));
   if (completion.isArray()) {
-    s_readline->array = completion.toArrRef();
+    s_readline->array = completion.asArrRef();
     if (s_readline->array.length() > 0) {
       matches = rl_completion_matches(text, _readline_command_generator);
     } else {
@@ -252,7 +252,7 @@ Variant HHVM_FUNCTION(readline_info, const Variant& varnameMixed /* = null */,
       return oldval;
     }
   }
-  return null_variant;
+  return uninit_variant;
 }
 
 
@@ -266,18 +266,13 @@ static bool HHVM_FUNCTION(readline_write_history,
   }
 }
 
-static class ReadlineExtension final : public Extension {
-  public:
+static struct ReadlineExtension final : Extension {
     ReadlineExtension() : Extension("readline") {}
     void moduleInit() override {
 #ifdef USE_EDITLINE
-      Native::registerConstant<KindOfStaticString>(
-          makeStaticString("READLINE_LIB"), makeStaticString("libedit")
-      );
+      HHVM_RC_STR(READLINE_LIB, "libedit");
 #else
-      Native::registerConstant<KindOfStaticString>(
-          makeStaticString("READLINE_LIB"), makeStaticString("readline")
-      );
+      HHVM_RC_STR(READLINE_LIB, "readline");
 #endif
       HHVM_FE(readline);
       HHVM_FE(readline_add_history);

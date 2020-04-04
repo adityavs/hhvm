@@ -1,7 +1,10 @@
-<?php
+<?hh
+
 // https://github.com/php/php-src/pull/865
 
-$array = new ArrayIterator(array('a', array('b', 'c')));
+<<__EntryPoint>>
+function main_bug68128() {
+$array = new ArrayIterator(varray['a', varray['b', 'c']]);
 $regex = new RegexIterator($array, '/Array/');
 
 foreach ($regex as $match) {
@@ -9,7 +12,7 @@ foreach ($regex as $match) {
 }
 
 $rArrayIterator = new RecursiveArrayIterator(
-                    array('test1', array('tet3', 'test4', 'test5'))
+                    varray['test1', varray['tet3', 'test4', 'test5']]
                   );
 $rRegexIterator = new RecursiveRegexIterator(
                     $rArrayIterator,
@@ -32,4 +35,5 @@ foreach ($rRegexIterator as $key1 => $value1) {
     print_r($value1);
     echo "\n";
   }
+}
 }

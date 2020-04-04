@@ -1,10 +1,9 @@
-<?php
-class overloaded
-{
+<?hh
+ class overloaded {
   private $values;
   function __construct()
   {
-    $this->values = array('a' => 0);
+    $this->values = darray['a' => 0];
   }
   function __set($name, $value)
   {
@@ -17,7 +16,10 @@ class overloaded
     return $this->values[$name];
   }
 }
-$test = new overloaded();
-$test->a++;     // __get(), then __set()
-++$test->a;
-?>
+<<__EntryPoint>>
+function main_entry(): void {
+
+  $test = new overloaded();
+  $test->a++;     // __get(), then __set()
+  ++$test->a;
+}

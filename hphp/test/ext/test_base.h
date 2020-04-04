@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,10 +17,8 @@
 #ifndef incl_HPHP_TEST_BASE_H_
 #define incl_HPHP_TEST_BASE_H_
 
-#include "hphp/compiler/hphp.h"
-#include "hphp/runtime/base/type-conversions.h"
-
 #include "hphp/test/ext/test.h"
+#include "hphp/util/text-util.h"
 
 #include <cassert>
 #include <exception>
@@ -29,14 +27,11 @@
 using namespace HPHP;
 ///////////////////////////////////////////////////////////////////////////////
 
-class TestBase {
- public:
+struct TestBase {
   TestBase();
   virtual ~TestBase() {}
 
-  virtual bool preTest() { return true; }
   virtual bool RunTests(const std::string &which) = 0;
-  virtual bool postTest() { return true; }
 
   int fail_count;
   int skip_count;
@@ -54,8 +49,6 @@ class TestBase {
                    double v1, double v2);
   bool array_value_exists(const Variant& var, const Variant& value);
 
-  static char error_buffer[];
-
   template<class T>
   bool runTestImpl(T test, const std::string& which, const std::string& name) {
     bool ret = true;
@@ -63,10 +56,10 @@ class TestBase {
     auto fail = [&] { printf("%s failed\n", name.c_str()); ret = false; };
 
     if (which.empty() || which == name) {
-      SCOPE_EXIT { fflush(nullptr); };
+      SCOPE_EXIT { fflush(stdout); fflush(stderr); };
       test_name = name;
       try {
-        if (preTest() && test() && postTest()) {
+        if (test()) {
           if (!Test::s_quiet) {
             pass();
           }
@@ -87,8 +80,7 @@ class TestBase {
 };
 
 template <bool value>
-class WithOption {
-public:
+struct WithOption {
   explicit WithOption(bool& option) :
     m_option(&option), m_save(option) {
     option = value;
@@ -103,24 +95,52 @@ typedef WithOption<true>  WithOpt;
 typedef WithOption<false> WithNoOpt;
 
 ///////////////////////////////////////////////////////////////////////////////
+
+namespace test_detail {
+
+inline bool toBoolean(bool    v) { return v;}
+inline bool toBoolean(char    v) { return v;}
+inline bool toBoolean(short   v) { return v;}
+inline bool toBoolean(int     v) { return v;}
+inline bool toBoolean(int64_t v) { return v;}
+inline bool toBoolean(double  v) { return v;}
+inline bool toBoolean(const char* v) = delete;
+inline bool toBoolean(const StringData *v) {
+  return v ? v->toBoolean() : false;
+}
+inline bool toBoolean(const String& v) { return toBoolean(v.get());}
+inline bool toBoolean(const ArrayData *v) {
+  return v && !v->empty();
+}
+inline bool toBoolean(const Array& v) { return toBoolean(v.get());}
+inline bool toBoolean(const ObjectData *v) {
+  return v ? v->toBoolean() : false;
+}
+inline bool toBoolean(const Object& v) { return toBoolean(v.get());}
+inline bool toBoolean(const Variant& v) { return v.toBoolean();}
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // macros
 
 #define RUN_TEST(test) do {                                             \
     if (!runTestImpl([=] { return test(); }, which, #test)) ret = false; \
   } while(false)
 
-#define LOG_TEST_ERROR(...)                                             \
-  sprintf(TestBase::error_buffer, __VA_ARGS__);                         \
-  printf("%s\n", TestBase::error_buffer);                               \
-  error_messages += "\n\n";                                             \
-  error_messages += TestBase::error_buffer;                             \
+#define LOG_TEST_ERROR(...) do {                                        \
+    std::string msg;                                                    \
+    string_printf(msg, __VA_ARGS__);                                    \
+    printf("%s\n", msg.c_str());                                        \
+    error_messages += "\n\n" + msg;                                     \
+  } while (false)
 
 #define SKIP(reason)                                                    \
   LOG_TEST_ERROR("%s skipped [%s]", __FUNCTION__, #reason);             \
   return CountSkip();                                                   \
 
 #define VERIFY(exp)                                                     \
-  if (!toBoolean(exp)) {                                                \
+  if (!test_detail::toBoolean(exp)) {                                   \
     LOG_TEST_ERROR("%s:%d: [%s] is false", __FILE__, __LINE__, #exp);   \
     return Count(false);                                                \
   }                                                                     \

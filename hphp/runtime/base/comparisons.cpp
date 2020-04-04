@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -28,7 +28,7 @@ bool same(const Variant& v1, bool v2) {
 }
 
 bool same(const Variant& v1, int64_t v2) {
-  auto const cell = v1.asCell();
+  auto const cell = v1.asTypedValue();
   if (isIntType(cell->m_type)) {
     return v2 == cell->m_data.num;
   }
@@ -60,34 +60,10 @@ bool same(const Variant& v1, const Array& v2) {
   if (null1 && null2) return true;
   if (null1 || null2) return false;
   if (!v1.isArray()) return false;
-  auto const ad = v1.getArrayData();
-  return v2->equal(ad, true);
-}
-
-bool same(const Variant& v1, const Object& v2) {
-  bool null1 = v1.isNull();
-  bool null2 = v2.isNull();
-  if (null1 && null2) return true;
-  if (null1 || null2) return false;
-  if (!v1.isObject()) return false;
-  auto const od = v1.getObjectData();
-  return od == v2.get();
-}
-
-bool same(const Variant& v1, const Resource& v2) {
-  bool null1 = v1.isNull();
-  bool null2 = v2.isNull();
-  if (null1 && null2) return true;
-  if (null1 || null2) return false;
-  if (!v1.isResource()) return false;
-  return v1.toCResRef().same(v2);
+  return v1.asCArrRef().same(v2);
 }
 
 //////////////////////////////////////////////////////////////////////
-
-bool equal(int v1, const StringData *v2) {
-  return equal((int64_t)v1, v2);
-}
 
 bool equal(int64_t v1, const StringData *v2) {
   int64_t lval; double dval;
@@ -99,10 +75,6 @@ bool equal(int64_t v1, const StringData *v2) {
   } else {
     return v1 == 0;
   }
-}
-
-bool less(int v1, const StringData *v2) {
-  return less((int64_t)v1, v2);
 }
 
 bool less(int64_t v1, const StringData *v2) {
@@ -127,10 +99,6 @@ bool lessEqual(int64_t v1, const StringData *v2) {
     return (double)v1 <= dval;
   }
   return v1 <= 0;
-}
-
-bool more(int v1, const StringData *v2) {
-  return more((int64_t)v1, v2);
 }
 
 bool more(int64_t v1, const StringData *v2) {
@@ -158,7 +126,7 @@ bool moreEqual(int64_t v1, const StringData *v2) {
 }
 
 int64_t compare(const StringData* v1, int64_t v2) {
-  assert(v1);
+  assertx(v1);
   int64_t lval;
   double dval;
   auto ret = v1->isNumericWithVal(lval, dval, 1);

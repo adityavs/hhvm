@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,19 +18,19 @@
 #ifndef incl_HPHP_EXT_HASH_ENGINE_H_
 #define incl_HPHP_EXT_HASH_ENGINE_H_
 
+#include "hphp/util/assertions.h"
+
 #include <map>
 #include <memory>
 #include <cstring>
 #include <string>
-#include <cassert>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 #define L64(x) (x ## ULL)
 
-class HashEngine {
-public:
+struct HashEngine {
   HashEngine(int digest_size_, int block_size_, int context_size_)
     : digest_size(digest_size_), block_size(block_size_),
       context_size(context_size_) {}
@@ -41,9 +41,9 @@ public:
                            unsigned int count) = 0;
   virtual void hash_final(unsigned char *digest, void *context) = 0;
   virtual void hash_copy(void *new_context, void *old_context) {
-    assert(new_context != nullptr);
-    assert(old_context != nullptr);
-    assert(context_size >= 0);
+    assertx(new_context != nullptr);
+    assertx(old_context != nullptr);
+    assertx(context_size >= 0);
     memcpy(new_context, old_context, context_size);
   }
 

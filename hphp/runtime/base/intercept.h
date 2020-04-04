@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,10 +16,12 @@
 #ifndef incl_HPHP_INTERCEPT_H_
 #define incl_HPHP_INTERCEPT_H_
 
+#include <stdint.h>
+
 namespace HPHP {
 
-class Array;
-class String;
+struct Array;
+struct String;
 struct Variant;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -30,23 +32,25 @@ struct Variant;
  * instead. If it returns FALSE, continues execution. Otherwise, return its
  * return.
  */
-bool register_intercept(const String& name, const Variant& callback, const Variant& data);
+bool register_intercept(const String& name, const Variant& callback,
+                        const Variant& data, bool checkForDebugger,
+                        bool newCallback);
 
 /**
  * Check to see if it is actually intercepted for current request.
  */
-Variant* get_intercept_handler(const String& name, char* flag);
+Variant* get_intercept_handler(const String& name, int8_t* flag);
 
 /**
  * Call intercept handler with original parameters.
  */
-bool handle_intercept(const Variant& handler, const String& name, const Array& params,
-                      Variant& ret);
+bool handle_intercept(const Variant& handler, const String& name,
+                      const Array& params, Variant& ret);
 
 /**
  * Removes a previously registered flag.
  */
-void unregister_intercept_flag(const String& name, char* flag);
+void unregister_intercept_flag(const String& name, int8_t* flag);
 
 ///////////////////////////////////////////////////////////////////////////////
 // fb_rename_function()

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,17 +22,18 @@
 #include "hphp/runtime/base/config.h"
 #include "hphp/runtime/server/http-protocol.h"
 #include "hphp/util/process.h"
+#include "hphp/util/safe-cast.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 void ReplayTransport::recordInput(Transport* transport, const char *filename) {
-  assert(transport);
+  assertx(transport);
 
   Hdf hdf;
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "%u", Process::GetProcessId());
+  snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)getpid());
   hdf["pid"] = std::string(buf);
   snprintf(buf, sizeof(buf), "%" PRIx64, (int64_t)Process::GetThreadId());
   hdf["tid"] = std::string(buf);
@@ -44,7 +45,10 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
   hdf["remote_host"] = transport->getRemoteHost();
   hdf["remote_port"] = transport->getRemotePort();
 
-  transport->getHeaders(m_requestHeaders);
+  auto const& headers = transport->getHeaders();
+  for (auto const& pair : headers) {
+    m_requestHeaders[pair.first] = pair.second;
+  }
   int index = 0;
   for (HeaderMap::const_iterator iter = m_requestHeaders.begin();
        iter != m_requestHeaders.end(); ++iter) {
@@ -55,10 +59,10 @@ void ReplayTransport::recordInput(Transport* transport, const char *filename) {
     }
   }
 
-  int size;
+  size_t size;
   const void *data = transport->getPostData(size);
   if (size) {
-    String encoded = string_uuencode((const char *)data, size);
+    String encoded = string_uuencode((const char *)data, safe_cast<int>(size));
     hdf["post"] = encoded.get()->data();
   } else {
     hdf["post"] = "";
@@ -83,8 +87,8 @@ void ReplayTransport::replayInputImpl() {
                                                            "", false));
   m_postData = std::string(postData.data(), postData.size());
   m_requestHeaders.clear();
-  auto headers_callback = [&] (const IniSetting::Map &ini_h,
-                               const Hdf &hdf_h, const std::string &ini_h_key) {
+  auto headers_callback = [&](const IniSetting::Map& ini_h, const Hdf& hdf_h,
+                              const std::string& /*ini_h_key*/) {
     m_requestHeaders[Config::GetString(ini_h, hdf_h, "name",
                                        "", false)].push_back(
       Config::GetString(ini_h, hdf_h, "value", "", false)
@@ -104,7 +108,7 @@ uint16_t ReplayTransport::getRemotePort() {
   return Config::GetUInt16(m_ini, m_hdf, "remote_port", 0, false);
 }
 
-const void *ReplayTransport::getPostData(int &size) {
+const void *ReplayTransport::getPostData(size_t &size) {
   size = m_postData.size();
   return m_postData.data();
 }
@@ -114,30 +118,30 @@ Transport::Method ReplayTransport::getMethod() {
 }
 
 std::string ReplayTransport::getHeader(const char *name) {
-  assert(name);
+  assertx(name);
   if (m_requestHeaders.find(name) != m_requestHeaders.end()) {
-    assert(!m_requestHeaders[name].empty());
+    assertx(!m_requestHeaders[name].empty());
     return m_requestHeaders[name][0];
   }
   return "";
 }
 
-void ReplayTransport::getHeaders(HeaderMap &headers) {
-  headers = m_requestHeaders;
+const HeaderMap& ReplayTransport::getHeaders() {
+  return m_requestHeaders;
 }
 
 void ReplayTransport::addHeaderImpl(const char *name, const char *value) {
-  assert(name && value);
+  assertx(name && value);
   m_responseHeaders[name].push_back(value);
 }
 
 void ReplayTransport::removeHeaderImpl(const char *name) {
-  assert(name);
+  assertx(name);
   m_responseHeaders.erase(name);
 }
 
-void ReplayTransport::sendImpl(const void *data, int size, int code,
-                               bool chunked, bool eom) {
+void ReplayTransport::sendImpl(const void* data, int size, int code,
+                               bool /*chunked*/, bool eom) {
   m_code = code;
 
   m_response = "HTTP/1.1 ";

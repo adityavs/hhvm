@@ -19,31 +19,29 @@ extern gdImagePtr gdImageCreateFromPngSource (gdSourcePtr inSource);
 #ifdef HAVE_LIBPNG
 void gdImagePngToSink (gdImagePtr im, gdSinkPtr outSink)
 {
-	gdIOCtx *out = gdNewSSCtx(NULL, outSink);
-	gdImagePngCtx(im, out);
-	out->gd_free(out);
+  gdIOCtx *out = gdNewSSCtx(NULL, outSink);
+  gdImagePngCtx(im, out);
+  out->gd_free(out);
 }
 
 gdImagePtr gdImageCreateFromPngSource (gdSourcePtr inSource)
 {
-	gdIOCtx *in = gdNewSSCtx(inSource, NULL);
-	gdImagePtr im;
+  gdIOCtx *in = gdNewSSCtx(inSource, NULL);
+  gdImagePtr im;
 
-	im = gdImageCreateFromPngCtx(in);
+  im = gdImageCreateFromPngCtx(in);
 
-	in->gd_free(in);
+  in->gd_free(in);
 
-	return im;
+  return im;
 }
 #else /* no HAVE_LIBPNG */
-void gdImagePngToSink (gdImagePtr im, gdSinkPtr outSink)
-{
-	php_gd_error("PNG support is not available");
+void gdImagePngToSink(gdImagePtr /*im*/, gdSinkPtr /*outSink*/) {
+  php_gd_error("PNG support is not available");
 }
-gdImagePtr gdImageCreateFromPngSource (gdSourcePtr inSource)
-{
-	php_gd_error("PNG support is not available");
-	return NULL;
+gdImagePtr gdImageCreateFromPngSource(gdSourcePtr /*inSource*/) {
+  php_gd_error("PNG support is not available");
+  return NULL;
 }
 #endif /* HAVE_LIBPNG */
 

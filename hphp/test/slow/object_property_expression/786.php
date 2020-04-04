@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class C1 {
   public function __get( $what ) {
@@ -11,9 +11,13 @@ class C1 {
 ";
     $this->_p[ $what ] = $value;
   }
-  private $_p = array();
+  private $_p = varray[];
 }
+
+<<__EntryPoint>>
+function main_786() {
 $c = new C1();
 $c->a = 1;
 $c->a .= 1;
 print $c->a;
+}

@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 /**
  * A "Locale" is an identifier used to get language, culture, or
@@ -79,7 +79,7 @@ class Locale {
                                        $locale,
                                        $canonicalize = false): bool {
     if ($locale == '*') return true;
-    if (empty($locale)) $locale = self::getDefault();
+    if (!($locale ?? false)) $locale = self::getDefault();
     if ($canonicalize) {
       $locale  = self::canonicalize($locale);
       $langtag = self::canonicalize($langtag);
@@ -243,7 +243,7 @@ class Locale {
    * @return string - The closest matching language tag or default
    *   value.
    */
-  <<__Native, __ParamCoerceModeFalse>>
+  <<__Native>>
   public static function lookup(array $langtag,
                                 string $locale,
                                 bool $canonicalize = false,
@@ -504,7 +504,7 @@ function locale_get_script(string $locale): mixed {
 function locale_lookup(array $langtag,
                        string $locale,
                        bool $canonicalize = false,
-                       string $default): string {
+                       string $default = ""): string {
   return Locale::lookup($langtag, $locale, $canonicalize, $default);
 }
 

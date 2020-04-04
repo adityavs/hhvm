@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,14 +16,13 @@
 
 #include "hphp/runtime/base/curl-tls-workarounds.h"
 #include <curl/curl.h>
-#include <curl/easy.h>
 #include <openssl/ssl.h>
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/runtime-option.h"
 
 namespace HPHP {
 
-CURLcode curl_tls_workarounds_cb(CURL *curl, void *sslctx, void *parm) {
+CURLcode curl_tls_workarounds_cb(CURL* /*curl*/, void* sslctx, void* /*parm*/) {
   // Check to see if workarounds are enabled.
   SSL_CTX* ctx = (SSL_CTX*)sslctx;
   if (RuntimeOption::TLSDisableTLS1_2) {

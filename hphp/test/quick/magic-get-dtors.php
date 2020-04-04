@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class c{
   public static $idx = 0;
@@ -6,9 +6,6 @@ class c{
   public function __construct() {
     $this->x = self::$idx++;
     printf("c %d constructing\n", $this->x);
-  }
-  public function __destruct() {
-    printf("c %d destructing\n", $this->x);
   }
   public function __get($name) {
     return new C();
@@ -21,6 +18,8 @@ function main() {
   $w = $o->fakeprop; // Exercise the translator's CGetM <H P>
   echo "Returning from main\n";
 }
+<<__EntryPoint>> function main_entry(): void {
 echo "Starting\n";
 main();
 echo "Done\n";
+}

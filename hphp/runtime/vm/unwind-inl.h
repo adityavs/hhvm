@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,26 +23,10 @@ namespace HPHP {
 
 template<class Action>
 inline void exception_handler(Action action) {
-  ITRACE_MOD(Trace::unwind, 1, "unwind exception_handler\n");
   Trace::Indent _i;
-
   try {
     action();
     vmpc() = 0;
-    return;
-  }
-
-  /*
-   * Unwind (repropagating from a fault funclet) is slightly different
-   * from the throw cases, because we need to re-raise the exception
-   * as if it came from the same offset to handle nested fault
-   * handlers correctly, and we continue propagating the current Fault
-   * instead of pushing a new one.
-   */
-  catch (const VMPrepareUnwind&) {
-    checkVMRegState();
-    ITRACE_MOD(Trace::unwind, 1, "unwind: restoring offset {}\n", vmpc());
-    unwindPhp();
     return;
   }
 
@@ -50,50 +34,34 @@ inline void exception_handler(Action action) {
     checkVMRegState();
     ITRACE_MOD(Trace::unwind, 1, "unwind: Object of class {}\n",
                o->getVMClass()->name()->data());
-    unwindPhp(o.get());
+    assertx(o.get());
+    if (vmfp() == nullptr) throw;
+    unwindVM(o.get());
     return;
-  }
-
-  catch (VMSwitchMode&) {
-    checkVMRegState();
-    ITRACE_MOD(Trace::unwind, 1, "unwind: VMSwitchMode\n");
-    return;
-  }
-
-  catch (VMSwitchModeBuiltin&) {
-    checkVMRegState();
-    ITRACE_MOD(Trace::unwind, 1, "unwind: VMSwitchModeBuiltin from {}\n",
-               vmfp()->m_func->fullName()->data());
-    unwindBuiltinFrame();
-    return;
-  }
-
-  catch (VMReenterStackOverflow&) {
-    checkVMRegState();
-    ITRACE_MOD(Trace::unwind, 1, "unwind: VMReenterStackOverflow\n");
-    (new FatalErrorException("Stack overflow"))->throwException();
-    not_reached();
   }
 
   catch (Exception& e) {
     checkVMRegState();
     ITRACE_MOD(Trace::unwind, 1, "unwind: Exception: {}\n", e.what());
-    unwindCpp(e.clone());
-    not_reached();
+    if (vmfp() == nullptr) throw;
+    unwindVM(e.clone());
   }
 
   catch (std::exception& e) {
     checkVMRegState();
     ITRACE_MOD(Trace::unwind, 1, "unwind: std::exception: {}\n", e.what());
-    unwindCpp(new Exception("unexpected %s: %s", typeid(e).name(), e.what()));
-    not_reached();
+    auto const exn =
+      new Exception("unexpected %s: %s", typeid(e).name(), e.what());
+    if (vmfp() == nullptr) exn->throwException();
+    unwindVM(exn);
   }
 
   catch (...) {
     checkVMRegState();
     ITRACE_MOD(Trace::unwind, 1, "unwind: unknown\n");
-    unwindCpp(new Exception("unknown exception"));
-    not_reached();
+    auto const exn = new Exception("unknown exception");
+    if (vmfp() == nullptr) exn->throwException();
+    unwindVM(exn);
   }
 
   not_reached();

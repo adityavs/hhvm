@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,8 +27,7 @@ namespace HPHP {
 /**
  * A file system file that's nothing but ordinary. A simple FILE* wrapper.
  */
-class PlainFile : public File {
-public:
+struct PlainFile : File {
   DECLARE_RESOURCE_ALLOCATION(PlainFile);
 
   explicit PlainFile(FILE *stream = nullptr,
@@ -39,7 +38,7 @@ public:
                      bool nonblocking = false,
                      const String& wrapper = null_string,
                      const String& stream_type = null_string);
-  virtual ~PlainFile();
+  ~PlainFile() override;
 
   // overriding ResourceData
   const String& o_getClassNameHook() const override { return classnameof(); }
@@ -76,9 +75,9 @@ protected:
  * This is wrapper for fds that cannot be closed.
  */
 struct BuiltinFile : PlainFile {
-  explicit BuiltinFile(FILE *stream) : PlainFile(stream, true) {}
-  explicit BuiltinFile(int fd) : PlainFile(fd, true) {}
-  virtual ~BuiltinFile();
+  explicit BuiltinFile(FILE *stream);
+  explicit BuiltinFile(int fd);
+  ~BuiltinFile() override;
   bool close() override;
   void sweep() override;
 };
@@ -90,23 +89,24 @@ static_assert(sizeof(BuiltinFile) == sizeof(PlainFile),
  * STDIN, STDOUT, and STDERR.
  */
 struct BuiltinFiles final : RequestEventHandler {
-  static const Variant& GetSTDIN();
-  static const Variant& GetSTDOUT();
-  static const Variant& GetSTDERR();
+  static const Variant& getSTDIN();
+  static const Variant& getSTDOUT();
+  static const Variant& getSTDERR();
+  static Variant getSTDIN(const StringData* name);
+  static Variant getSTDOUT(const StringData* name);
+  static Variant getSTDERR(const StringData* name);
 
   void requestInit() override;
   void requestShutdown() override;
-  void vscan(IMarker& mark) const override {
-    mark(m_stdin);
-    mark(m_stdout);
-    mark(m_stderr);
-  }
 
 private:
   Variant m_stdin;
   Variant m_stdout;
   Variant m_stderr;
 };
+
+void clearThreadLocalIO();
+void setThreadLocalIO(FILE* in, FILE* out, FILE* err);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

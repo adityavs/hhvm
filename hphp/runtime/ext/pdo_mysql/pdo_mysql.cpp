@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -36,7 +36,11 @@
 
 namespace HPHP {
 
-class PDOMySqlStatement;
+#if MYSQL_VERSION_ID >= 80004
+using my_bool = bool;
+#endif
+
+struct PDOMySqlStatement;
 
 IMPLEMENT_DEFAULT_EXTENSION_VERSION(pdo_mysql, 1.0.2);
 
@@ -54,7 +58,7 @@ struct PDOMySqlError {
 
 struct PDOMySqlConnection : PDOConnection {
   PDOMySqlConnection();
-  virtual ~PDOMySqlConnection();
+  ~PDOMySqlConnection() override;
 
   bool create(const Array& options) override;
 
@@ -105,7 +109,7 @@ struct PDOMySqlStatement : PDOStatement {
   DECLARE_RESOURCE_ALLOCATION(PDOMySqlStatement);
 
   PDOMySqlStatement(req::ptr<PDOMySqlResource>&& conn, MYSQL* server);
-  virtual ~PDOMySqlStatement();
+  ~PDOMySqlStatement() override;
 
   bool create(const String& sql, const Array& options);
 
@@ -146,85 +150,6 @@ private:
 };
 
 ///////////////////////////////////////////////////////////////////////////////
-
-/* For the convenience of drivers, this function will parse a data source
- * string, of the form "name=value; name2=value2" and populate variables
- * according to the data you pass in and array of pdo_data_src_parser structures */
-struct pdo_data_src_parser {
-  const char *optname;
-  char *optval;
-  int freeme;
-};
-
-static int php_pdo_parse_data_source(const char *data_source,
-                                     int data_source_len,
-                                     struct pdo_data_src_parser *parsed,
-                                     int nparams) {
-  int i, j;
-  int valstart = -1;
-  int semi = -1;
-  int optstart = 0;
-  int nlen;
-  int n_matches = 0;
-
-  i = 0;
-  while (i < data_source_len) {
-    /* looking for NAME= */
-
-    if (data_source[i] == '\0') {
-      break;
-    }
-
-    if (data_source[i] != '=') {
-      ++i;
-      continue;
-    }
-
-    valstart = ++i;
-
-    /* now we're looking for VALUE; or just VALUE<NUL> */
-    semi = -1;
-    while (i < data_source_len) {
-      if (data_source[i] == '\0') {
-        semi = i++;
-        break;
-      }
-      if (data_source[i] == ';') {
-        semi = i++;
-        break;
-      }
-      ++i;
-    }
-
-    if (semi == -1) {
-      semi = i;
-    }
-
-    /* find the entry in the array */
-    nlen = valstart - optstart - 1;
-    for (j = 0; j < nparams; j++) {
-      if (0 == strncmp(data_source + optstart, parsed[j].optname, nlen) &&
-          parsed[j].optname[nlen] == '\0') {
-        /* got a match */
-        if (parsed[j].freeme) {
-          free(parsed[j].optval);
-        }
-        parsed[j].optval = strndup(data_source + valstart, semi - valstart);
-        parsed[j].freeme = 1;
-        ++n_matches;
-        break;
-      }
-    }
-
-    while (i < data_source_len && isspace(data_source[i])) {
-      i++;
-    }
-
-    optstart = i;
-  }
-
-  return n_matches;
-}
 
 static long pdo_attr_lval(const Array& options, int opt, long defaultValue) {
   if (options.exists(opt)) {
@@ -282,12 +207,17 @@ bool PDOMySqlConnection::create(const Array& options) {
 #ifdef CLIENT_MULTI_RESULTS
     |CLIENT_MULTI_RESULTS
 #endif
-#ifdef CLIENT_MULTI_STATEMENTS
-    |CLIENT_MULTI_STATEMENTS
-#endif
     ;
 
-  php_pdo_parse_data_source(data_source.data(), data_source.size(), vars, 5);
+  #ifdef CLIENT_MULTI_STATEMENTS
+    if (options.empty()) {
+      connect_opts |= CLIENT_MULTI_STATEMENTS;
+    } else if (pdo_attr_lval(options, PDO_MYSQL_ATTR_MULTI_STATEMENTS, 1)) {
+      connect_opts |= CLIENT_MULTI_STATEMENTS;
+    }
+  #endif
+
+  parseDataSource(data_source.data(), data_source.size(), vars, 5);
 
   dbname = vars[1].optval;
 
@@ -320,8 +250,16 @@ bool PDOMySqlConnection::create(const Array& options) {
   /* handle MySQL options */
   if (!options.empty()) {
     long connect_timeout = pdo_attr_lval(options, PDO_ATTR_TIMEOUT, 30);
+    long read_timeout = pdo_attr_lval(options,
+                                      HH_PDO_MYSQL_ATTR_READ_TIMEOUT,
+                                      -1);
+    long write_timeout = pdo_attr_lval(options,
+                                       HH_PDO_MYSQL_ATTR_WRITE_TIMEOUT,
+                                       -1);
+
     long local_infile = pdo_attr_lval(options, PDO_MYSQL_ATTR_LOCAL_INFILE, 0);
-    String init_cmd, default_file, default_group;
+    String init_cmd, default_file, default_group, ssl_ca, ssl_capath, ssl_cert,
+           ssl_key, ssl_cipher;
     long compress = 0;
     m_buffered = pdo_attr_lval(options, PDO_MYSQL_ATTR_USE_BUFFERED_QUERY, 1);
 
@@ -342,6 +280,18 @@ bool PDOMySqlConnection::create(const Array& options) {
 
     if (mysql_options(m_server, MYSQL_OPT_CONNECT_TIMEOUT,
                       (const char *)&connect_timeout)) {
+      handleError(__FILE__, __LINE__);
+      goto cleanup;
+    }
+
+    if (read_timeout >= 0 && mysql_options(m_server, MYSQL_OPT_READ_TIMEOUT,
+                      (const char *)&read_timeout)) {
+      handleError(__FILE__, __LINE__);
+      goto cleanup;
+    }
+
+    if (write_timeout >= 0 && mysql_options(m_server, MYSQL_OPT_WRITE_TIMEOUT,
+                      (const char *)&write_timeout)) {
       handleError(__FILE__, __LINE__);
       goto cleanup;
     }
@@ -390,6 +340,31 @@ bool PDOMySqlConnection::create(const Array& options) {
     compress = pdo_attr_lval(options, PDO_MYSQL_ATTR_COMPRESS, 0);
     if (compress) {
       if (mysql_options(m_server, MYSQL_OPT_COMPRESS, 0)) {
+        handleError(__FILE__, __LINE__);
+        goto cleanup;
+      }
+    }
+
+    ssl_ca = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CA,
+                             nullptr);
+    ssl_capath = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CAPATH,
+                                 nullptr);
+    ssl_key = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_KEY,
+                              nullptr);
+    ssl_cert = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CERT,
+                               nullptr);
+    ssl_cipher = pdo_attr_strval(options, PDO_MYSQL_ATTR_SSL_CIPHER,
+                                 nullptr);
+
+    if ((!ssl_ca.empty() || !ssl_capath.empty() || !ssl_key.empty()
+        || !ssl_cert.empty() || !ssl_cipher.empty()) &&
+        !host.same(s_localhost)) {
+      if (mysql_ssl_set(m_server,
+          ssl_key.empty() ? nullptr : ssl_key.c_str(),
+          ssl_cert.empty() ? nullptr : ssl_cert.c_str(),
+          ssl_ca.empty() ? nullptr : ssl_ca.c_str(),
+          ssl_capath.empty() ? nullptr : ssl_capath.c_str(),
+          ssl_cipher.empty() ? nullptr : ssl_cipher.c_str())) {
         handleError(__FILE__, __LINE__);
         goto cleanup;
       }
@@ -445,7 +420,7 @@ cleanup:
   return ret;
 }
 
-bool PDOMySqlConnection::support(SupportedMethod method) {
+bool PDOMySqlConnection::support(SupportedMethod /*method*/) {
   return true;
 }
 
@@ -502,20 +477,20 @@ int PDOMySqlConnection::handleError(const char *file, int line,
       einfo->errmsg = strdup(mysql_error(m_server));
     }
   } else { /* no error */
-    strcpy(*pdo_err, PDO_ERR_NONE);
+    setPDOErrorNone(*pdo_err);
     return false;
   }
 
   if (stmt && stmt->stmt()) {
-    strcpy(*pdo_err, mysql_stmt_sqlstate(stmt->stmt()));
+    setPDOError(*pdo_err, mysql_stmt_sqlstate(stmt->stmt()));
   } else {
-    strcpy(*pdo_err, mysql_sqlstate(m_server));
+    setPDOError(*pdo_err, mysql_sqlstate(m_server));
   }
 
   if (stmt && stmt->stmt()) {
     pdo_raise_impl_error(stmt->dbh, nullptr, pdo_err[0], einfo->errmsg);
   } else {
-    Array info = Array::Create();
+    Array info = Array::CreateVArray();
     info.append(String(*pdo_err, CopyString));
     if (stmt) {
       stmt->dbh->conn()->fetchErr(stmt, info);
@@ -523,7 +498,7 @@ int PDOMySqlConnection::handleError(const char *file, int line,
       info.append(Variant((unsigned long) einfo->errcode));
       info.append(String(einfo->errmsg, CopyString));
     }
-    throw_pdo_exception(String(*pdo_err, CopyString), info,
+    throw_pdo_exception(info,
                         "SQLSTATE[%s] [%d] %s",
                         pdo_err[0], einfo->errcode, einfo->errmsg);
   }
@@ -552,7 +527,7 @@ bool PDOMySqlConnection::preparer(const String& sql, sp_PDOStatement *stmt,
   }
 
   stmt->reset();
-  strcpy(error_code, s->error_code);
+  setPDOError(error_code, s->error_code);
   return false;
 }
 
@@ -581,8 +556,8 @@ int64_t PDOMySqlConnection::doer(const String& sql) {
   return c;
 }
 
-bool PDOMySqlConnection::quoter(const String& input, String &quoted,
-                                PDOParamType paramtype) {
+bool PDOMySqlConnection::quoter(const String& input, String& quoted,
+                                PDOParamType /*paramtype*/) {
   String s(2 * input.size() + 3, ReserveString);
   char *buf = s.mutableData();
   int len = mysql_real_escape_string(m_server, buf + 1,
@@ -599,11 +574,11 @@ bool PDOMySqlConnection::begin() {
 }
 
 bool PDOMySqlConnection::commit() {
-  return mysql_commit(m_server) >= 0;
+  return !mysql_commit(m_server);
 }
 
 bool PDOMySqlConnection::rollback() {
-  return mysql_rollback(m_server) >= 0;
+  return !mysql_rollback(m_server);
 }
 
 bool PDOMySqlConnection::setAttribute(int64_t attr, const Variant& value) {
@@ -639,11 +614,11 @@ bool PDOMySqlConnection::setAttribute(int64_t attr, const Variant& value) {
   }
 }
 
-String PDOMySqlConnection::lastId(const char *name) {
+String PDOMySqlConnection::lastId(const char* /*name*/) {
   return (int64_t)mysql_insert_id(m_server);
 }
 
-bool PDOMySqlConnection::fetchErr(PDOStatement *stmt, Array &info) {
+bool PDOMySqlConnection::fetchErr(PDOStatement* /*stmt*/, Array& info) {
   if (m_einfo.errcode) {
     info.append((int64_t)m_einfo.errcode);
     info.append(String(m_einfo.errmsg, CopyString));
@@ -727,7 +702,6 @@ bool PDOMySqlStatement::executePrepared() {
       int calc_max_length = m_conn->buffered() && m_max_length == 1;
       m_fields = mysql_fetch_fields(m_result);
       if (m_bound_result) {
-        int i;
         for (i = 0; i < column_count; i++) {
           free(m_bound_result[i].buffer);
         }
@@ -780,7 +754,7 @@ bool PDOMySqlStatement::executePrepared() {
          * we have no way of knowing the true length either, we'll bump up
          * our buffer size to a reasonable size, just in case */
         if (m_fields[i].max_length == 0 &&
-            m_bound_result[i].buffer_length < 128 && MYSQL_TYPE_VAR_STRING) {
+            m_bound_result[i].buffer_length < 128) {
           m_bound_result[i].buffer_length = 128;
         }
 
@@ -987,7 +961,7 @@ bool PDOMySqlStatement::support(SupportedMethod method) {
 }
 
 int PDOMySqlStatement::handleError(const char *file, int line) {
-  assert(m_conn);
+  assertx(m_conn);
   return m_conn->handleError(file, line, this);
 }
 
@@ -1034,7 +1008,7 @@ bool PDOMySqlStatement::executer() {
   return true;
 }
 
-bool PDOMySqlStatement::fetcher(PDOFetchOrientation ori, long offset) {
+bool PDOMySqlStatement::fetcher(PDOFetchOrientation /*ori*/, long /*offset*/) {
   int ret;
   if (m_stmt) {
     ret = mysql_stmt_fetch(m_stmt);
@@ -1051,7 +1025,7 @@ bool PDOMySqlStatement::fetcher(PDOFetchOrientation ori, long offset) {
   }
 
   if (!m_result) {
-    strcpy(error_code, "HY000");
+    setPDOError(error_code, "HY000");
     return false;
   }
 
@@ -1127,7 +1101,7 @@ bool PDOMySqlStatement::getColumn(int colno, Variant &value) {
     ptr = (char*)m_bound_result[colno].buffer;
     if (m_out_length[colno] > m_bound_result[colno].buffer_length) {
       /* mysql lied about the column width */
-      strcpy(error_code, "01004"); /* truncated */
+      setPDOError(error_code, "01004"); /* truncated */
       m_out_length[colno] = m_bound_result[colno].buffer_length;
       len = m_out_length[colno];
       value = String(ptr, len, CopyString);
@@ -1146,18 +1120,18 @@ bool PDOMySqlStatement::getColumn(int colno, Variant &value) {
 bool PDOMySqlStatement::paramHook(PDOBoundParam* param,
                                   PDOParamEvent event_type) {
   MYSQL_BIND *b;
-  if (m_stmt && param->is_param) {
+  if (m_stmt) {
     switch (event_type) {
     case PDO_PARAM_EVT_ALLOC:
       /* sanity check parameter number range */
       if (param->paramno < 0 || param->paramno >= m_num_params) {
-        strcpy(error_code, "HY093");
+        setPDOError(error_code, "HY093");
         return false;
       }
       m_params_given++;
 
       b = &m_params[param->paramno];
-      param->driver_data = b;
+      param->driver_ext_data = b;
       b->is_null = &m_in_null[param->paramno];
       b->length = &m_in_length[param->paramno];
       /* recall how many parameters have been provided */
@@ -1166,11 +1140,11 @@ bool PDOMySqlStatement::paramHook(PDOBoundParam* param,
     case PDO_PARAM_EVT_EXEC_PRE:
       if ((int)m_params_given < m_num_params) {
         /* too few parameter bound */
-        strcpy(error_code, "HY093");
+        setPDOError(error_code, "HY093");
         return false;
       }
 
-      b = (MYSQL_BIND*)param->driver_data;
+      b = (MYSQL_BIND*)param->driver_ext_data;
       *b->is_null = 0;
       if (PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_NULL ||
           param->parameter.isNull()) {
@@ -1255,7 +1229,7 @@ bool PDOMySqlStatement::getColumnMeta(int64_t colno, Array &ret) {
     return false;
   }
 
-  Array flags = Array::Create();
+  Array flags = Array::CreateVArray();
 
   const MYSQL_FIELD *F = m_fields + colno;
   if (F->def) {

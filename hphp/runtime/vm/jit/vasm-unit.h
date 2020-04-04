@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,6 +22,7 @@
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/vasm.h"
+#include "hphp/runtime/vm/jit/vasm-data.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-reg.h"
 
@@ -41,16 +42,16 @@ namespace HPHP { namespace jit {
  * should be emitted to.
  */
 struct Vblock {
-  explicit Vblock(AreaIndex area) : area(area) {}
+  explicit Vblock(AreaIndex area_idx, uint64_t w)
+    : area_idx(area_idx)
+    , weight(w) {}
 
-  AreaIndex area;
+  AreaIndex area_idx;
+  int frame{-1};
+  int pending_frames{-1};
+  uint64_t weight;
   jit::vector<Vinstr> code;
 };
-
-/*
- * Vector of Vregs, for Vtuples and VcallArgs.
- */
-using VregList = jit::vector<Vreg>;
 
 /*
  * Source operands for vcall/vinvoke instructions, packed into a struct for
@@ -60,6 +61,14 @@ struct VcallArgs {
   VregList args;
   VregList simdArgs;
   VregList stkArgs;
+  VregList indRetArgs;
+
+  bool operator==(const VcallArgs& o) const {
+    return
+      std::tie(args, simdArgs, stkArgs, indRetArgs) ==
+      std::tie(o.args, o.simdArgs, o.stkArgs, o.indRetArgs);
+  }
+  bool operator!=(const VcallArgs& o) const { return !(*this == o); }
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -75,7 +84,7 @@ struct VcallArgs {
  * Also contains convenience constructors for various pointer and enum types.
  */
 struct Vconst {
-  enum Kind { Quad, Long, Byte, Double, ThreadLocal };
+  enum Kind { Quad, Long, Byte, Double };
 
   using ullong = unsigned long long;
   using ulong = unsigned long;
@@ -96,9 +105,6 @@ struct Vconst {
   explicit Vconst(long i)        : Vconst(ullong(i)) {}
   explicit Vconst(const void* p) : Vconst(uintptr_t(p)) {}
   explicit Vconst(double d)      : kind(Double), doubleVal(d) {}
-  explicit Vconst(Vptr tl)       : kind(ThreadLocal), disp(tl.disp) {
-    assertx(!tl.base.isValid() && !tl.index.isValid() && tl.seg == Vptr::FS);
-  }
 
   template<
     class E,
@@ -129,8 +135,42 @@ struct Vconst {
   union {
     uint64_t val;
     double doubleVal;
-    int64_t disp; // really, int32 offset from %fs
   };
+};
+
+struct Vframe {
+  Vframe(
+    const Func* func,
+    int32_t callOff,
+    int parent,
+    int cost,
+    uint64_t entry_weight
+  ) : func(func)
+    , callOff(callOff)
+    , parent(parent)
+    , entry_weight(entry_weight)
+    , inclusive_cost(cost)
+    , exclusive_cost(cost)
+  {}
+
+  struct Section {
+    size_t inclusive{0};
+    size_t exclusive{0};
+  };
+
+  static constexpr int Top = -1;
+
+  LowPtr<const Func> func;
+  int32_t callOff{-1};
+  int parent;
+
+  uint64_t entry_weight;
+  int inclusive_cost;
+  int exclusive_cost;
+
+  int num_inner_frames{0};
+
+  jit::array<Section, kNumAreas> sections;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -141,9 +181,10 @@ struct Vconst {
  */
 struct Vunit {
   /*
-   * Create a new block in the given area, returning its id.
+   * Create a new block in the given area and weight, returning its id.
    */
   Vlabel makeBlock(AreaIndex area);
+  Vlabel makeBlock(AreaIndex area, uint64_t weight);
 
   /*
    * Create a block intended to be used temporarily, as part of modifying
@@ -166,6 +207,7 @@ struct Vunit {
    * Make various Vunit-managed vasm structures.
    */
   Vreg makeReg() { return Vreg{next_vr++}; }
+  Vaddr makeAddr() { return Vaddr{next_vaddr++}; }
   Vtuple makeTuple(VregList&& regs);
   Vtuple makeTuple(const VregList& regs);
   VcallArgsId makeVcallArgs(VcallArgs&& args);
@@ -175,6 +217,25 @@ struct Vunit {
    */
   Vreg makeConst(Vconst);
   template<typename T> Vreg makeConst(T v) { return makeConst(Vconst{v}); }
+
+  /*
+   * Allocate a block of data to hold n objects of type T.
+   *
+   * Any instructions with VdataPtr members that point inside the buffer
+   * returned by allocData() will automatically be fixed up during a relocation
+   * pass immediately before final code emission.
+   */
+  template<typename T>
+  T* allocData(size_t n = 1) {
+    auto const size = sizeof(T) * n;
+    dataBlocks.emplace_back();
+
+    auto& block = dataBlocks.back();
+    block.data.reset(new uint8_t[size]);
+    block.size = size;
+    block.align = alignof(T);
+    return (T*)block.data.get();
+  }
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -190,13 +251,26 @@ struct Vunit {
 
   unsigned next_vr{Vreg::V0};
   Vlabel entry;
+  jit::vector<Vframe> frames;
   jit::vector<Vblock> blocks;
   jit::hash_map<Vconst,Vreg,Vconst::Hash> constToReg;
   jit::hash_map<size_t,Vconst> regToConst;
   jit::vector<VregList> tuples;
   jit::vector<VcallArgs> vcallArgs;
+  jit::vector<VdataBlock> dataBlocks;
+  unsigned next_vaddr{0};
+  uint16_t cur_voff{0};  // current instruction index managed by Vout
   bool padding{false};
+  bool profiling{false};
+  folly::Optional<TransContext> context;
+  StructuredLogEntry* log_entry{nullptr};
+  Annotations annotations;
 };
+
+inline tracing::Props traceProps(const Vunit& v) {
+  if (v.context) return traceProps(*v.context);
+  return tracing::Props{}.add("func_name", "(stub)");
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,26 +15,25 @@
 */
 
 #include "hphp/compiler/option.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/ext/ext.h"
-#include "hphp/runtime/vm/unit.h"
+
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/ext_hhvm/ext_hhvm.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/runtime-compiler.h"
+#include "hphp/runtime/vm/unit.h"
+
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/vm/jit/fixup.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/unit-cache.h"
+
 #include "hphp/system/systemlib.h"
+
+#include "hphp/util/build-info.h"
 #include "hphp/util/logger.h"
 
-#include <folly/Singleton.h>
+#include <folly/portability/Libgen.h>
 
-#include <libgen.h> // For dirname(3).
 #include <string>
 
 namespace HPHP {
@@ -48,20 +47,32 @@ namespace HPHP {
 #define SYSTEM_CLASS_STRING(cls)                        \
   const StaticString s_##cls(STRINGIZE_CLASS_NAME(cls));
 SYSTEMLIB_CLASSES(SYSTEM_CLASS_STRING)
+#undef SYSTEM_CLASS_STRING
 
 #undef resource
 #undef pinitSentinel
 #undef STRINGIZE_CLASS_NAME
 
-void tweak_variant_dtors();
-void ProcessInit() {
-  // Create the global mcg object
-  jit::mcg = new jit::MCGenerator();
-  // Do not initialize JIT stubs for PPC64 - port under development
-#if !defined(__powerpc64__)
-  jit::mcg->initUniqueStubs();
-#endif
+#define STRINGIZE_HH_CLASS_NAME(cls) "HH\\" #cls
+#define SYSTEM_HH_CLASS_STRING(cls) \
+  const StaticString s_HH_##cls(STRINGIZE_HH_CLASS_NAME(cls));
+SYSTEMLIB_HH_CLASSES(SYSTEM_HH_CLASS_STRING)
+#undef SYSTEM_HH_CLASS_STRING
+#undef STRINGIZE_HH_CLASS_NAME
 
+namespace {
+const StaticString s_Throwable("Throwable");
+const StaticString s_BaseException("\\__SystemLib\\BaseException");
+const StaticString s_Error("Error");
+const StaticString s_ArithmeticError("ArithmeticError");
+const StaticString s_ArgumentCountError("ArgumentCountError");
+const StaticString s_AssertionError("AssertionError");
+const StaticString s_DivisionByZeroError("DivisionByZeroError");
+const StaticString s_ParseError("ParseError");
+const StaticString s_TypeError("TypeError");
+}
+
+void ProcessInit() {
   // Save the current options, and set things up so that
   // systemlib.php can be read from and stored in the
   // normal repo.
@@ -76,26 +87,29 @@ void ProcessInit() {
   RuntimeOption::EvalAllowHhas = true;
   Option::WholeProgram = false;
 
+  if (RuntimeOption::RepoAuthoritative) {
+    LitstrTable::init();
+    Repo::get().loadGlobalData();
+  }
+
   rds::requestInit();
   std::string hhas;
   auto const slib = get_systemlib(&hhas);
 
   if (slib.empty()) {
     // Die a horrible death.
-    Logger::Error("Unable to find/load systemlib.php");
+    Logger::Error("Unable to find/load systemlib.php, check /proc is mounted"
+                  " or export HHVM_SYSTEMLIB to your ENV");
     _exit(1);
   }
-
-  LitstrTable::init();
-  LitstrTable::get().setWriting();
-  Repo::get().loadGlobalData();
 
   // Save this in case the debugger needs it. Once we know if this
   // process does not have debugger support, we'll clear it.
   SystemLib::s_source = slib;
 
   SystemLib::s_unit = compile_systemlib_string(slib.c_str(), slib.size(),
-                                               "systemlib.php");
+                                               "/:systemlib.php",
+                                               Native::s_systemNativeFuncs);
 
   const StringData* msg;
   int line;
@@ -103,13 +117,14 @@ void ProcessInit() {
     Logger::Error("An error has been introduced into the systemlib, "
                   "but we cannot give you a file and line number right now.");
     Logger::Error("Check all of your changes to hphp/system/php");
-    Logger::Error("HipHop Parse Error: %s", msg->data());
+    Logger::Error("HipHop Parse Error: %s %d", msg->data(), line);
     _exit(1);
   }
 
   if (!hhas.empty()) {
-    SystemLib::s_hhas_unit = compile_string(hhas.c_str(), hhas.size(),
-                                            "systemlib.hhas");
+    SystemLib::s_hhas_unit = compile_systemlib_string(
+      hhas.c_str(), hhas.size(), "/:systemlib.hhas",
+      Native::s_systemNativeFuncs);
     if (SystemLib::s_hhas_unit->compileTimeFatal(msg, line)) {
       Logger::Error("An error has been introduced in the hhas portion of "
                     "systemlib.");
@@ -126,31 +141,26 @@ void ProcessInit() {
     SystemLib::s_hhas_unit->merge();
   }
 
-  SystemLib::s_nativeFuncUnit = build_native_func_unit(hhbc_ext_funcs,
-                                                       hhbc_ext_funcs_count);
-  SystemLib::s_nativeFuncUnit->merge();
   SystemLib::s_nullFunc =
-    Unit::lookupFunc(makeStaticString("86null"));
-
-  // We call a special bytecode emitter function to build the native
-  // unit which will contain all of our cppext functions and classes.
-  // Each function and method will have a bytecode body that will thunk
-  // to the native implementation.
-  Unit* nativeClassUnit = build_native_class_unit(hhbc_ext_classes,
-                                                  hhbc_ext_class_count);
-  SystemLib::s_nativeClassUnit = nativeClassUnit;
-
-  LitstrTable::get().setReading();
-
-  // Load the nativelib unit to build the Class objects
-  SystemLib::s_nativeClassUnit->merge();
+    Unit::lookupFunc(makeStaticString("__SystemLib\\__86null"));
 
 #define INIT_SYSTEMLIB_CLASS_FIELD(cls)                                 \
   {                                                                     \
-    Class *cls = NamedEntity::get(s_##cls.get())->clsList();       \
-    assert(!hhbc_ext_class_count || cls);                               \
+    Class *cls = NamedEntity::get(s_##cls.get())->clsList();            \
+    assert(cls);                                                        \
     SystemLib::s_##cls##Class = cls;                                    \
   }
+
+  INIT_SYSTEMLIB_CLASS_FIELD(Throwable)
+  INIT_SYSTEMLIB_CLASS_FIELD(BaseException)
+  INIT_SYSTEMLIB_CLASS_FIELD(Error)
+  INIT_SYSTEMLIB_CLASS_FIELD(ArithmeticError)
+  INIT_SYSTEMLIB_CLASS_FIELD(ArgumentCountError)
+  INIT_SYSTEMLIB_CLASS_FIELD(AssertionError)
+  INIT_SYSTEMLIB_CLASS_FIELD(DivisionByZeroError)
+  INIT_SYSTEMLIB_CLASS_FIELD(DivisionByZeroException)
+  INIT_SYSTEMLIB_CLASS_FIELD(ParseError)
+  INIT_SYSTEMLIB_CLASS_FIELD(TypeError)
 
   // Stash a pointer to the VM Classes for stdclass, Exception,
   // pinitSentinel and resource
@@ -158,17 +168,18 @@ void ProcessInit() {
 
 #undef INIT_SYSTEMLIB_CLASS_FIELD
 
-  // Retrieve all of the class pointers
-  for (long long i = 0; i < hhbc_ext_class_count; ++i) {
-    const HhbcExtClassInfo* info = hhbc_ext_classes + i;
-    const StringData* name = makeStaticString(info->m_name);
-    const NamedEntity* ne = NamedEntity::get(name);
-    Class* cls = Unit::lookupClass(ne);
-    assert(cls);
-    *(info->m_clsPtr) = cls;
+#define INIT_SYSTEMLIB_HH_CLASS_FIELD(cls)                              \
+  {                                                                     \
+    Class *cls = NamedEntity::get(s_HH_##cls.get())->clsList();         \
+    assert(cls);                                                        \
+    SystemLib::s_HH_##cls##Class = cls;                                 \
   }
 
-  ClassInfo::InitializeSystemConstants();
+  // Stash a pointer to the VM Classes for various HH namespace classes
+  SYSTEMLIB_HH_CLASSES(INIT_SYSTEMLIB_HH_CLASS_FIELD)
+
+#undef INIT_SYSTEMLIB_HH_CLASS_FIELD
+
   Stack::ValidateStackSize();
   SystemLib::s_inited = true;
 
@@ -177,10 +188,6 @@ void ProcessInit() {
   RuntimeOption::EvalDumpBytecode = db;
   RuntimeOption::EvalAllowHhas = ah;
   Option::WholeProgram = wp;
-
-  tweak_variant_dtors();
-
-  folly::SingletonVault::singleton()->registrationComplete();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

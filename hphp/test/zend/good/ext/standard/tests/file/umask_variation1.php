@@ -1,9 +1,9 @@
-<?php
+<?hh
 /* Prototype: int umask ( [int $mask] );
    Description: Changes the current umask
 */
-
-$file_path = dirname(__FILE__);
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 
 /* Check umask() on file/dir */
 
@@ -47,4 +47,4 @@ for($mask = 0000; $mask <= 0350; $mask++) {
 }
 
 echo "Done\n";
-?>
+}

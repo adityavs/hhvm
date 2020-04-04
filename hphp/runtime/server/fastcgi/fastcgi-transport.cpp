@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,7 +41,7 @@ using folly::io::Cursor;
  * NB: locking is important when accessing m_bodyQueue as the session will
  *     also write into that structure via onBody.
  */
-const void *FastCGITransport::getPostData(int& size) {
+const void *FastCGITransport::getPostData(size_t& size) {
   // the API contract is that you can call getPostData repeatedly until
   // you call getMorePostData
   if (m_firstBody) {
@@ -52,7 +52,7 @@ const void *FastCGITransport::getPostData(int& size) {
   return getMorePostData(size);
 }
 
-const void *FastCGITransport::getMorePostData(int& size) {
+const void *FastCGITransport::getMorePostData(size_t& size) {
   // session will terminate the request if we don't receive data in
   // this much time
   long maxWait = RuntimeOption::ConnectionTimeoutSeconds;
@@ -116,13 +116,17 @@ std::string FastCGITransport::getHeader(const char* name) {
   return "";
 }
 
-void FastCGITransport::getHeaders(HeaderMap& headers) {
-  for (auto& pair : m_requestParams) {
-    auto key = unmangleHeader(pair.first);
-    if (!key.empty()) {
-      headers[key] = { pair.second };
+const HeaderMap& FastCGITransport::getHeaders() {
+  // lazily construct unmangled headers
+  if (m_unmangledRequestParams.empty()) {
+    for (auto& pair : m_requestParams) {
+      auto key = unmangleHeader(pair.first);
+      if (!key.empty()) {
+        m_unmangledRequestParams[key] = { pair.second };
+      }
     }
   }
+  return m_unmangledRequestParams;
 }
 
 void FastCGITransport::getTransportParams(HeaderMap& serverParams) {
@@ -165,8 +169,8 @@ void FastCGITransport::sendResponseHeaders(IOBufQueue& queue, int code) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void FastCGITransport::sendImpl(const void *data, int size, int code,
-                                bool chunked, bool eom) {
+void FastCGITransport::sendImpl(const void* data, int size, int code,
+                                bool /*chunked*/, bool eom) {
   if (!m_headersSent) {
     m_headersSent = true;
     sendResponseHeaders(m_txBuf, code);
@@ -212,10 +216,22 @@ void FastCGITransport::onHeader(std::unique_ptr<folly::IOBuf> key_chain,
   Cursor keyCur(key_chain.get());
   auto key = keyCur.readFixedString(key_chain->computeChainDataLength());
 
+  // Don't allow requests to inject an HTTP_PROXY environment variable by
+  // sending a Proxy header.
+  if (strcasecmp(key.c_str(), "HTTP_PROXY") == 0) return;
+
   Cursor valCur(value_chain.get());
   auto value = valCur.readFixedString(value_chain->computeChainDataLength());
 
   m_requestParams[key] = value;
+
+  // if we've already built the unmangled map, add to that as well
+  if (!m_unmangledRequestParams.empty()) {
+    auto unmangledKey = unmangleHeader(key);
+    if (!unmangledKey.empty()) {
+      m_unmangledRequestParams[unmangledKey] = { value };
+    }
+  }
 }
 
 void FastCGITransport::onHeadersComplete() {

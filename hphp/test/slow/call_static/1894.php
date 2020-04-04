@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class a1 {
   public function __call($func, $args) {
@@ -10,10 +10,14 @@ class b1 {
     a1::foo();
   }
 }
-set_error_handler('h');
  function h() {
  var_dump('errored');
 }
+
+<<__EntryPoint>>
+function main_1894() {
+set_error_handler(fun('h'));
 $obj = new b1;
 $obj->test();
 var_dump('end');
+}

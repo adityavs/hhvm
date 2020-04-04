@@ -1,18 +1,15 @@
-<?php
+<?hh
 class foo {
-	function foo($name) {
-     	$GLOBALS['List']= &$this;
-     	$this->Name = $name;
+	function __construct($name) {
+    $GLOBALS['List']= $this;
+    $this->Name = $name;
 		$GLOBALS['List']->echoName();
 	}
 
 	function echoName() {
-     	$GLOBALS['names'][]=$this->Name;
+    $GLOBALS['names'] ??= varray[];
+    $GLOBALS['names'][] = $this->Name;
 	}
-}
-
-function &foo2(&$foo) {
-	return $foo;
 }
 
 
@@ -21,11 +18,4 @@ $bar1->Name = 'outside';
 $bar1->echoName();
 $List->echoName();
 
-$bar1 =& foo2(new foo('constructor'));
-$bar1->Name = 'outside';
-$bar1->echoName();
-
-$List->echoName();
-
-print ($names==array('constructor','outside','outside','constructor','outside','outside')) ? 'success':'failure';
-?>
+print ($names==varray['constructor','outside','outside']) ? 'success':'failure';

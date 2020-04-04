@@ -1,0 +1,2 @@
+File "tpu_access.bad.php", line 12, characters 35-47:
+In this as PU:@E:@A:@T, member A is neither an atom nor a generic type parameter (Naming[2110])

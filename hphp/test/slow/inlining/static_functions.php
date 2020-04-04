@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 final class Constants {
   public static function gen1() {
@@ -14,6 +14,7 @@ final class Constants {
   }
 }
 
+<<__EntryPoint>>
 function main() {
   $g = Constants::gen1();
   $g->next();
@@ -25,5 +26,3 @@ function main() {
   $g->next();
   var_dump($g->current());
 }
-
-main();

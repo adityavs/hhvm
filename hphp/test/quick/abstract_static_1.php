@@ -1,11 +1,9 @@
-<?php
+<?hh
 
 abstract class Foo {
 abstract public static function who();
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   Foo::who();
 }
-
-main();

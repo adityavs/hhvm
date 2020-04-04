@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 final class Constants {
   static public function genA() {
@@ -34,6 +34,7 @@ final class Constants {
   }
 }
 
+<<__EntryPoint>>
 function main() {
   $g = Constants::genA();
   $g = Constants::genB($g);
@@ -46,5 +47,3 @@ function main() {
   $g->next();
   var_dump($g->current());
 }
-
-main();

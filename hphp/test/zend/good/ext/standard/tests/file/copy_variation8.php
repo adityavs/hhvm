@@ -1,15 +1,15 @@
-<?php
+<?hh
 /* Prototype: bool copy ( string $source, string $dest );
    Description: Makes a copy of the file source to dest.
      Returns TRUE on success or FALSE on failure.
 */
 
-/* Trying to copy the links across dir paths given in various notations 
+/* Trying to copy the links across dir paths given in various notations
      and dirs having limited access */
-
+<<__EntryPoint>> function main(): void {
 echo "*** Testing copy() function: copying links across different directories ***\n";
 
-$file_path = dirname(__FILE__);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 
 $base_dir = $file_path."/copy_variation8";
 mkdir($base_dir);
@@ -27,7 +27,7 @@ $hardlink = $file_path."/copy_variation8_hardlink.tmp";
 symlink($file, $symlink);  //creating symlink
 link($file, $hardlink);  //creating hardlink
 
-$dests = array(
+$dests = varray[
   $base_dir."/copy_copy_variation8.tmp",
   $base_dir."/copy_variation8_sub/copy_copy_variation8.tmp",
   "$sub_dir/copy_copy_variation8.tmp",
@@ -36,7 +36,7 @@ $dests = array(
   "$sub_dir/..///../copy_copy_variation8.tmp",
   "$sub_dir/..///../*",
   "$dirname_with_blank/copy_copy_variation8.tmp"
-);
+];
 
 $count = 1;
 foreach($dests as $dest) {
@@ -51,7 +51,7 @@ foreach($dests as $dest) {
   echo "- With hardlink -\n";
   var_dump( copy($hardlink, $dest) );
   var_dump( file_exists($dest) );
-  var_dump( is_link($dest) );  //expected: bool(flase)
+  var_dump( is_link($dest) );  //expected: bool(false)
   var_dump( is_file($dest) );  //expected: bool(true)
   clearstatcache();
   unlink("$dest");
@@ -66,4 +66,4 @@ rmdir($sub_dir);
 rmdir($base_dir);
 
 echo "*** Done ***\n";
-?>
+}

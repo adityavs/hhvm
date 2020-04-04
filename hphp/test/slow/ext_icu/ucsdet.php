@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function VS($x, $y) {
   var_dump($x === $y);
@@ -42,7 +42,7 @@ function test_cannot_detect() {
   $detector = new EncodingDetector();
 
   // The detector has no idea what to do with this.
-  $detector->settext("\xc7\xe8\xec\xed\xe8\xe9 \xe2\xe5\xf7\xe5\xf0");
+  $detector->settext("\x74\x68\xa1");
   $match = $detector->detect();
   VERIFY($match->isvalid() == false);
 }
@@ -304,6 +304,9 @@ function test_utf16() {
     getunicode("\ufeffHello, world!")) == true);
 }
 
+
+<<__EntryPoint>>
+function main_ucsdet() {
 test_basics();
 test_cannot_detect();
 test_declared_encoding();
@@ -320,3 +323,4 @@ test_koi8r();
 test_windows_1251();
 test_utf8();
 test_utf16();
+}

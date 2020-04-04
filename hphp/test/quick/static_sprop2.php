@@ -1,4 +1,4 @@
-<?php
+<?hh
 class C {
   private static $cls = 'C';
   public function __construct() {
@@ -13,10 +13,10 @@ class D extends C {
     var_dump(static::$cls);
   }
 }
-
+<<__EntryPoint>> function main(): void {
 echo "Creating C\n";
 $c = new C;
 echo "Creating D\n";
 $d = new D;
 echo "**************\n";
-
+}

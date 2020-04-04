@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,9 @@
 #ifndef incl_HPHP_RUNTIME_BASE_TV_ARITH_H_
 #define incl_HPHP_RUNTIME_BASE_TV_ARITH_H_
 
+#include "hphp/runtime/base/tv-mutate.h"
+#include "hphp/runtime/base/tv-variant.h"
+#include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
@@ -32,25 +35,25 @@ namespace HPHP {
  * PHP operator +
  *
  * Returns a TypedNum, unless both arguments are KindOfArray, in which
- * case it returns an Cell that contains an Array.
+ * case it returns an TypedValue that contains an Array.
  */
-Cell cellAdd(Cell, Cell);
+TypedValue tvAdd(TypedValue, TypedValue);
 
 /*
  * PHP operators - and *.
  *
  * These arithmetic operators on any php value only return numbers.
  */
-TypedNum cellSub(Cell, Cell);
-TypedNum cellMul(Cell, Cell);
+TypedNum tvSub(TypedValue, TypedValue);
+TypedNum tvMul(TypedValue, TypedValue);
 
 /*
  * Same as their corresponding non-O functions, but will cast their sources to
  * doubles instead of doing integer overflow.
  */
-Cell cellAddO(Cell, Cell);
-TypedNum cellSubO(Cell, Cell);
-TypedNum cellMulO(Cell, Cell);
+TypedValue tvAddO(TypedValue, TypedValue);
+TypedNum tvSubO(TypedValue, TypedValue);
+TypedNum tvMulO(TypedValue, TypedValue);
 
 /*
  * PHP operators / and %.
@@ -58,15 +61,15 @@ TypedNum cellMulO(Cell, Cell);
  * The operators return numbers unless the second argument converts to
  * zero, in which case they return boolean false.
  */
-Cell cellDiv(Cell, Cell);
-Cell cellMod(Cell, Cell);
+TypedValue tvDiv(TypedValue, TypedValue);
+TypedValue tvMod(TypedValue, TypedValue);
 
 /*
  * PHP Operator **.
  *
  * Always returns a TypedNum.
  */
-Cell cellPow(Cell, Cell);
+TypedValue tvPow(TypedValue, TypedValue);
 
 /*
  * PHP operators &, |, and ^.
@@ -75,17 +78,17 @@ Cell cellPow(Cell, Cell);
  * KindOfString, in which case they return a KindOfString that the caller owns
  * a reference to.
  */
-Cell cellBitAnd(Cell, Cell);
-Cell cellBitOr(Cell, Cell);
-Cell cellBitXor(Cell, Cell);
+TypedValue tvBitAnd(TypedValue, TypedValue);
+TypedValue tvBitOr(TypedValue, TypedValue);
+TypedValue tvBitXor(TypedValue, TypedValue);
 
 /*
  * PHP operators << and >>.
  *
  * These operators always return a KindOfInt64.
  */
-Cell cellShl(Cell, Cell);
-Cell cellShr(Cell, Cell);
+TypedValue tvShl(TypedValue, TypedValue);
+TypedValue tvShr(TypedValue, TypedValue);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -95,10 +98,10 @@ Cell cellShr(Cell, Cell);
  * Mutates the first argument in place, by adding the second argument
  * to it in the sense of php's operator +=.
  *
- * Post: isTypedNum(c1), unless both arguments are KindOfArray, in
- * which case it will contain a Cell of KindOfArray.
+ * Post: c1 is a KindOfInt or KindOfDouble, unless both arguments are
+ * KindOfArray, in which case it will contain a TypedValue of KindOfArray.
  */
-void cellAddEq(Cell& c1, Cell);
+void tvAddEq(tv_lval c1, TypedValue);
 
 /*
  * PHP operators -= and *=.
@@ -106,18 +109,18 @@ void cellAddEq(Cell& c1, Cell);
  * Mutates the first argument in place, by combining the second
  * argument with it in the sense of either php operator -= or *=.
  *
- * Post: isTypedNum(c1)
+ * Post: c1 is a KindOfInt or KindOfDouble
  */
-void cellSubEq(Cell& c1, Cell);
-void cellMulEq(Cell& c1, Cell);
+void tvSubEq(tv_lval c1, TypedValue);
+void tvMulEq(tv_lval c1, TypedValue);
 
 /*
  * Same as their corresponding non-O functions, but will cast their sources to
  * doubles instead of doing integer overflow.
  */
-void cellAddEqO(Cell& c1, Cell c2);
-void cellSubEqO(Cell& c1, Cell c2);
-void cellMulEqO(Cell& c1, Cell c2);
+void tvAddEqO(tv_lval c1, TypedValue c2);
+void tvSubEqO(tv_lval c1, TypedValue c2);
+void tvMulEqO(tv_lval c1, TypedValue c2);
 
 /*
  * PHP operators /= and %=.
@@ -125,11 +128,11 @@ void cellMulEqO(Cell& c1, Cell c2);
  * Mutates the first argument in place, by combining the second
  * argument with it in the sense of either php operator /= or %=.
  *
- * Post: isTypedNum(c1), unless the second argument converts to zero,
- * in which case c1 will contain boolean false.
+ * Post: c1 is a KindOfInt or KindOfDouble, unless the second argument converts
+ * to zero, in which case c1 will contain boolean false.
  */
-void cellDivEq(Cell& c1, Cell);
-void cellModEq(Cell& c1, Cell);
+void tvDivEq(tv_lval c1, TypedValue);
+void tvModEq(tv_lval c1, TypedValue);
 
 /*
  * PHP operator **=.
@@ -137,7 +140,7 @@ void cellModEq(Cell& c1, Cell);
  * Mutates the first argument in place, by combining the second
  * argument with it in the of php operator **=.
  */
-void cellPowEq(Cell& c1, Cell);
+void tvPowEq(tv_lval c1, TypedValue);
 
 /*
  * PHP operators &=, |=, and ^=.
@@ -147,9 +150,9 @@ void cellPowEq(Cell& c1, Cell);
  *
  * Post: c1.m_type == KindOfString || c1.m_type == KindOfInt64
  */
-void cellBitAndEq(Cell& c1, Cell);
-void cellBitOrEq(Cell& c1, Cell);
-void cellBitXorEq(Cell& c1, Cell);
+void tvBitAndEq(tv_lval c1, TypedValue);
+void tvBitOrEq(tv_lval c1, TypedValue);
+void tvBitXorEq(tv_lval c1, TypedValue);
 
 /*
  * PHP operators <<= and >>=.
@@ -159,8 +162,20 @@ void cellBitXorEq(Cell& c1, Cell);
  *
  * Post: c1.m_type == KindOfInt64
  */
-void cellShlEq(Cell& c1, Cell);
-void cellShrEq(Cell& c1, Cell);
+void tvShlEq(tv_lval c1, TypedValue);
+void tvShrEq(tv_lval c1, TypedValue);
+
+/*
+ * PHP operator .=.
+ *
+ * Mutates the first argument in place, by concatenating the second argument
+ * onto its end.
+ *
+ * Post: lhs.m_type == KindOfString
+ */
+inline void tvConcatEq(tv_lval lhs, TypedValue rhs) {
+  concat_assign(lhs, tvAsCVarRef(rhs).toString());
+}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -170,11 +185,11 @@ void cellShrEq(Cell& c1, Cell);
  * Mutates the argument in place, with the effects of php's
  * pre-increment or pre-decrement operators.
  */
-void cellInc(Cell&);
-void cellDec(Cell&);
+void tvInc(tv_lval);
+void tvDec(tv_lval);
 
-void cellIncO(Cell&);
-void cellDecO(Cell&);
+void tvIncO(tv_lval);
+void tvDecO(tv_lval);
 
 /*
  * PHP unary operator ~.
@@ -182,7 +197,7 @@ void cellDecO(Cell&);
  * Mutates the argument in place, with the effects of php's unary
  * bitwise not operator.
  */
-void cellBitNot(Cell&);
+void tvBitNot(TypedValue&);
 
 //////////////////////////////////////////////////////////////////////
 

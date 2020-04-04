@@ -1,13 +1,13 @@
-<?php
-$val = null;
+<?hh
+
 
 function test($input) {
-	global $val;
-	$val = $input;
+
+	ZendGoodExtSoapTestsSchemaTestSchemaInc::$val = $input;
 }
 
 function test_schema($schema,$type,$param,$style="rpc",$use="encoded", $attributeFormDefault='',$features=0) {
-  global $HTTP_RAW_POST_DATA, $val;
+
 $wsdl  = <<<EOF
 <definitions name="InteropTest"
     xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -55,8 +55,8 @@ EOF;
   fwrite($f,$wsdl);
   fclose($f);
   ini_set("soap.wsdl_cache_enabled",0);
-  $x = new SoapClient($fname, array("trace"=>1,"exceptions"=>0,"features"=>$features));
-  $y = new SoapServer($fname, array("features"=>$features));
+  $x = new SoapClient($fname, darray["trace"=>1,"exceptions"=>0,"features"=>$features]);
+  $y = new SoapServer($fname, darray["features"=>$features]);
 	$y->addfunction("test");
   unlink($fname);
 
@@ -69,9 +69,12 @@ EOF;
     $y->handle($HTTP_RAW_POST_DATA);
     ob_end_clean();
     echo $req;
-    var_dump($val);
+    var_dump(ZendGoodExtSoapTestsSchemaTestSchemaInc::$val);
   } else {
     echo $req;
   }
 }
-?>
+
+abstract final class ZendGoodExtSoapTestsSchemaTestSchemaInc {
+  public static $val;
+}

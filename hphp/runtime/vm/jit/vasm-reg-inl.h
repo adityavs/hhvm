@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -61,16 +61,16 @@ inline Vptr Vreg::operator[](ScaledIndexDisp sid) const {
   return Vptr(*this, sid.si.index, sid.si.scale, sid.disp);
 }
 inline Vptr Vreg::operator[](Vptr p) const {
-  return Vptr(*this, p.base, 1, p.disp);
+  return Vptr(*this, p.base, 1, p.disp, p.width);
 }
 inline Vptr Vreg::operator[](DispReg rd) const {
   return Vptr(*this, rd.base, 1, rd.disp);
 }
 inline Vptr Vreg::operator[](Vscaled si) const {
-  return Vptr(*this, si.index, si.scale, 0);
+  return Vptr(*this, si.index, si.scale, 0 , si.width);
 }
 inline Vptr Vreg::operator[](VscaledDisp vd) const {
-  return Vptr(*this, vd.vs.index, vd.vs.scale, vd.disp);
+  return Vptr(*this, vd.vs.index, vd.vs.scale, vd.disp, vd.vs.width);
 }
 inline Vptr Vreg::operator[](Vreg index) const {
   return Vptr(*this, index, 1, 0);
@@ -80,7 +80,7 @@ inline Vptr Vreg::operator*() const {
   return Vptr(*this, 0);
 }
 inline Vscaled Vreg::operator*(int scale) const {
-  return Vscaled{*this, scale};
+  return Vscaled{*this, scale, Width::None};
 }
 
 inline Vptr Vreg::operator+(size_t d) const {
@@ -115,6 +115,24 @@ inline Reg Vr<Reg>::asReg() const {
   return isGP()         ? Reg(rn) :
          isSIMD()       ? Reg(rn-Vreg::X0) :
          /* isSF() ? */   Reg(rn-Vreg::S0);
+}
+
+inline std::string show(Width w) {
+  switch (w) {
+    case Width::None:  return "Vreg{-}";
+    case Width::Byte:  return "Vreg8";
+    case Width::Word:  return "Vreg16";
+    case Width::Long:  return "Vreg32";
+    case Width::Quad:  return "Vreg64";
+    case Width::Octa:  return "Vreg128";
+    case Width::Flags: return "VregSF";
+    case Width::WordN: return "Vreg{8,16}";
+    case Width::LongN: return "Vreg{8,16,32}";
+    case Width::QuadN: return "Vreg{8,16,32,64}";
+    case Width::AnyNF: return "Vreg{8,16,32,64,128}";
+    case Width::Any:   return "Vreg{8,16,32,64,128,SF}";
+  }
+  not_reached();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -167,16 +185,15 @@ inline VscaledDisp operator+(Vscaled vs, int32_t disp) {
 
 inline MemoryRef Vptr::mr() const {
   if (index.isValid()) {
-    return base.isValid() ? r64(base)[r64(index) * scale + disp] :
-           *(IndexedDispReg{r64(index) * scale + disp});
+    return base.isValid() ? SegReg(seg)[r64(base) + r64(index) * scale + disp] :
+           SegReg(seg)[r64(index) * scale + disp];
   } else {
-    return base.isValid() ? r64(base)[disp] :
-           *(DispReg{disp});
+    return base.isValid() ? SegReg(seg)[r64(base) + disp] :
+           SegReg(seg)[disp];
   }
 }
 
 inline Vptr::operator MemoryRef() const {
-  assertx(seg == DS);
   return mr();
 }
 
@@ -203,7 +220,11 @@ inline Vptr operator+(Vptr lhs, intptr_t d) {
 }
 
 inline Vptr baseless(VscaledDisp vd) {
-  return Vptr(Vreg{}, vd.vs.index, vd.vs.scale, vd.disp);
+  return Vptr(Vreg{}, vd.vs.index, vd.vs.scale, vd.disp, vd.vs.width);
+}
+
+inline Vptr operator+(Vptr lhs, size_t d) {
+  return lhs + safe_cast<int32_t>(d);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -215,6 +236,16 @@ inline bool Vloc::hasReg(int i) const {
 
 inline Vreg Vloc::reg(int i) const {
   return m_regs[i];
+}
+
+inline VregList Vloc::regs() const {
+  if (hasReg(1)) {
+    return { m_regs[0], m_regs[1] };
+  }
+  if (hasReg(0)) {
+    return { m_regs[0] };
+  }
+  return {};
 }
 
 inline int Vloc::numAllocated() const {

@@ -1,19 +1,30 @@
+.hh_file 1;
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
 
   Int 1
   RetC
@@ -189,10 +200,11 @@
   CGetL $x
   CGetL $x
 
-  FPushFuncD 0 "callee"
-  FCall 0
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "callee"
   AssertRATStk 0 Int
-  UnboxRNop
   PopC
 
   CGetL $x

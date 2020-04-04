@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -45,15 +45,13 @@ namespace HPHP {
  * The Arena typedef is for convenience when you want a default
  * configuration.  Use ArenaImpl if you want something specific.
  */
-template<size_t kChunkBytes> class ArenaImpl;
+template<size_t kChunkBytes> struct ArenaImpl;
 typedef ArenaImpl<4096> Arena;
 
 //////////////////////////////////////////////////////////////////////
 
 template<size_t kChunkBytes>
-class ArenaImpl {
-  static const size_t kMinBytes = 8;
-
+struct ArenaImpl {
  public:
   ArenaImpl();
   ~ArenaImpl();
@@ -103,6 +101,8 @@ class ArenaImpl {
     uint32_t offset;
   };
 
+  static const size_t kMinBytes = 8;
+
  private:
   void* allocSlow(size_t nbytes);
   void createSlab();
@@ -113,7 +113,7 @@ class ArenaImpl {
   std::vector<char*> m_ptrs;
   PointerList<char> m_externalPtrs;
   bool m_bypassSlabAlloc;
-#ifdef DEBUG
+#ifndef NDEBUG
   size_t m_externalAllocSize;
 #endif
 };

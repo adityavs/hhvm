@@ -1,11 +1,7 @@
-<?php
+<?hh
 
 if (class_exists('B')) {
-  class A extends B {
-    public function f() {
-      var_dump('A');
-    }
-  }
+  include '1226-1.inc';
 }
 var_dump(class_exists('C'));
 class B extends C {
@@ -19,6 +15,6 @@ if (class_exists('A')) {
   $obj = new A;
   $obj->f();
 }
- else {
+else {
   var_dump('correct');
 }

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Fat {
   public $prop0 = 0;
@@ -102,6 +102,7 @@ class Fat {
   public $prop98 = 98;
   public $prop99 = 99;
 }
-
+<<__EntryPoint>> function main(): void {
 $fat = new Fat();
 var_dump($fat->prop42);
+}

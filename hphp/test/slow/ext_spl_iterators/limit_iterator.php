@@ -1,13 +1,17 @@
-<?php
+<?hh
+
+
 
 // Create an iterator to be limited
-$fruits = new ArrayIterator(array(
+<<__EntryPoint>>
+function main_limit_iterator() {
+$fruits = new ArrayIterator(varray[
   'apple',
   'banana',
   'cherry',
   'damson',
   'elderberry'
-));
+]);
 
 // Loop over first three fruits only
 foreach (new LimitIterator($fruits, 0, 3) as $fruit) {
@@ -21,4 +25,4 @@ echo "\n";
 foreach (new LimitIterator($fruits, 2) as $fruit) {
   var_dump($fruit);
 }
-
+}

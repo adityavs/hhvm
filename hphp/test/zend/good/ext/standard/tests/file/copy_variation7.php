@@ -1,12 +1,12 @@
-<?php
+<?hh
 /* Prototype: bool copy ( string $source, string $dest );
    Description: Makes a copy of the file source to dest.
      Returns TRUE on success or FALSE on failure.
 */
 
 /* Test copy() function: Trying to create copy of links */
-
-$file_path = dirname(__FILE__);
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 
 echo "*** Testing copy() with symlink and hardlink ***\n";
 $file = $file_path."/copy_variation7.tmp";
@@ -44,14 +44,11 @@ var_dump( filesize($file_path."/copy_copy_variation7_hardlink.tmp") );
 clearstatcache();
 
 echo "*** Done ***\n";
-?>
-
-<?php error_reporting(0); ?>
-<?php
-$file_path = dirname(__FILE__);
+error_reporting(0);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 unlink($file_path."/copy_copy_variation7_symlink.tmp");
 unlink($file_path."/copy_copy_variation7_hardlink.tmp");
 unlink($file_path."/copy_variation7_symlink.tmp");
 unlink($file_path."/copy_variation7_hardlink.tmp");
 unlink($file_path."/copy_variation7.tmp");
-?>
+}

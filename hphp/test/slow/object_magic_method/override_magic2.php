@@ -1,13 +1,4 @@
-<?php
-
-function y() {
-  static $x = 0;
-  echo "warn\n";
-  if ($x++ == 1) {
-    throw new exception('z');
-  }
-}
-set_error_handler('y');
+<?hh
 
 class ZZ {
   private $asd;
@@ -18,17 +9,16 @@ class ZZ {
 
   function __get($z) {
     echo "get\n";
-    return new stdclass;
+    return new ZZ();
   }
 
   static function x(ZZ $x) {
-    try {
-      $x->asd->asd->asd->asd->asd->asd->asd = 2;
-      echo "ok\n";
-    } catch (exception $z) {
-      var_dump($x);
-    }
+    $x->asd->asd->asd->asd->asd->asd->asd = 2;
+    echo "ok\n";
   }
 }
 
-ZZ::x(new ZZ);
+<<__EntryPoint>>
+function main_override_magic2() {
+  ZZ::x(new ZZ);
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,14 +18,15 @@
 #define incl_HPHP_SYSTEMLIB_H_
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/tv-variant.h"
 #include "hphp/util/portability.h"
 
 namespace HPHP {
-class ObjectData;
-class Unit;
-class Class;
-class Func;
-class Object;
+struct ObjectData;
+struct Unit;
+struct Class;
+struct Func;
+struct Object;
 } //namespace HPHP
 
 namespace HPHP { namespace SystemLib {
@@ -36,6 +37,7 @@ namespace HPHP { namespace SystemLib {
   x(Exception)                                  \
   x(BadMethodCallException)                     \
   x(InvalidArgumentException)                   \
+  x(TypeAssertionException)                     \
   x(RuntimeException)                           \
   x(OutOfBoundsException)                       \
   x(InvalidOperationException)                  \
@@ -49,79 +51,108 @@ namespace HPHP { namespace SystemLib {
   x(DOMException)                               \
   x(PDOException)                               \
   x(SoapFault)                                  \
-  x(Closure)                                    \
   x(Serializable)                               \
   x(ArrayAccess)                                \
-  x(ArrayObject)                                \
   x(ArrayIterator)                              \
-  x(Iterator)                                   \
   x(IteratorAggregate)                          \
-  x(Traversable)                                \
   x(Countable)                                  \
   x(LazyKVZipIterable)                          \
   x(LazyIterableView)                           \
   x(LazyKeyedIterableView)                      \
-  x(Phar)                                       \
   x(CURLFile)                                   \
   x(__PHP_Incomplete_Class)                     \
-  x(APCIterator)
+  x(APCIterator)                                \
+  x(DivisionByZeroException)
+
+#define SYSTEMLIB_HH_CLASSES(x) \
+  x(Traversable)                \
+  x(Iterator)                   \
+/* */
 
 extern bool s_inited;
 extern bool s_anyNonPersistentBuiltins;
 extern std::string s_source;
 extern Unit* s_unit;
 extern Unit* s_hhas_unit;
-extern Unit* s_nativeFuncUnit;
-extern Unit* s_nativeClassUnit;
 extern Func* s_nullFunc;
+extern Func* s_nullCtor;
 
 #define DECLARE_SYSTEMLIB_CLASS(cls)       \
 extern Class* s_ ## cls ## Class;
   SYSTEMLIB_CLASSES(DECLARE_SYSTEMLIB_CLASS)
 #undef DECLARE_SYSTEMLIB_CLASS
 
+#define DECLARE_SYSTEMLIB_HH_CLASS(cls) \
+extern Class* s_HH_ ## cls ## Class;
+  SYSTEMLIB_HH_CLASSES(DECLARE_SYSTEMLIB_HH_CLASS)
+#undef DECLARE_SYSTEMLIB_HH_CLASS
+
+extern Class* s_ThrowableClass;
+extern Class* s_BaseExceptionClass;
+extern Class* s_ErrorClass;
+extern Class* s_ArithmeticErrorClass;
+extern Class* s_ArgumentCountErrorClass;
+extern Class* s_AssertionErrorClass;
+extern Class* s_DivisionByZeroErrorClass;
+extern Class* s_ParseErrorClass;
+extern Class* s_TypeErrorClass;
+
 Object AllocStdClassObject();
 Object AllocPinitSentinel();
 Object AllocExceptionObject(const Variant& message);
+Object AllocErrorObject(const Variant& message);
+Object AllocArithmeticErrorObject(const Variant& message);
+Object AllocArgumentCountErrorObject(const Variant& message);
+Object AllocDivisionByZeroErrorObject(const Variant& message);
+Object AllocParseErrorObject(const Variant& message);
+Object AllocTypeErrorObject(const Variant& message);
 Object AllocBadMethodCallExceptionObject(const Variant& message);
 Object AllocInvalidArgumentExceptionObject(const Variant& message);
+Object AllocTypeAssertionExceptionObject(const Variant& message);
 Object AllocRuntimeExceptionObject(const Variant& message);
 Object AllocOutOfBoundsExceptionObject(const Variant& message);
 Object AllocInvalidOperationExceptionObject(const Variant& message);
-Object AllocDOMExceptionObject(const Variant& message,
-                               const Variant& code);
+Object AllocDOMExceptionObject(const Variant& message);
+Object AllocDivisionByZeroExceptionObject();
 Object AllocDirectoryObject();
 Object AllocPDOExceptionObject();
 Object AllocSoapFaultObject(const Variant& code,
                             const Variant& message,
-                            const Variant& actor = null_variant,
-                            const Variant& detail = null_variant,
-                            const Variant& name = null_variant,
-                            const Variant& header = null_variant);
+                            const Variant& actor = uninit_variant,
+                            const Variant& detail = uninit_variant,
+                            const Variant& name = uninit_variant,
+                            const Variant& header = uninit_variant);
 Object AllocLazyKVZipIterableObject(const Variant& mp);
 
 Object AllocLazyIterableViewObject(const Variant& iterable);
 Object AllocLazyKeyedIterableViewObject(const Variant& iterable);
 
-ATTRIBUTE_NORETURN void throwExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN
+[[noreturn]] void throwExceptionObject(const Variant& message);
+[[noreturn]] void throwErrorObject(const Variant& message);
+[[noreturn]] void throwArithmeticErrorObject(const Variant& message);
+[[noreturn]] void throwArgumentCountErrorObject(const Variant& message);
+[[noreturn]] void throwDivisionByZeroErrorObject(const Variant& message);
+[[noreturn]] void throwParseErrorObject(const Variant& message);
+[[noreturn]] void throwTypeErrorObject(const Variant& message);
+[[noreturn]]
 void throwBadMethodCallExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN
+[[noreturn]]
 void throwInvalidArgumentExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN void throwRuntimeExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN void throwOutOfBoundsExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN
+[[noreturn]] void throwTypeAssertionExceptionObject(const Variant& message);
+[[noreturn]] void throwRuntimeExceptionObject(const Variant& message);
+[[noreturn]] void throwOutOfBoundsExceptionObject(const Variant& message);
+[[noreturn]]
 void throwInvalidOperationExceptionObject(const Variant& message);
-ATTRIBUTE_NORETURN
-void throwDOMExceptionObject(const Variant& message,
-                             const Variant& code);
-ATTRIBUTE_NORETURN
+[[noreturn]]
+void throwDOMExceptionObject(const Variant& message);
+[[noreturn]] void throwDivisionByZeroExceptionObject();
+[[noreturn]]
 void throwSoapFaultObject(const Variant& code,
                           const Variant& message,
-                          const Variant& actor = null_variant,
-                          const Variant& detail = null_variant,
-                          const Variant& name = null_variant,
-                          const Variant& header = null_variant);
+                          const Variant& actor = uninit_variant,
+                          const Variant& detail = uninit_variant,
+                          const Variant& name = uninit_variant,
+                          const Variant& header = uninit_variant);
 
 
 /**
@@ -133,6 +164,16 @@ void addPersistentUnit(Unit* unit);
  * Re-merge all persistent units
  */
 void mergePersistentUnits();
+
+/*
+ * Setup the shared null constructor.
+ */
+void setupNullCtor(Class* cls);
+
+/*
+ * Return a fresh 86reifiedinit method.
+ */
+Func* getNull86reifiedinit(Class* cls);
 
 ///////////////////////////////////////////////////////////////////////////////
 }} // namespace HPHP::SystemLib

@@ -2,7 +2,7 @@
 
 type MyInt    = int;
 type MyBool   = bool;
-type MyDouble = double;
+type MyDouble = float;
 type MyArray  = array;
 type MyString = string;
 
@@ -31,7 +31,11 @@ function main() {
   fooInt(12);
   fooBool(false);
   fooDouble(1.2);
-  fooArray(array(1,2,3));
+  fooArray(varray[1,2,3]);
   fooString("asdasd");
 }
+
+<<__EntryPoint>>
+function main_typedef_non_class() {
 main();
+}

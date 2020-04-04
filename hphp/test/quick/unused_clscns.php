@@ -1,3 +1,6 @@
-<?php
+<?hh
 function wat() { Foo::ASD; }
-wat();
+<<__EntryPoint>>
+function main_entry(): void {
+  wat();
+}

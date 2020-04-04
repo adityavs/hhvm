@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class a2 {
   public function __call($func, $args) {
@@ -14,7 +14,11 @@ class b2 extends a2 {
     b2::foo();
   }
 }
+
+<<__EntryPoint>>
+function main_1895() {
 $obj = new a2;
 $obj->test();
 $obj = new b2;
 $obj->test();
+}

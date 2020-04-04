@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -43,7 +43,14 @@ enum class AttrContext {
   Prop          = 0x4,
   TraitImport   = 0x8,
   Alias         = 0x10,
+  Parameter     = 0x20,
+  Constant      = 0x40,
 };
+
+/*
+ * Convert an attr to a vector of attribute names, for a given context.
+ */
+std::vector<std::string> attrs_to_vec(AttrContext, Attr);
 
 /*
  * Convert an attr to a string of space-separated attribute names, for
@@ -73,7 +80,11 @@ std::string type_flags_to_string(TypeConstraint::Flags flags);
 folly::Optional<TypeConstraint::Flags> string_to_type_flag(
     const std::string& name);
 //////////////////////////////////////////////////////////////////////
-
+struct is_bareword {
+  bool operator()(int i) const {
+    return isalnum(i) || i == '_' || i == '.' || i == '$' || i == '\\';
+  }
+};
 }
 
 #endif

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,20 +17,24 @@
 #include "hphp/runtime/base/ini-setting.h"
 
 #include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/req-optional.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/type-conversions.h"
-#include "hphp/runtime/base/zend-strtod.h"
 
 #include "hphp/runtime/base/ini-parser/zend-ini.h"
 
 #include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/extension-registry.h"
+#include "hphp/runtime/ext/json/ext_json.h"
 
 #include "hphp/util/lock.h"
 #include "hphp/util/portability.h"
+#include "hphp/util/logger.h"
+
+#include "hphp/zend/zend-strtod.h"
 
 #ifndef _MSC_VER
 #include <glob.h>
@@ -39,6 +43,8 @@
 #define __STDC_LIMIT_MACROS
 #include <cstdint>
 #include <boost/range/join.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string.hpp>
 #include <map>
 
 namespace HPHP {
@@ -56,12 +62,22 @@ const StaticString
   s_access("access"),
   s_core("core");
 
-int64_t convert_bytes_to_long(const std::string& value) {
-  if (value.size() == 0) {
+std::vector<std::string> split_brackets(const std::string& s) {
+  std::vector<std::string> split_value;
+  boost::split(split_value, s, boost::is_any_of("[]"));
+  // Splitting this way might give us an empty string at the end
+  if (split_value.back() == "") {
+    split_value.pop_back();
+  }
+  return split_value;
+}
+
+int64_t convert_bytes_to_long(folly::StringPiece value) {
+  if (value.empty()) {
     return 0;
   }
-  int64_t newInt = strtoll(value.data(), nullptr, 10);
-  char lastChar = value.data()[value.size() - 1];
+  int64_t newInt = strtoll(value.begin(), nullptr, 10);
+  auto const lastChar = value[value.size() - 1];
   if (lastChar == 'K' || lastChar == 'k') {
     newInt <<= 10;
   } else if (lastChar == 'M' || lastChar == 'm') {
@@ -70,6 +86,20 @@ int64_t convert_bytes_to_long(const std::string& value) {
     newInt <<= 30;
   }
   return newInt;
+}
+
+std::string convert_long_to_bytes(int64_t value) {
+  // Only return a larger value if it wouldn't
+  // be truncating the precision.
+  if ((value & ((1 << 30) - 1)) == 0) {
+    return std::to_string(value / (1 << 30)) + "G";
+  } else if ((value & ((1 << 20) - 1)) == 0) {
+    return std::to_string(value / (1 << 20)) + "M";
+  } else if ((value & ((1 << 10) - 1)) == 0) {
+    return std::to_string(value / (1 << 10)) + "K";
+  } else {
+    return std::to_string(value);
+  }
 }
 
 #define INI_ASSERT_STR(v) \
@@ -82,6 +112,15 @@ int64_t convert_bytes_to_long(const std::string& value) {
   if (!value.isArray() && !value.isObject()) { \
     return false; \
   }
+
+#define INI_ASSERT_ARR_INNER(v, t) \
+  if (!value.isArray() && !value.isObject()) { \
+    return false; \
+  } \
+  for (ArrayIter iter(value.toArray()); iter; ++iter) { \
+    if (!iter.second().is##t()) return false; \
+  }
+
 
 bool ini_on_update(const Variant& value, bool& p) {
   INI_ASSERT_STR(value);
@@ -200,7 +239,7 @@ bool ini_on_update(const Variant& value, Array& p) {
 }
 
 bool ini_on_update(const Variant& value, std::set<std::string>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p.insert(iter.second().toString().toCppString());
   }
@@ -209,7 +248,7 @@ bool ini_on_update(const Variant& value, std::set<std::string>& p) {
 
 bool ini_on_update(const Variant& value,
                    std::set<std::string, stdltistr>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p.insert(iter.second().toString().toCppString());
   }
@@ -218,15 +257,23 @@ bool ini_on_update(const Variant& value,
 
 bool ini_on_update(const Variant& value,
                    boost::container::flat_set<std::string>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p.insert(iter.second().toString().toCppString());
   }
   return true;
 }
 
+bool ini_on_update(const Variant& value, std::vector<uint32_t>& p) {
+  INI_ASSERT_ARR_INNER(value, Integer);
+  for (ArrayIter iter(value.toArray()); iter; ++iter) {
+    p.push_back(iter.second().toInt64());
+  }
+  return true;
+}
+
 bool ini_on_update(const Variant& value, std::vector<std::string>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p.push_back(iter.second().toString().toCppString());
   }
@@ -234,8 +281,17 @@ bool ini_on_update(const Variant& value, std::vector<std::string>& p) {
 }
 
 bool ini_on_update(const Variant& value,
+                   std::unordered_map<std::string, int>& p) {
+  INI_ASSERT_ARR_INNER(value, Integer);
+  for (ArrayIter iter(value.toArray()); iter; ++iter) {
+    p[iter.first().toString().toCppString()] = iter.second().toInt64();
+  }
+  return true;
+}
+
+bool ini_on_update(const Variant& value,
                    std::map<std::string, std::string>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p[iter.first().toString().toCppString()] =
       iter.second().toString().toCppString();
@@ -245,7 +301,7 @@ bool ini_on_update(const Variant& value,
 
 bool ini_on_update(const Variant& value,
                    std::map<std::string, std::string, stdltistr>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p[iter.first().toString().toCppString()] =
       iter.second().toString().toCppString();
@@ -255,7 +311,7 @@ bool ini_on_update(const Variant& value,
 
 bool ini_on_update(const Variant& value,
                    hphp_string_imap<std::string>& p) {
-  INI_ASSERT_ARR(value);
+  INI_ASSERT_ARR_INNER(value, String);
   for (ArrayIter iter(value.toArray()); iter; ++iter) {
     p[iter.first().toString().toCppString()] =
       iter.second().toString().toCppString();
@@ -311,10 +367,33 @@ Variant ini_get(String& p) {
   return p.data();
 }
 
+namespace {
+
+template<typename T>
+void add(ArrayInit& arr, const std::string& key, const T& value) {
+  auto keyStr = String(key);
+  int64_t n;
+  if (keyStr.get()->isStrictlyInteger(n)) {
+    arr.add(n, value);
+    return;
+  }
+  arr.add(keyStr.get(), value);
+}
+
+}
+
+Variant ini_get(std::unordered_map<std::string, int>& p) {
+  ArrayInit ret(p.size(), ArrayInit::Map{});
+  for (auto& pair : p) {
+    add(ret, pair.first, pair.second);
+  }
+  return ret.toArray();
+}
+
 Variant ini_get(std::map<std::string, std::string>& p) {
   ArrayInit ret(p.size(), ArrayInit::Map{});
   for (auto& pair : p) {
-    ret.add(String(pair.first), pair.second);
+    add(ret, pair.first, pair.second);
   }
   return ret.toArray();
 }
@@ -322,7 +401,7 @@ Variant ini_get(std::map<std::string, std::string>& p) {
 Variant ini_get(std::map<std::string, std::string, stdltistr>& p) {
   ArrayInit ret(p.size(), ArrayInit::Map{});
   for (auto& pair : p) {
-    ret.add(String(pair.first), pair.second);
+    add(ret, pair.first, pair.second);
   }
   return ret.toArray();
 }
@@ -330,7 +409,7 @@ Variant ini_get(std::map<std::string, std::string, stdltistr>& p) {
 Variant ini_get(hphp_string_imap<std::string>& p) {
   ArrayInit ret(p.size(), ArrayInit::Map{});
   for (auto& pair : p) {
-    ret.add(String(pair.first), pair.second);
+    add(ret, pair.first, pair.second);
   }
   return ret.toArray();
 }
@@ -366,7 +445,8 @@ Variant ini_get(boost::container::flat_set<std::string>& p) {
   return ret.toArray();
 }
 
-Variant ini_get(std::vector<std::string>& p) {
+template<typename T>
+Variant ini_get(std::vector<T>& p) {
   ArrayInit ret(p.size(), ArrayInit::Map{});
   auto idx = 0;
   for (auto& s : p) {
@@ -374,6 +454,9 @@ Variant ini_get(std::vector<std::string>& p) {
   }
   return ret.toArray();
 }
+
+template Variant ini_get<uint32_t>(std::vector<uint32_t>&);
+template Variant ini_get<std::string>(std::vector<std::string>&);
 
 const IniSettingMap ini_iterate(const IniSettingMap &ini,
                                 const std::string &name) {
@@ -438,7 +521,7 @@ IniSettingMap::IniSettingMap() {
   m_map = Variant(Array::Create());
 }
 
-IniSettingMap::IniSettingMap(Type t) : IniSettingMap() {}
+IniSettingMap::IniSettingMap(Type /*t*/) : IniSettingMap() {}
 
 IniSettingMap::IniSettingMap(const IniSettingMap& i) {
   m_map = i.m_map;
@@ -453,8 +536,11 @@ IniSettingMap::IniSettingMap(IniSettingMap&& i) noexcept {
 }
 
 const IniSettingMap IniSettingMap::operator[](const String& key) const {
-  assert(this->isArray());
-  return IniSettingMap(m_map.toCArrRef()[key]);
+  assertx(this->isArray());
+  if (auto const intish = tryIntishCast<IntishCast::Cast>(key.get())) {
+    return IniSettingMap(m_map.asCArrRef()[*intish]);
+  }
+  return IniSettingMap(m_map.asCArrRef()[key]);
 }
 
 IniSettingMap& IniSettingMap::operator=(const IniSettingMap& i) {
@@ -462,26 +548,52 @@ IniSettingMap& IniSettingMap::operator=(const IniSettingMap& i) {
   return *this;
 }
 
+namespace {
+void mergeSettings(tv_lval curval, TypedValue v) {
+  if (isArrayLikeType(v.m_type) &&
+      isArrayLikeType(curval.type())) {
+    for (auto i = ArrayIter(v.m_data.parr); !i.end(); i.next()) {
+      auto& cur_inner_ref = asArrRef(curval);
+      if (!cur_inner_ref.exists(i.first())) {
+        cur_inner_ref.set(i.first(), empty_array());
+      }
+      mergeSettings(cur_inner_ref.lval(i.first()), i.secondVal());
+    }
+  } else {
+    tvSet(tvToInit(v), curval);
+  }
+}
+}
+
 void IniSettingMap::set(const String& key, const Variant& v) {
-  assert(this->isArray());
-  m_map.toArrRef().set(key, v);
+  assertx(this->isArray());
+  auto& mapref = m_map.asArrRef();
+  if (!mapref.exists(key)) {
+    mapref.set(key, empty_array());
+  }
+  auto const curval = mapref.lval(key);
+  mergeSettings(curval, *v.asTypedValue());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // callbacks for creating arrays out of ini
 
-void IniSetting::ParserCallback::onSection(const std::string &name, void *arg) {
+void IniSetting::ParserCallback::onSection(const std::string& /*name*/,
+                                           void* /*arg*/) {
   // do nothing
 }
 
-void IniSetting::ParserCallback::onLabel(const std::string &name, void *arg) {
+void IniSetting::ParserCallback::onLabel(const std::string& /*name*/,
+                                         void* /*arg*/) {
   // do nothing
 }
 
 void IniSetting::ParserCallback::onEntry(
     const std::string &key, const std::string &value, void *arg) {
-  Variant *arr = (Variant*)arg;
-  forceToArray(*arr).set(String(key), Variant(value));
+  auto arr = static_cast<Variant*>(arg);
+  String skey(key);
+  Variant sval(value);
+  forceToArray(*arr).set(skey, sval);
 }
 
 void IniSetting::ParserCallback::onPopEntry(
@@ -489,41 +601,53 @@ void IniSetting::ParserCallback::onPopEntry(
     const std::string &value,
     const std::string &offset,
     void *arg) {
-  Variant *arr = (Variant*)arg;
+  auto arr = static_cast<Variant*>(arg);
   forceToArray(*arr);
-  auto& hash = arr->toArrRef().lvalAt(String(key));
+
+  String skey(key);
+  auto& arr_ref = arr->asArrRef();
+  if (!arr_ref.exists(skey)) {
+    arr_ref.set(skey, empty_array());
+  }
+  auto const hash = arr_ref.lval(skey);
   forceToArray(hash);
-  if (!offset.empty()) {
+  if (!offset.empty()) {                 // a[b]
     makeArray(hash, offset, value);
-  } else {
-    hash.toArrRef().append(value);
+  } else {                               // a[]
+    asArrRef(hash).append(value);
   }
 }
 
-void IniSetting::ParserCallback::makeArray(Variant& hash,
+void IniSetting::ParserCallback::makeArray(tv_lval val,
                                            const std::string& offset,
                                            const std::string& value) {
-  assert(!offset.empty());
-  Variant *val = &hash;
-  assert(val->isArray());
+  assertx(!offset.empty());
+  assertx(variant_ref{val}.isArray());
   auto start = offset.c_str();
   auto p = start;
   bool last = false;
-  do {
+  for (;;) {
     String index(p);
     last = p + index.size() >= start + offset.size();
     // This is mandatory in case we have a nested array like:
     //   hhvm.a[b][c][d]
     // b will be hash and an array already, but c and d might
     // not exist and will need to be made an array
-    forceToArray(*val);
-    val = &val->toArrRef().lvalAt(index);
+    auto& arr = forceToArray(val);
+    const auto key = arr.convertKey<IntishCast::Cast>(index);
     if (last) {
-      *val = Variant(value);
-    } else {
-      p += index.size() + 1;
+      String s{value};
+      arr.set(key, make_tv<KindOfString>(s.get()));
+      break;
     }
-  } while (!last);
+    // Similar to the above, in the case of a nested array we need to ensure
+    // that we create empty arrays on the way down if they don't already exist.
+    if (!arr.exists(key)) {
+      arr.set(key, make_array_like_tv(ArrayData::Create()));
+    }
+    val = arr.lval(key);
+    p += index.size() + 1;
+  }
 }
 
 void IniSetting::ParserCallback::onConstant(std::string &result,
@@ -569,9 +693,12 @@ void IniSetting::ParserCallback::onOp(
 void IniSetting::SectionParserCallback::onSection(
     const std::string &name, void *arg) {
   auto const data = (CallbackData*)arg;
-  data->active_section.unset(); // break ref() from previous section
+  if (!data->active_name.isNull()) {
+    data->arr.asArrRef().set(data->active_name, data->active_section);
+    data->active_section.unset();
+  }
   data->active_section = Array::Create();
-  data->arr.toArrRef().setRef(String(name), data->active_section);
+  data->active_name = String(name);
 }
 
 Variant* IniSetting::SectionParserCallback::activeArray(CallbackData* data) {
@@ -602,7 +729,7 @@ void IniSetting::SectionParserCallback::onPopEntry(
 
 void IniSetting::SystemParserCallback::onEntry(
     const std::string &key, const std::string &value, void *arg) {
-  assert(!key.empty());
+  assertx(!key.empty());
   // onConstant will always be called before onEntry, so we can check
   // here
   if (IniSetting::s_config_is_a_constant) {
@@ -617,7 +744,7 @@ void IniSetting::SystemParserCallback::onPopEntry(const std::string& key,
                                                   const std::string& value,
                                                   const std::string& offset,
                                                   void* arg) {
-  assert(!key.empty());
+  assertx(!key.empty());
   if (IniSetting::s_config_is_a_constant) {
     IniSetting::config_names_that_use_constants.insert(key);
     IniSetting::s_config_is_a_constant = false;
@@ -646,22 +773,25 @@ Variant IniSetting::FromString(const String& ini, const String& filename,
   s_config_is_a_constant = false;
   auto ini_cpp = ini.toCppString();
   auto filename_cpp = filename.toCppString();
+  Variant ret = false;
   if (process_sections) {
     CallbackData data;
     SectionParserCallback cb;
     data.arr = Array::Create();
     if (zend_parse_ini_string(ini_cpp, filename_cpp, scanner_mode, cb, &data)) {
-      return data.arr;
+      if (!data.active_name.isNull()) {
+        data.arr.asArrRef().set(data.active_name, data.active_section);
+      }
+      ret = data.arr;
     }
   } else {
     ParserCallback cb;
-    Variant ret = Array::Create();
-    if (zend_parse_ini_string(ini_cpp, filename_cpp, scanner_mode, cb, &ret)) {
-      return ret;
+    Variant arr = Array::Create();
+    if (zend_parse_ini_string(ini_cpp, filename_cpp, scanner_mode, cb, &arr)) {
+      ret = arr;
     }
   }
-
-  return false;
+  return ret;
 }
 
 IniSettingMap IniSetting::FromStringAsMap(const std::string& ini,
@@ -672,12 +802,13 @@ IniSettingMap IniSetting::FromStringAsMap(const std::string& ini,
   SystemParserCallback cb;
   Variant parsed;
   zend_parse_ini_string(ini, filename, NormalScanner, cb, &parsed);
-  return std::move(parsed);
+  if (parsed.isNull()) {
+    return uninit_null();
+  }
+  return parsed;
 }
 
-
-class IniCallbackData {
-public:
+struct IniCallbackData {
   IniCallbackData() {
     extension = nullptr;
     mode = IniSetting::PHP_INI_NONE;
@@ -716,34 +847,38 @@ static CallbackMap s_system_ini_callbacks;
 //   * server mode: the contents of user map are     destructed N-1 times
 //   * CLI    mode: the contents of user map are NOT destructed on SIGTERM
 //
-static IMPLEMENT_THREAD_LOCAL(CallbackMap, s_user_callbacks);
+static RDS_LOCAL(CallbackMap, s_user_callbacks);
 
-typedef std::map<std::string, Variant> SettingMap;
+struct SystemSettings {
+  std::unordered_map<std::string,Variant> settings;
+  TYPE_SCAN_IGNORE_ALL; // the variants are always static
+};
+
+struct LocalSettings {
+  // Using hash_map for reference stability
+  using Map = req::hash_map<std::string,Variant>;
+  req::Optional<Map> settings;
+  Map& init() {
+    if (!settings) settings.emplace();
+    return settings.value();
+  }
+  void clear() { settings.clear(); }
+  bool empty() { return !settings.has_value() || settings.value().empty(); }
+};
 
 // Set by a .ini file at the start
-static SettingMap s_system_settings;
+static SystemSettings s_system_settings;
 
 // Changed during the course of the request
-static IMPLEMENT_THREAD_LOCAL(SettingMap, s_saved_defaults);
+static RDS_LOCAL(LocalSettings, s_saved_defaults);
 
 struct IniSettingExtension final : Extension {
   IniSettingExtension() : Extension("hhvm.ini", NO_EXTENSION_VERSION_YET) {}
 
   // s_saved_defaults should be clear at the beginning of any request
   void requestInit() override {
-    assert(s_saved_defaults->empty());
+    assertx(!s_saved_defaults->settings.has_value());
   }
-
-  void requestShutdown() override {
-    IniSetting::ResetSavedDefaults();
-    assert(s_saved_defaults->empty());
-  }
-
-  void vscan(IMarker& mark) const override {
-    for (auto& e : s_system_settings) mark(e);
-    for (auto& e : *s_saved_defaults) mark(e);
-  }
-
 } s_ini_extension;
 
 void IniSetting::Bind(
@@ -752,9 +887,9 @@ void IniSetting::Bind(
   const std::string& name,
   std::function<bool(const Variant&)> updateCallback,
   std::function<Variant()> getCallback,
-  std::function<class UserIniData *(void)> userDataCallback
+  std::function<struct UserIniData *(void)> userDataCallback
 ) {
-  assert(!name.empty());
+  assertx(!name.empty());
 
   /*
    * WATCH OUT: unlike php5, a Mode is not necessarily a bit mask.
@@ -776,7 +911,7 @@ void IniSetting::Bind(
     );
   } else {
     is_thread_local = (mode == PHP_INI_USER || mode == PHP_INI_ALL);
-    assert(is_thread_local || !ExtensionRegistry::modulesInitialised() ||
+    assertx(is_thread_local || !ExtensionRegistry::modulesInitialised() ||
            !s_system_settings_are_set);
   }
   //
@@ -830,14 +965,14 @@ void IniSetting::Bind(
 }
 
 void IniSetting::Unbind(const std::string& name) {
-  assert(!name.empty());
+  assertx(!name.empty());
   s_user_callbacks->erase(name);
 }
 
 static IniCallbackData* get_callback(const std::string& name) {
-  CallbackMap::iterator iter = s_system_ini_callbacks.find(name.data());
+  CallbackMap::iterator iter = s_system_ini_callbacks.find(name);
   if (iter == s_system_ini_callbacks.end()) {
-    iter = s_user_callbacks->find(name.data());
+    iter = s_user_callbacks->find(name);
     if (iter == s_user_callbacks->end()) {
       return nullptr;
     }
@@ -859,8 +994,21 @@ bool IniSetting::Get(const String& name, String& value) {
   return ret;
 }
 
+static bool shouldHideSetting(const std::string& name) {
+  for (auto& sub : RuntimeOption::EvalIniGetHide) {
+    if (name.find(sub) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool IniSetting::Get(const String& name, Variant& value) {
-  auto cb = get_callback(name.toCppString());
+  auto nameStr = name.toCppString();
+  if (shouldHideSetting(nameStr)) {
+    return false;
+  }
+  auto cb = get_callback(nameStr);
   if (!cb) {
     return false;
   }
@@ -893,24 +1041,25 @@ bool IniSetting::FillInConstant(const std::string& name,
   // We can cheat here since we fill in constants a while after
   // runtime options are loaded.
   s_system_settings_are_set = false;
-  return IniSetting::SetSystem(name, value);
+  auto const ret = IniSetting::SetSystem(name, value);
   s_system_settings_are_set = true;
+  return ret;
 }
 
 bool IniSetting::SetSystem(const String& name, const Variant& value) {
   // Shouldn't be calling this function after the runtime options are loaded.
-  assert(!s_system_settings_are_set);
+  assertx(!s_system_settings_are_set);
   // Since we're going to keep these settings for the lifetime of the program,
   // we need to make them static.
   Variant eval_scalar_variant = value;
   eval_scalar_variant.setEvalScalar();
-  s_system_settings[name.toCppString()] = eval_scalar_variant;
+  s_system_settings.settings[name.toCppString()] = eval_scalar_variant;
   return ini_set(name.toCppString(), value, PHP_INI_SET_EVERY);
 }
 
 bool IniSetting::GetSystem(const String& name, Variant& value) {
-  auto it = s_system_settings.find(name.toCppString());
-  if (it == s_system_settings.end()) {
+  auto it = s_system_settings.settings.find(name.toCppString());
+  if (it == s_system_settings.settings.end()) {
     return false;
   }
   value = it->second;
@@ -918,29 +1067,43 @@ bool IniSetting::GetSystem(const String& name, Variant& value) {
 }
 
 bool IniSetting::SetUser(const String& name, const Variant& value) {
-  auto it = s_saved_defaults->find(name.toCppString());
-  if (it == s_saved_defaults->end()) {
+  auto& defaults = s_saved_defaults->init();
+  if (!defaults.count(name.toCppString())) {
     Variant def;
     auto success = Get(name, def); // def gets populated here
     if (success) {
-      (*s_saved_defaults)[name.toCppString()] = def;
+      defaults[name.toCppString()] = def;
     }
   }
   return ini_set(name.toCppString(), value, PHP_INI_SET_USER);
 }
 
+void IniSetting::RestoreUser(const String& name) {
+  if (!s_saved_defaults->empty()) {
+    auto& defaults = s_saved_defaults->settings.value();
+    auto it = defaults.find(name.toCppString());
+    if (it != defaults.end() &&
+        ini_set(name.toCppString(), it->second, PHP_INI_SET_USER)) {
+      defaults.erase(it);
+    }
+  }
+};
+
 bool IniSetting::ResetSystemDefault(const std::string& name) {
-  auto it = s_system_settings.find(name);
-  if (it == s_system_settings.end()) {
+  auto it = s_system_settings.settings.find(name);
+  if (it == s_system_settings.settings.end()) {
     return false;
   }
   return ini_set(name, it->second, PHP_INI_SET_EVERY);
 }
 
 void IniSetting::ResetSavedDefaults() {
-  for (auto& item : *s_saved_defaults) {
-    ini_set(item.first, item.second, PHP_INI_SET_USER);
+  if (!s_saved_defaults->empty()) {
+    for (auto& item : s_saved_defaults->settings.value()) {
+      ini_set(item.first, item.second, PHP_INI_SET_USER);
+    }
   }
+  // destroy the local settings hashtable even if it's empty
   s_saved_defaults->clear();
 }
 
@@ -974,32 +1137,41 @@ Array IniSetting::GetAll(const String& ext_name, bool details) {
     if (ext && ext != iter.second.extension) {
       continue;
     }
+    if (shouldHideSetting(iter.first)) {
+      continue;
+    }
 
     auto value = iter.second.getCallback();
-    // Cast all non-arrays to strings since that is what everything used ot be
+    // Cast all non-arrays to strings since that is what everything used to be
     if (!value.isArray()) {
       value = value.toString();
     }
     if (details) {
       Array item = Array::Create();
-      item.add(s_global_value, value);
-      item.add(s_local_value, value);
+      item.set(s_global_value, value);
+      item.set(s_local_value, value);
       if (iter.second.mode == PHP_INI_ALL) {
-        item.add(
+        item.set(
           s_access,
           Variant(PHP_INI_USER | PHP_INI_SYSTEM | PHP_INI_PERDIR)
         );
       } else if (iter.second.mode == PHP_INI_ONLY) {
-        item.add(s_access, Variant(PHP_INI_SYSTEM));
+        item.set(s_access, Variant(PHP_INI_SYSTEM));
       } else {
-        item.add(s_access, Variant(iter.second.mode));
+        item.set(s_access, Variant(iter.second.mode));
       }
-      r.add(String(iter.first), item);
+      r.set(String(iter.first), item);
     } else {
-      r.add(String(iter.first), value);
+      r.set(String(iter.first), value);
     }
   }
   return r;
+}
+
+std::string IniSetting::GetAllAsJSON() {
+  Array settings = GetAll(empty_string(), true);
+  String out = Variant::attach(HHVM_FN(json_encode)(settings)).toString();
+  return std::string(out.c_str());
 }
 
 void add_default_config_files_globbed(

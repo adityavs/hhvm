@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -38,9 +38,9 @@ void CmdOut::help(DebuggerClient &client) {
   );
 }
 
-void CmdOut::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
+void CmdOut::onSetup(DebuggerProxy& proxy, CmdInterrupt& /*interrupt*/) {
   TRACE(2, "CmdOut::onSetup\n");
-  assert(!m_complete); // Complete cmds should not be asked to do work.
+  assertx(!m_complete); // Complete cmds should not be asked to do work.
   m_stackDepth = proxy.getStackDepth();
   m_vmDepth = g_context->m_nesting;
 
@@ -50,11 +50,11 @@ void CmdOut::onSetup(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
 
 void CmdOut::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   TRACE(2, "CmdOut::onBeginInterrupt\n");
-  assert(!m_complete); // Complete cmds should not be asked to do work.
+  assertx(!m_complete); // Complete cmds should not be asked to do work.
 
   m_needsVMInterrupt = false;
 
-  if (m_skippingOverPopR) {
+  if (m_skippingOverPopC) {
     m_complete = true;
     return;
   }
@@ -84,9 +84,9 @@ void CmdOut::onBeginInterrupt(DebuggerProxy &proxy, CmdInterrupt &interrupt) {
   int depth = decCount();
   if (depth == 0) {
     PC pc = vmpc();
-    // Step over PopR following a call
-    if (peek_op(pc) == Op::PopR) {
-      m_skippingOverPopR = true;
+    // Step over PopC following a call
+    if (peek_op(pc) == Op::PopC) {
+      m_skippingOverPopC = true;
       m_needsVMInterrupt = true;
     } else {
       m_complete = true;

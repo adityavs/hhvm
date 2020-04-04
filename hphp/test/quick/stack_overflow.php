@@ -1,9 +1,12 @@
-<?php
+<?hh
 
-$g = array(1,2,3);
+abstract final class StackOverflow { public static $g; }
+
+StackOverflow::$g = varray[1,2,3];
 function cmp($a, $b) {
-  global $g;
-  usort($g, 'cmp');
+  $g = StackOverflow::$g;
+  usort(inout $g, fun('cmp'));
+  StackOverflow::$g = $g;
   fiz();
 }
 

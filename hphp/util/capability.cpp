@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,7 @@
 
 #include "hphp/util/capability.h"
 #include "hphp/util/logger.h"
+#include "hphp/util/user-info.h"
 #include <folly/String.h>
 #include <linux/types.h>
 #include <sys/capability.h>
@@ -34,26 +35,29 @@ static bool setInitialCapabilities() {
   if (cap_d != nullptr) {
     cap_value_t cap_list[] = {CAP_NET_BIND_SERVICE, CAP_SYS_RESOURCE,
                               CAP_SETUID, CAP_SETGID, CAP_SYS_NICE};
+    constexpr unsigned cap_size = sizeof(cap_list)/sizeof(*cap_list);
+
     cap_clear(cap_d);
 
-    if (cap_set_flag(cap_d, CAP_PERMITTED, 5, cap_list, CAP_SET) < 0 ||
-        cap_set_flag(cap_d, CAP_EFFECTIVE, 5, cap_list, CAP_SET) < 0) {
-      Logger::Error("cap_set_flag failed");
+    if (cap_set_flag(cap_d, CAP_PERMITTED, cap_size, cap_list, CAP_SET) < 0 ||
+        cap_set_flag(cap_d, CAP_EFFECTIVE, cap_size, cap_list, CAP_SET) < 0) {
+      Logger::Error("cap_set_flag failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
     if (cap_set_proc(cap_d) == -1) {
-      Logger::Error("cap_set_proc failed");
+      Logger::Error("cap_set_proc failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
     if (cap_free(cap_d) == -1) {
-      Logger::Error("cap_free failed");
+      Logger::Error("cap_free failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
     if (prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0) {
-      Logger::Error("prctl(PR_SET_KEEPCAPS) failed");
+      Logger::Error("prctl(PR_SET_KEEPCAPS) failed: %s",
+                    folly::errnoStr(errno).c_str());
       return false;
     }
     prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
@@ -68,22 +72,23 @@ static bool setMinimalCapabilities() {
   if (cap_d != nullptr) {
     cap_value_t cap_list[] = {CAP_NET_BIND_SERVICE, CAP_SYS_RESOURCE,
                               CAP_SYS_NICE};
+    constexpr unsigned cap_size = sizeof(cap_list)/sizeof(*cap_list);
 
     cap_clear(cap_d);
 
-    if (cap_set_flag(cap_d, CAP_PERMITTED, 3, cap_list, CAP_SET) < 0 ||
-        cap_set_flag(cap_d, CAP_EFFECTIVE, 3, cap_list, CAP_SET) < 0) {
-      Logger::Error("cap_set_flag failed");
+    if (cap_set_flag(cap_d, CAP_PERMITTED, cap_size, cap_list, CAP_SET) < 0 ||
+        cap_set_flag(cap_d, CAP_EFFECTIVE, cap_size, cap_list, CAP_SET) < 0) {
+      Logger::Error("cap_set_flag failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
     if (cap_set_proc(cap_d) == -1) {
-      Logger::Error("cap_set_proc failed");
+      Logger::Error("cap_set_proc failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
     if (cap_free(cap_d) == -1) {
-      Logger::Error("cap_free failed");
+      Logger::Error("cap_free failed: %s", folly::errnoStr(errno).c_str());
       return false;
     }
 
@@ -93,13 +98,27 @@ static bool setMinimalCapabilities() {
   return false;
 }
 
-bool Capability::ChangeUnixUser(uid_t uid) {
+bool Capability::ChangeUnixUser(uid_t uid, bool allowRoot) {
+  if (uid == 0 && !allowRoot) {
+    Logger::Error("unable to change user to root");
+    return false;
+  }
+
+  if (uid == getuid()) {
+    return true;
+  }
+
   if (setInitialCapabilities()) {
+    auto buf = PasswdBuffer{};
     struct passwd *pw;
 
-    if ((pw = getpwuid(uid)) == nullptr) {
+    if (getpwuid_r(uid, &buf.ent, buf.data.get(), buf.size, &pw)) {
       Logger::Error("unable to getpwuid(%d): %s", uid,
                     folly::errnoStr(errno).c_str());
+      return false;
+    }
+    if (pw == nullptr) {
+      Logger::Error("user id %d does not exist", uid);
       return false;
     }
 
@@ -130,12 +149,21 @@ bool Capability::ChangeUnixUser(uid_t uid) {
   return false;
 }
 
-bool Capability::ChangeUnixUser(const std::string &username) {
+bool Capability::ChangeUnixUser(const std::string &username, bool allowRoot) {
   if (!username.empty()) {
-    struct passwd *pw = getpwnam(username.c_str());
-    if (pw && pw->pw_uid) {
-      return ChangeUnixUser(pw->pw_uid);
+    auto buf = PasswdBuffer{};
+    struct passwd *pw;
+    if (getpwnam_r(username.c_str(), &buf.ent, buf.data.get(), buf.size, &pw)) {
+      Logger::Error("Call to getpwnam_r failed for %s: %s",
+                    username.c_str(),
+                    folly::errnoStr(errno).c_str());
+      return false;
     }
+    if (!pw) {
+      Logger::Error("unable to find user %s", username.c_str());
+      return false;
+    }
+    return ChangeUnixUser(pw->pw_uid, allowRoot);
   }
   return false;
 }

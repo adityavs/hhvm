@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,16 +18,17 @@
 #ifndef incl_HPHP_MYSQL_COMMON_H_
 #define incl_HPHP_MYSQL_COMMON_H_
 
-#include <folly/Optional.h>
-
-#include <memory>
-#include <vector>
+#include "hphp/runtime/base/req-list.h"
+#include "hphp/runtime/base/req-optional.h"
+#include "hphp/runtime/base/req-vector.h"
+#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/ext/extension.h"
 
 #include "mysql.h"
 
-#include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/runtime/base/req-containers.h"
+#ifdef ENABLE_ASYNC_MYSQL
+#include "squangle/mysql_client/SSLOptionsProviderBase.h"
+#endif
 
 #ifdef PHP_MYSQL_UNIX_SOCK_ADDR
 #ifdef MYSQL_UNIX_ADDR
@@ -39,17 +40,15 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class MySQLUtil {
-public:
-  enum TimeoutType {
-    ConnectTimeout,
-    ReadTimeout,
-    WriteTimeout
-  };
+#if MYSQL_VERSION_ID >= 80004
+using my_bool = bool;
+#endif
 
-  static int set_mysql_timeout(MYSQL *mysql,
-                               MySQLUtil::TimeoutType type,
-                               int ms);
+struct MySQLUtil {
+  enum TimeoutType { ConnectTimeout, ReadTimeout, WriteTimeout };
+
+  static int
+  set_mysql_timeout(MYSQL* mysql, MySQLUtil::TimeoutType type, int ms);
 };
 
 enum class MySQLState : int8_t {
@@ -234,7 +233,7 @@ public:
 
 struct MySQLResource : SweepableResourceData {
   explicit MySQLResource(std::shared_ptr<MySQL> mysql) : m_mysql(mysql) {
-    assert(mysql);
+    assertx(mysql);
   }
 
   CLASSNAME_IS("mysql link")
@@ -258,10 +257,6 @@ struct MySQLRequestData final : RequestEventHandler {
     defaultConn.reset();
     totalRowCount = 0;
   }
-  void vscan(IMarker& mark) const override {
-    // hack around weird template error about req::ptr being final
-    mark(defaultConn.get());
-  }
 
   req::ptr<MySQLResource> defaultConn;
   int readTimeout;
@@ -272,8 +267,7 @@ struct MySQLRequestData final : RequestEventHandler {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MySQLFieldInfo {
-public:
+struct MySQLFieldInfo {
   String name;
   String org_name;
   String table;
@@ -290,12 +284,11 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MySQLResult : public SweepableResourceData {
-public:
+struct MySQLResult : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(MySQLResult);
 
   explicit MySQLResult(MYSQL_RES *res, bool localized = false);
-  virtual ~MySQLResult();
+  ~MySQLResult() override;
 
   CLASSNAME_IS("mysql result")
   // overriding ResourceData
@@ -304,13 +297,13 @@ public:
   void close() {
     sweep();
     if (isLocalized()) {
-      m_rows.clear();
+      m_rows.reset();
     }
   }
 
   bool isInvalid() const override {
     if (isLocalized()) {
-      return !m_rows.hasValue();
+      return !m_rows.has_value();
     }
     return m_res == nullptr;
   }
@@ -362,7 +355,7 @@ protected:
   MYSQL_ROW m_current_async_row;
   bool m_localized; // whether all the rows have been localized
   req::vector<MySQLFieldInfo> m_fields;
-  folly::Optional<req::list<req::vector<Variant>>> m_rows;
+  req::Optional<req::list<req::vector<Variant>>> m_rows;
   req::list<req::vector<Variant>>::const_iterator m_current_row;
   int64_t m_current_field;
   bool m_row_ready; // set to false after seekRow, true after fetchRow
@@ -373,30 +366,11 @@ protected:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-struct MySQLStmtVariables {
-  explicit MySQLStmtVariables(const Array& arr);
-  ~MySQLStmtVariables();
-
-  bool init_params(MYSQL_STMT *stmt, const String& types);
-  bool bind_result(MYSQL_STMT *stmt);
-  bool bind_params(MYSQL_STMT *stmt);
-  void update_result();
-
-private:
-  Array                   m_arr;
-  req::vector<Variant>   m_value_arr;
-  MYSQL_BIND             *m_vars;
-  my_bool                *m_null;
-  unsigned long          *m_length;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-
 struct MySQLStmt : public SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(MySQLStmt);
 
   explicit MySQLStmt(MYSQL *mysql);
-  virtual ~MySQLStmt();
+  ~MySQLStmt() override;
 
   CLASSNAME_IS("mysql stmt")
 
@@ -410,8 +384,6 @@ struct MySQLStmt : public SweepableResourceData {
   Variant affected_rows();
   Variant attr_get(int64_t attr);
   Variant attr_set(int64_t attr, int64_t value);
-  Variant bind_param(const String& types, const Array& vars);
-  Variant bind_result(const Array& vars);
   Variant data_seek(int64_t offset);
   Variant get_errno();
   Variant get_error();
@@ -432,8 +404,6 @@ struct MySQLStmt : public SweepableResourceData {
 protected:
   MYSQL_STMT *m_stmt;
   bool m_prepared;
-  req::unique_ptr<MySQLStmtVariables> m_param_vars;
-  req::unique_ptr<MySQLStmtVariables> m_result_vars;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -451,23 +421,58 @@ enum MySQLFieldEntryType { NAME, TABLE, LEN, TYPE, FLAGS };
 #define PHP_MYSQL_FIELD_FLAGS 5
 
 Variant php_mysql_field_info(const Resource& result, int field, int entry_type);
-Variant php_mysql_do_connect_on_link(std::shared_ptr<MySQL> mySQL,
-                                     String server, String username,
-                                     String password, String database,
-                                     int client_flags, bool persistent,
-                                     bool async, int connect_timeout_ms,
-                                     int query_timeout_ms);
-Variant php_mysql_do_connect(const String& server, const String& username,
-                             const String& password, const String& database,
-                             int client_flags, bool persistent, bool async,
-                             int connect_timeout_ms, int query_timeout_ms);
+Variant php_mysql_do_connect_on_link(
+    std::shared_ptr<MySQL> mySQL,
+    String server,
+    String username,
+    String password,
+    String database,
+    int client_flags,
+    bool persistent,
+    bool async,
+    int connect_timeout_ms,
+    int query_timeout_ms,
+    const Array* conn_attrs = nullptr
+#ifdef ENABLE_ASYNC_MYSQL
+    , std::shared_ptr<facebook::common::mysql_client::SSLOptionsProviderBase>
+        ssl_opts = nullptr
+#endif
+);
+
+Variant php_mysql_do_connect(
+    const String& server,
+    const String& username,
+    const String& password,
+    const String& database,
+    int client_flags,
+    bool persistent,
+    bool async,
+    int connect_timeout_ms,
+    int query_timeout_ms,
+    const Array* conn_attrs = nullptr);
+
+Variant php_mysql_do_connect_with_ssl(
+    const String& server,
+    const String& username,
+    const String& password,
+    const String& database,
+    int client_flags,
+    int connect_timeout_ms,
+    int query_timeout_ms,
+    const Array* conn_attrs,
+    const Variant& sslContextProvider /* = null */);
 
 enum MySQLQueryReturn { FAIL = 0, OK = 1, OK_FETCH_RESULT = 2 };
-MySQLQueryReturn php_mysql_do_query(const String& query, const Variant& link_id,
-                                    bool async_mode);
+MySQLQueryReturn php_mysql_do_query(
+    const String& query,
+    const Variant& link_id,
+    bool async_mode);
 Variant php_mysql_get_result(const Variant& link_id, bool use_store);
-Variant php_mysql_do_query_and_get_result(const String& query, const Variant& link_id,
-                                          bool use_store, bool async_mode);
+Variant php_mysql_do_query_and_get_result(
+    const String& query,
+    const Variant& link_id,
+    bool use_store,
+    bool async_mode);
 
 #define PHP_MYSQL_ASSOC  1 << 0
 #define PHP_MYSQL_NUM    1 << 1

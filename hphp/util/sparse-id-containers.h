@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 #include <type_traits>
 #include <utility>
 
+#include <folly/CPortability.h>
 #include <folly/gen/String.h>
 
 #include "hphp/util/compilation-flags.h"
@@ -126,8 +127,10 @@ struct sparse_id_set {
   {
     // Note: the sparse part of m_mem is deliberately uninitialized, but we do
     // it for valgrind or asan builds.
-#if defined(FOLLY_SANITIZE_ADDRESS) || defined(VALGRIND)
-    std::memset(m_mem, 0, sizeof(T) * universe_size);
+#if FOLLY_SANITIZE || defined(VALGRIND)
+    if (m_mem) {
+      std::memset(m_mem, 0, sizeof(T) * universe_size);
+    }
 #endif
   }
   ~sparse_id_set() { if (m_universe_size) std::free(m_mem); }
@@ -426,8 +429,10 @@ struct sparse_id_map {
   {
     // Note: the sparse part of m_mem is deliberately uninitialized, but we do
     // it for valgrind or asan builds.
-#if defined(FOLLY_SANITIZE_ADDRESS) || defined(VALGRIND)
-    std::memset(m_mem, 0, sizeof(K) * universe_size);
+#if FOLLY_SANITIZE || defined(VALGRIND)
+    if (m_mem) {
+      std::memset(m_mem, 0, sizeof(K) * universe_size);
+    }
 #endif
   }
   ~sparse_id_map() {

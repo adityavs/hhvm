@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,9 +22,15 @@
 #include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/vm/native.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
 
+#include <boost/filesystem/operations.hpp>
+
 #include <memory>
+
+#include <folly/portability/Stdlib.h>
+#include <folly/portability/SysStat.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -46,8 +52,8 @@ req::ptr<MemFile> FileStreamWrapper::openFromCache(const String& filename,
 }
 
 req::ptr<File>
-FileStreamWrapper::open(const String& filename, const String& mode,
-                        int options, const req::ptr<StreamContext>& context) {
+FileStreamWrapper::open(const String& filename, const String& mode, int options,
+                        const req::ptr<StreamContext>& /*context*/) {
   String fname;
   if (StringUtil::IsFileUrl(filename)) {
     fname = StringUtil::DecodeFileUrl(filename);
@@ -65,7 +71,8 @@ FileStreamWrapper::open(const String& filename, const String& mode,
 
   if (options & File::USE_INCLUDE_PATH) {
     struct stat s;
-    String resolved_fname = resolveVmInclude(fname.get(), "", &s);
+    String resolved_fname = resolveVmInclude(fname.get(), "", &s,
+                                             Native::s_noNativeFuncs);
     if (!resolved_fname.isNull()) {
       fname = resolved_fname;
     }
@@ -92,6 +99,19 @@ req::ptr<Directory> FileStreamWrapper::opendir(const String& path) {
     return nullptr;
   }
   return dir;
+}
+
+int FileStreamWrapper::unlink(const String& path) {
+  int ret = ::unlink(File::TranslatePath(path).data());
+  if (ret != 0) {
+    raise_warning(
+      "%s(%s): %s",
+      __FUNCTION__,
+      path.c_str(),
+      folly::errnoStr(errno).c_str()
+    );
+  }
+  return ret;
 }
 
 int FileStreamWrapper::rename(const String& oldname, const String& newname) {
@@ -132,14 +152,14 @@ int FileStreamWrapper::mkdir_recursive(const String& path, int mode) {
   strncpy(dir, fullpath.data(), sizeof(dir));
 
   for (p = dir + 1; *p; p++) {
-    if (*p == '/') {
+    if (FileUtil::isDirSeparator(*p)) {
       *p = '\0';
       if (::access(dir, F_OK) < 0) {
         if (::mkdir(dir, mode) < 0) {
           return -1;
         }
       }
-      *p = '/';
+      *p = FileUtil::getDirSeparator();
     }
   }
 

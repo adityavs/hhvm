@@ -7,6 +7,7 @@ HHVM_DEFINE_EXTENSION("hash"
     hash_furc.cpp
     hash_gost.cpp
     hash_haval.cpp
+    hash_joaat.cpp
     hash_keccak.cpp
     hash_md.cpp
     hash_murmur.cpp
@@ -25,6 +26,7 @@ HHVM_DEFINE_EXTENSION("hash"
     hash_furc.h
     hash_gost.h
     hash_haval.h
+    hash_joaat.h
     hash_keccak.h
     hash_md.h
     hash_murmur.h
@@ -39,4 +41,6 @@ HHVM_DEFINE_EXTENSION("hash"
     php_hash_snefru_tables.h
     php_hash_tiger_tables.h
     php_hash_whirlpool_tables.h
+  SYSTEMLIB
+    ext_hash.php
 )

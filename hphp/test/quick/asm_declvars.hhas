@@ -1,13 +1,15 @@
+.hh_file 1;
 #
 # test declvars
 #
 
 .main {
-  FPushFuncD 1 "main"
+  NullUninit
+  NullUninit
+  NullUninit
   Int 12
-  FPassC 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "main"
+  PopC
   Null
   RetC
 }

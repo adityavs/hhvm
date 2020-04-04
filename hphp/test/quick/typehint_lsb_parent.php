@@ -1,4 +1,4 @@
-<?php
+<?hh
 trait T {
   public static function bar(parent $a1) { echo __CLASS__.
     " accepts param from subclass ".get_class($a1)."\n"; }
@@ -28,7 +28,7 @@ class E extends D {
   // public static function test(parent $a1)  { echo __CLASS__."\n"; }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   $a = new A;
   $b = new B;
   $c = new C;
@@ -36,6 +36,3 @@ function main() {
   C::test($b);
   E::test($c);
 }
-
-main();
-

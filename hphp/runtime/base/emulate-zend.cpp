@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,33 +16,22 @@
 #include "hphp/runtime/base/emulate-zend.h"
 #include "hphp/runtime/base/ini-setting.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include <vector>
 #include <string>
 #include <iostream>
 #include <sstream>
 
+#include <folly/portability/Fcntl.h>
+#include <folly/portability/Stdlib.h>
+#include <folly/portability/Unistd.h>
+
 namespace HPHP {
 
 int execute_program(int argc, char **argv);
-
-bool check_option(const char *option) {
-#ifndef _MSC_VER
-  // Parameters that can be directly passed through to hhvm.
-  static const char *passthru[] = {
-  };
-
-  for (int i = 0; i < sizeof(passthru) / sizeof(const char *); i++) {
-    if (strcmp(option, passthru[i]) == 0) return true;
-  }
-#endif
-  return false;
-}
 
 static int get_tempfile_if_not_exists(int ini_fd, char ini_path[]) {
   if (ini_fd == -1) {
@@ -75,12 +64,8 @@ int emulate_zend(int argc, char** argv) {
   const char* program = nullptr;
 
   int cnt = 1;
-  bool ignore_default_configs = false;
+  bool ignore_default_configs = ::getenv("HHVM_NO_DEFAULT_CONFIGS") != nullptr;
   while (cnt < argc) {
-    if (check_option(argv[cnt])) {
-      newargv.push_back(argv[cnt++]);
-      continue;
-    }
     if (strcmp(argv[cnt], "-a") == 0 ||
         strcmp(argv[cnt], "--interactive") == 0) {
       need_file = false;
@@ -107,11 +92,18 @@ int emulate_zend(int argc, char** argv) {
         newargv.push_back(argv[cnt++]);
         continue;
       }
-      assert(cnt + 1 < argc);
+      assertx(cnt + 1 < argc);
       program = argv[cnt + 1];
       need_file = true;
       cnt += 2;
       continue;
+    }
+    if (strcmp(argv[cnt], "-i") == 0 || strcmp(argv[cnt], "--info") == 0) {
+      // Pretend they did "-r 'phpinfo();'"
+      program = "phpinfo();";
+      need_file = true;
+      cnt = argc; // no need to check the rest of options and arguments
+      break;
     }
     if (strcmp(argv[cnt], "-w") == 0) {
       cnt++;
@@ -214,7 +206,7 @@ int emulate_zend(int argc, char** argv) {
       }
     } else {
       // -r omits the braces
-      write(tmp_fd, "<?\n", 3);
+      write(tmp_fd, "<?hh\n", 5);
       write(tmp_fd, program, strlen(program));
     }
     close(tmp_fd);

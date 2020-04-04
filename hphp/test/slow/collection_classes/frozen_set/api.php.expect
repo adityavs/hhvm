@@ -1,4 +1,3 @@
-
 empty...
 bool(false)
 bool(true)
@@ -13,7 +12,7 @@ int(2)
 int(3)
 
 values...
-object(HH\ImmVector)#4 (3) {
+object(HH\ImmVector) (3) {
   [0]=>
   int(1)
   [1]=>
@@ -21,7 +20,7 @@ object(HH\ImmVector)#4 (3) {
   [2]=>
   int(3)
 }
-object(HH\ImmVector)#4 (0) {
+object(HH\ImmVector) (0) {
 }
 
 lazy...
@@ -33,6 +32,34 @@ contains...
 bool(true)
 bool(false)
 bool(false)
+
+map...
+bool(true)
+----
+int(2)
+int(4)
+int(6)
+----
+
+mapWithKey...
+bool(true)
+----
+int(1)
+int(4)
+int(9)
+----
+
+filter...
+bool(true)
+----
+int(2)
+----
+
+filterWithKey...
+bool(true)
+----
+int(3)
+----
 
 toArray...
 array(3) {
@@ -65,7 +92,7 @@ array(3) {
 }
 
 toVector...
-object(HH\Vector)#6 (3) {
+object(HH\Vector) (3) {
   [0]=>
   int(1)
   [1]=>
@@ -75,7 +102,7 @@ object(HH\Vector)#6 (3) {
 }
 
 toImmVector...
-object(HH\ImmVector)#6 (3) {
+object(HH\ImmVector) (3) {
   [0]=>
   int(1)
   [1]=>
@@ -85,7 +112,7 @@ object(HH\ImmVector)#6 (3) {
 }
 
 toSet...
-object(HH\Set)#6 (3) {
+object(HH\Set) (3) {
   int(1)
   int(2)
   int(3)

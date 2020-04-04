@@ -1,8 +1,8 @@
-<?php
+<?hh
 /* Prototype  : string mb_strstr(string haystack, string needle[, bool part[, string encoding]])
- * Description: Finds first occurrence of a string within another 
+ * Description: Finds first occurrence of a string within another
  * Source code: ext/mbstring/mbstring.c
- * Alias to functions: 
+ * Alias to functions:
  */
 
 echo "*** Testing mb_strstr() : usage variation ***\n";
@@ -14,7 +14,7 @@ function test_error_handler($err_no, $err_msg, $filename, $linenum, $vars) {
 		echo "Error: $err_no - $err_msg, $filename($linenum)\n";
 	}
 }
-set_error_handler('test_error_handler');
+set_error_handler(fun('test_error_handler'));
 
 // Initialise function arguments not being substituted (if any)
 $haystack = b'string_val';
@@ -46,11 +46,11 @@ EOT;
 $fp = fopen(__FILE__, "r");
 
 // add arrays
-$index_array = array (1, 2, 3);
-$assoc_array = array ('one' => 1, 'two' => 2);
+$index_array = varray [1, 2, 3];
+$assoc_array = darray ['one' => 1, 'two' => 2];
 
 //array of values to iterate over
-$inputs = array(
+$inputs = darray[
 
       // int data
       'int 0' => 0,
@@ -66,10 +66,10 @@ $inputs = array(
       'float .5' => .5,
 
       // array data
-      'empty array' => array(),
+      'empty array' => varray[],
       'int indexed array' => $index_array,
       'associative array' => $assoc_array,
-      'nested arrays' => array('foo', $index_array, $assoc_array),
+      'nested arrays' => varray['foo', $index_array, $assoc_array],
 
       // null data
       'uppercase NULL' => NULL,
@@ -100,25 +100,25 @@ $inputs = array(
 
       // unset data
       'unset var' => @$unset_var,
-      
+
       // resource variable
-      'resource' => $fp      
-);
+      'resource' => $fp
+];
 
 // loop through each element of the array for part
 
 foreach($inputs as $key =>$value) {
       echo "\n--$key--\n";
-      $res = mb_strstr($haystack, $needle, $value, $encoding);
+			$res = false;
+      try { $res = mb_strstr($haystack, $needle, $value, $encoding); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
       if ($res === false) {
          var_dump($res);
       }
       else {
          var_dump(bin2hex($res));
-      }      
+      }
 };
 
 fclose($fp);
 
-?>
-===DONE===
+echo "===DONE===\n";

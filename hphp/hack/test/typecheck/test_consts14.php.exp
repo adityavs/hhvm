@@ -1,10 +1,9 @@
 File "test_consts14.php", line 15, characters 7-7:
-This object is of type B (Typing[4110])
+Class B does not correctly implement all required members  (Typing[4340])
 File "test_consts14.php", line 15, characters 17-17:
-It is incompatible with this object of type A
-because some declarations are incompatible.
+Some members are incompatible with those declared in type A
 Read the following to see why:
 File "test_consts14.php", line 4, characters 9-11:
-This is an int
+Expected int
 File "test_consts14.php", line 10, characters 9-14:
-It is incompatible with a string
+But got string

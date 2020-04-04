@@ -1,9 +1,10 @@
-<?php
+<?hh
+
 
 error_reporting(-1);
 
 $foo = new stdclass();
-$foo->someprop = array('baz' => 'quux');
+$foo->someprop = darray['baz' => 'quux'];
 
 $bar = 'someprop';
 

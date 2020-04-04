@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,6 +29,8 @@
 #include <folly/stats/MultiLevelTimeSeries.h>
 #include <folly/Optional.h>
 
+#include "hphp/util/assertions.h"
+
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -40,7 +42,7 @@ namespace HPHP {
  *
  * ServiceData provides a globally accessible entry point to all the internal
  * statistics. A 'statistic counter' of different types could be created by
- * calling createCouter() createTimeseries() or createHistogram(). The caller
+ * calling createCouter() createTimeSeries() or createHistogram(). The caller
  * can then add values at different time points to the statistic counters. The
  * statistic can then be retrieved and reported via the exportAll() call on
  * ServiceData.
@@ -60,12 +62,12 @@ namespace HPHP {
  * Example Usage:
  * ==============
  * // create a flat counter named foo.
- * auto counter = ServiceData::createCouter("foo");
+ * auto counter = ServiceData::createCounter("foo");
  * counter->increment();
  *
  * // create timeseries data named bar with default setting (avg value for the
  * // last 1 minute, 10 minute, hour and all time).
- * auto timeseries = ServiceData::createTimeseries("bar");
+ * auto timeseries = ServiceData::createTimeSeries("bar");
  * timeseries->addValue(3);
  *
  * // create a histogram with 10 buckets, min of 1, max of 100 and export the
@@ -94,13 +96,13 @@ namespace HPHP {
  */
 namespace ServiceData {
 
-class ExportedCounter;
-class ExportedHistogram;
-class ExportedTimeSeries;
+struct ExportedCounter;
+struct ExportedHistogram;
+struct ExportedTimeSeries;
 
 namespace detail {
 template <class ClassWithPrivateDestructor>
-class FriendDeleter;
+struct FriendDeleter;
 };
 
 enum class StatsType { AVG, SUM, RATE, COUNT, PCT };
@@ -110,6 +112,62 @@ enum class StatsType { AVG, SUM, RATE, COUNT, PCT };
  * already been created.
  */
 ExportedCounter* createCounter(const std::string& name);
+
+/*
+ * Callback-based counters
+ *
+ * Some counters have values that are updated much more frequently than data is
+ * requested from ServiceData, or there may not be a good location in the code
+ * to periodically update the value. For these cases, a callback-based counter
+ * may be used instead.
+ *
+ * registerCounterCallback() returns a unique handle that may be passed to
+ * deregisterCounterCallback() if the callback should be deregistered.
+ *
+ * The CounterCallback struct is provided as a convenience wrapper to manage
+ * the handle. The callback may be provided to its constructor, or to the
+ * init() function, if the callback isn't safe to call at CounterCallback's
+ * construction. Similarly, deinit() may be be called if the callback should be
+ * deregistered before CounterCallback's destruction.
+ *
+ * Once registered, callbacks must be safe to call at any time, from any
+ * thread, and may even be called before registerCounterCallback()
+ * returns. Callbacks are passed a reference to the std::map<std::string,
+ * int64_t> being populated, so one callback can add many counters (callbacks
+ * can also remove or modify existing counters, but this is discouraged).
+ */
+using CounterFunc = std::function<void(std::map<std::string, int64_t>&)>;
+using CounterHandle = uint32_t;
+
+CounterHandle registerCounterCallback(CounterFunc func);
+void deregisterCounterCallback(CounterHandle key);
+
+struct CounterCallback {
+  CounterCallback() = default;
+
+  explicit CounterCallback(CounterFunc func) {
+    init(std::move(func));
+  }
+
+  ~CounterCallback() {
+    deinit();
+  }
+
+  void init(CounterFunc func) {
+    assertx(!m_key);
+    m_key = registerCounterCallback(std::move(func));
+  }
+
+  void deinit() {
+    if (m_key) {
+      deregisterCounterCallback(*m_key);
+      m_key = folly::none;
+    }
+  }
+
+private:
+  folly::Optional<CounterHandle> m_key;
+};
 
 /*
  * Create a timeseries counter named 'name'. Return an existing one if it
@@ -135,7 +193,7 @@ ExportedCounter* createCounter(const std::string& name);
  * 'numBuckets' specifies how many buckets to keep at each level. More buckets
  * will produce more precise data at the expense of memory.
  */
-ExportedTimeSeries* createTimeseries(
+ExportedTimeSeries* createTimeSeries(
   const std::string& name,
   const std::vector<StatsType>& exportTypes =
   std::vector<StatsType>{ StatsType::AVG },
@@ -173,11 +231,10 @@ void exportAll(std::map<std::string, int64_t>& statsMap);
 /*
  * Export a specific counter by key name.
  */
-folly::Optional<int64_t> exportCounterByKey(std::string& key);
+folly::Optional<int64_t> exportCounterByKey(const std::string& key);
 
 // Interface for a flat counter. All methods are thread safe.
-class ExportedCounter {
- public:
+struct ExportedCounter {
   ExportedCounter() : m_value(0) {}
   void increment() { m_value.fetch_add(1, std::memory_order_relaxed); }
   void decrement() { m_value.fetch_sub(1, std::memory_order_relaxed); }
@@ -190,15 +247,14 @@ class ExportedCounter {
   int64_t getValue() const { return m_value.load(std::memory_order_relaxed); }
 
  private:
-  friend class detail::FriendDeleter<ExportedCounter>;
+  friend struct detail::FriendDeleter<ExportedCounter>;
   ~ExportedCounter() {}
 
   std::atomic_int_fast64_t m_value;
 };
 
 // Interface for timeseries data. All methods are thread safe.
-class ExportedTimeSeries {
- public:
+struct ExportedTimeSeries {
   ExportedTimeSeries(int numBuckets,
                      const std::vector<std::chrono::seconds>& durations,
                      const std::vector<StatsType>& exportTypes);
@@ -208,12 +264,13 @@ class ExportedTimeSeries {
   void addValueAggregated(int64_t sum, int64_t nsamples);
 
   int64_t getSum();
+  int64_t getRateByDuration(std::chrono::seconds duration);
 
   void exportAll(const std::string& prefix,
                  std::map<std::string, int64_t>& statsMap);
 
  private:
-  friend class detail::FriendDeleter<ExportedTimeSeries>;
+  friend struct detail::FriendDeleter<ExportedTimeSeries>;
   ~ExportedTimeSeries() {}
 
   folly::Synchronized<folly::MultiLevelTimeSeries<int64_t>,
@@ -222,8 +279,7 @@ class ExportedTimeSeries {
 };
 
 // Interface for histogram data. All methods are thread safe.
-class ExportedHistogram {
- public:
+struct ExportedHistogram {
   ExportedHistogram(int64_t bucketSize, int64_t min, int64_t max,
                     const std::vector<double>& exportPercentiles);
   void addValue(int64_t value);
@@ -232,7 +288,7 @@ class ExportedHistogram {
                  std::map<std::string, int64_t>& statsMap);
 
  private:
-  friend class detail::FriendDeleter<ExportedHistogram>;
+  friend struct detail::FriendDeleter<ExportedHistogram>;
   ~ExportedHistogram() {}
 
   folly::Synchronized<folly::Histogram<int64_t>, folly::RWSpinLock> m_histogram;

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -23,14 +23,25 @@
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-// class WaitHandle
+// class Awaitable
+
+void HHVM_STATIC_METHOD(Awaitable, setOnIoWaitEnterCallback,
+                        const Variant& callback);
+void HHVM_STATIC_METHOD(Awaitable, setOnIoWaitExitCallback,
+                        const Variant& callback);
+void HHVM_STATIC_METHOD(Awaitable, setOnJoinCallback,
+                        const Variant& callback);
+bool HHVM_METHOD(Awaitable, isFinished);
+bool HHVM_METHOD(Awaitable, isSucceeded);
+bool HHVM_METHOD(Awaitable, isFailed);
+String HHVM_METHOD(Awaitable, getName);
 
 /**
  * A wait handle is an object that describes operation that is potentially
  * asynchronous. A WaitHandle class is a base class of all such objects. There
  * are multiple types of wait handles, this is their hierarchy:
  *
- * WaitHandle                      - abstract wait handle
+ * Awaitable                       - abstract wait handle
  *  StaticWaitHandle               - statically finished wait handle
  *  WaitableWaitHandle             - wait handle that can be waited for
  *   ResumableWaitHandle           - wait handle that can resume PHP execution
@@ -43,100 +54,100 @@ namespace HPHP {
  *   SleepWaitHandle               - wait handle that finishes after a timeout
  *   ExternalThreadEventWaitHandle - thread-powered asynchronous execution
  *
- *   // DEPRECATED
- *   GenArrayWaitHandle            - wait handle representing an array of WHs
- *   GenMapWaitHandle              - wait handle representing an Map of WHs
- *   GenVectorWaitHandle           - wait handle representing an Vector of WHs
- *
  * A wait handle can be either synchronously joined (waited for the operation
  * to finish) or passed in various contexts as a dependency and waited for
  * asynchronously (such as using await mechanism of async function or
- * passed as an array member of GenArrayWaitHandle).
+ * passed to AwaitAllWaitHandle).
  */
 
-class c_AsyncFunctionWaitHandle;
-class c_AsyncGeneratorWaitHandle;
-class c_AwaitAllWaitHandle;
-class c_GenArrayWaitHandle;
-class c_GenMapWaitHandle;
-class c_GenVectorWaitHandle;
-class c_ConditionWaitHandle;
-class c_RescheduleWaitHandle;
-class c_SleepWaitHandle;
-class c_ExternalThreadEventWaitHandle;
-class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle|
-                                               ObjectData::NoDestructor> {
- public:
-  DECLARE_CLASS_NO_SWEEP(WaitHandle)
+struct c_AsyncFunctionWaitHandle;
+struct c_AsyncGeneratorWaitHandle;
+struct c_AwaitAllWaitHandle;
+struct c_ConditionWaitHandle;
+struct c_RescheduleWaitHandle;
+struct c_SleepWaitHandle;
+struct c_ExternalThreadEventWaitHandle;
+
+#define WAITHANDLE_CLASSOF(cn) \
+  static Class* classof() { \
+    static Class* cls = Unit::lookupClass(makeStaticString("HH\\" #cn)); \
+    return cls; \
+  }
+
+#define WAITHANDLE_DTOR(cn) \
+  static void instanceDtor(ObjectData* obj, const Class*) { \
+    auto wh = wait_handle<c_##cn>(obj); \
+    wh->~c_##cn(); \
+    tl_heap->objFree(obj, sizeof(c_##cn)); \
+  }
+
+template<class T>
+T* wait_handle(const ObjectData* obj) {
+  assertx(obj->instanceof(T::classof()));
+  assertx(obj->isWaitHandle());
+  return static_cast<T*>(const_cast<ObjectData*>(obj));
+}
+
+struct c_Awaitable : ObjectData {
+  WAITHANDLE_CLASSOF(Awaitable);
+  WAITHANDLE_DTOR(Awaitable);
 
   enum class Kind : uint8_t {
     Static,
     AsyncFunction,
     AsyncGenerator,
     AwaitAll,
-    GenArray,
-    GenMap,
-    GenVector,
     Condition,
     Reschedule,
     Sleep,
     ExternalThreadEvent,
   };
 
-  explicit c_WaitHandle(Class* cls = c_WaitHandle::classof(),
-                        HeaderKind kind = HeaderKind::Object) noexcept
-    : ExtObjectDataFlags(cls, kind, NoInit{}) {}
-  ~c_WaitHandle() {}
+  explicit c_Awaitable(Class* cls, HeaderKind kind,
+                        type_scan::Index tyindex) noexcept
+    : ObjectData(cls, NoInit{}, ObjectData::NoAttrs, kind),
+      m_tyindex(tyindex)
+  {
+    assertx(type_scan::isKnownType(tyindex));
+  }
 
-  void t___construct();
-  static void ti_setoniowaitentercallback(const Variant& callback);
-  static void ti_setoniowaitexitcallback(const Variant& callback);
-  static void ti_setonjoincallback(const Variant& callback);
-  Object t_getwaithandle();
-  void t_import();
-  Variant t_join();
-  Variant t_result();
-  bool t_isfinished();
-  bool t_issucceeded();
-  bool t_isfailed();
-  int64_t t_getid();
-  String t_getname();
+  ~c_Awaitable()
+  {}
 
  public:
   static constexpr ptrdiff_t stateOff() {
-    return offsetof(c_WaitHandle, m_kind_state);
+    return offsetof(c_Awaitable, m_kind_state);
   }
   static constexpr ptrdiff_t resultOff() {
-    return offsetof(c_WaitHandle, m_resultOrException);
+    return offsetof(c_Awaitable, m_resultOrException);
   }
 
-  static c_WaitHandle* fromCell(const Cell* cell) {
+  static c_Awaitable* fromTV(TypedValue cell) {
     return (
-        cell->m_type == KindOfObject &&
-        cell->m_data.pobj->getAttribute(ObjectData::IsWaitHandle)
-      ) ? static_cast<c_WaitHandle*>(cell->m_data.pobj) : nullptr;
+        cell.m_type == KindOfObject && cell.m_data.pobj->isWaitHandle()
+      ) ? static_cast<c_Awaitable*>(cell.m_data.pobj) : nullptr;
   }
-  static c_WaitHandle* fromCellAssert(const Cell* cell) {
-    assert(cell->m_type == KindOfObject);
-    assert(cell->m_data.pobj->getAttribute(ObjectData::IsWaitHandle));
-    return static_cast<c_WaitHandle*>(cell->m_data.pobj);
+  static c_Awaitable* fromTVAssert(TypedValue cell) {
+    assertx(cell.m_type == KindOfObject);
+    assertx(cell.m_data.pobj->isWaitHandle());
+    return static_cast<c_Awaitable*>(cell.m_data.pobj);
   }
   bool isFinished() const { return getState() <= STATE_FAILED; }
   bool isSucceeded() const { return getState() == STATE_SUCCEEDED; }
   bool isFailed() const { return getState() == STATE_FAILED; }
-  Cell getResult() const {
-    assert(isSucceeded());
+  TypedValue getResult() const {
+    assertx(isSucceeded());
     return m_resultOrException;
   }
   ObjectData* getException() const {
-    assert(isFailed());
+    assertx(isFailed());
     return m_resultOrException.m_data.pobj;
   }
 
   Kind getKind() const { return static_cast<Kind>(m_kind_state >> 4); }
   uint8_t getState() const { return m_kind_state & 0x0F; }
   static uint8_t toKindState(Kind kind, uint8_t state) {
-    assert((uint8_t)kind < 0x10 && state < 0x10);
+    assertx((uint8_t)kind < 0x10 && state < 0x10);
     return ((uint8_t)kind << 4) | state;
   }
   void setKindState(Kind kind, uint8_t state) {
@@ -149,9 +160,6 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle|
   c_AsyncFunctionWaitHandle* asAsyncFunction();
   c_AsyncGeneratorWaitHandle* asAsyncGenerator();
   c_AwaitAllWaitHandle* asAwaitAll();
-  c_GenArrayWaitHandle* asGenArray();
-  c_GenMapWaitHandle* asGenMap();
-  c_GenVectorWaitHandle* asGenVector();
   c_ConditionWaitHandle* asCondition();
   c_RescheduleWaitHandle* asReschedule();
   c_ResumableWaitHandle* asResumable();
@@ -160,37 +168,29 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle|
 
   // The code in the TC will depend on the values of these constants.
   // See emitAwait().
-  static const int8_t STATE_SUCCEEDED = 0;
-  static const int8_t STATE_FAILED    = 1;
+  static const int8_t STATE_SUCCEEDED = 0; // completed with result
+  static const int8_t STATE_FAILED    = 1; // completed with exception
+
+  void scan(type_scan::Scanner&) const;
 
  private: // layout, ignoring ObjectData fields.
-  // 0                           8             9             10 12
-  // [m_parentChain             ][m_contextIdx][m_kind_state][ ][m_ctxVecIndex]
-  // [m_resultOrException.m_data][m_type]                       [m_aux]
+  // 0                         8           9           10       12
+  // [parentChain             ][contextIdx][kind_state][tyindex][ctxVecIndex]
+  // [resultOrException.m_data][m_type]                         [aux]
   static void checkLayout() {
-    constexpr auto data = offsetof(c_WaitHandle, m_resultOrException);
+    constexpr auto data = offsetof(c_Awaitable, m_resultOrException);
     constexpr auto type = data + offsetof(TypedValue, m_type);
     constexpr auto aux  = data + offsetof(TypedValue, m_aux);
-    static_assert(offsetof(c_WaitHandle, m_parentChain) == data, "");
-    static_assert(offsetof(c_WaitHandle, m_contextIdx) == type, "");
-    static_assert(offsetof(c_WaitHandle, m_kind_state) < aux, "");
-    static_assert(offsetof(c_WaitHandle, m_ctxVecIndex) == aux, "");
-  }
-
- public:
-  template<class F> void scan(F& mark) const {
-    if (isFinished()) {
-      mark(m_resultOrException);
-    } else {
-      m_parentChain.scan(mark);
-    }
-    // TODO: t7925088 switch on kind and handle subclasses
+    static_assert(offsetof(c_Awaitable, m_parentChain) == data, "");
+    static_assert(offsetof(c_Awaitable, m_contextIdx) == type, "");
+    static_assert(offsetof(c_Awaitable, m_kind_state) < aux, "");
+    static_assert(offsetof(c_Awaitable, m_ctxVecIndex) == aux, "");
   }
 
  protected:
   union {
     // STATE_SUCCEEDED || STATE_FAILED
-    Cell m_resultOrException;
+    TypedValue m_resultOrException;
 
     // !STATE_SUCCEEDED && !STATE_FAILED
     struct {
@@ -200,8 +200,11 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle|
       // WaitableWaitHandle: !STATE_SUCCEEDED && !STATE_FAILED
       context_idx_t m_contextIdx;
 
-      // valid in any WaitHandle state. doesn't overlap Cell fields.
+      // valid in any WaitHandle state. doesn't overlap TypedValue fields.
       uint8_t m_kind_state;
+
+      // type index of concrete waithandle for gc-scanning
+      type_scan::Index m_tyindex;
 
       union {
         // ExternalThreadEventWaitHandle: STATE_WAITING
@@ -210,7 +213,20 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle|
       };
     };
   };
+
+  TYPE_SCAN_CUSTOM() {
+    if (isFinished()) {
+      scanner.scan(m_resultOrException);
+    } else {
+      scanner.scan(m_parentChain);
+    }
+  }
 };
+
+template<class T>
+T* wait_handle(TypedValue cell) {
+  return wait_handle<T>(c_Awaitable::fromTVAssert(cell));
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }

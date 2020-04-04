@@ -9,9 +9,17 @@ DateTime Object
 
 =function () { return 4; };
 "Closure%s"
+p new DateTime('@'.time(), new DateTimeZone('UTC'))
+DateTime Object
+(
+    [date] => "%s"
+    [timezone_type] => 1
+    [timezone] => "+00:00"
+)
+
 c
 Break on line 2 of %s/print-datetime.php
-   1 <?php
+   1 <?hh
    2*hphpd_break();
    3 (END)
 

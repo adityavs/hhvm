@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 interface A {
   const FOO = 'FOO';
@@ -7,3 +7,4 @@ interface A {
 class B implements A {
   const FOO = 'BAR';
 }
+

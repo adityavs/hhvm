@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -20,28 +20,14 @@
 #include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/base/dummy-resource.h"
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/collections/ext_collections-vector.h"
+#include "hphp/runtime/ext/collections/ext_collections-map.h"
 
 namespace HPHP {
 
 TEST(Variant, Conversions) {
   Variant v("123");
   EXPECT_TRUE(v.toInt32() == 123);
-}
-
-TEST(Variant, References) {
-  {
-    Variant v1("original");
-    Variant v2 = v1;
-    v2 = String("changed");
-    EXPECT_TRUE(equal(v1, String("original")));
-  }
-  {
-    Variant v1("original");
-    Variant v2(Variant::StrongBind{}, v1);
-    v2 = String("changed");
-    EXPECT_TRUE(equal(v1, String("changed")));
-  }
 }
 
 TEST(Variant, Refcounts) {
@@ -88,21 +74,21 @@ TEST(Variant, Casts) {
     EXPECT_EQ(cast<ResourceData>(var), dummy);
     try {
       cast<File>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast<c_Map>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast<DummyResource>(empty);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // cast_or_null tests
@@ -112,15 +98,15 @@ TEST(Variant, Casts) {
 
     try {
       cast_or_null<File>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast_or_null<c_Map>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast tests
@@ -131,9 +117,9 @@ TEST(Variant, Casts) {
     EXPECT_EQ(dyn_cast<c_Map>(var), nullptr);
     try {
       dyn_cast<DummyResource>(Variant());
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast_or_null
@@ -165,21 +151,21 @@ TEST(Variant, Casts) {
     EXPECT_EQ(cast<ObjectData>(var), dummy);
     try {
       cast<c_Map>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast<c_Vector>(empty);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast<File>(empty);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // cast_or_null tests
@@ -189,15 +175,15 @@ TEST(Variant, Casts) {
 
     try {
       cast_or_null<File>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
     try {
       cast_or_null<c_Map>(var);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast tests
@@ -208,9 +194,9 @@ TEST(Variant, Casts) {
     EXPECT_EQ(dyn_cast<File>(var), nullptr);
     try {
       dyn_cast<c_Vector>(empty);
-      EXPECT_FALSE(true);
+      ADD_FAILURE();
     } catch(...) {
-      EXPECT_TRUE(true);
+      SUCCEED();
     }
 
     // dyn_cast_or_null
@@ -243,37 +229,6 @@ TEST(Variant, MoveCasts) {
     auto res3 = dyn_cast<c_Map>(
       Variant(req::make<c_Vector>()));
     EXPECT_EQ(res3, nullptr);
-  }
-  {
-    auto dummy = req::make<DummyResource>();
-    dummy->incRefCount(); // the RefData constructor steals it's input.
-    auto ref = req::ptr<RefData>::attach(
-      RefData::Make(*Variant(dummy).asTypedValue()));
-    Variant dummyRef(ref);
-    EXPECT_FALSE(ref->hasExactlyOneRef());
-    auto res = cast<DummyResource>(dummyRef);
-    EXPECT_EQ(res, dummy);
-  }
-  {
-    auto dummy = req::make<DummyResource>();
-    dummy->incRefCount(); // the RefData constructor steals it's input.
-    Variant dummyRef(
-      req::ptr<RefData>::attach(RefData::Make(*Variant(dummy).asTypedValue())));
-    //EXPECT_TRUE(dummyRef.getRefData()->hasExactlyOneRef());
-    auto res = cast<DummyResource>(std::move(dummyRef));
-    EXPECT_EQ(res, dummy);
-  }
-  {
-    auto dummy = req::make<DummyResource>();
-    dummy->incRefCount(); // the RefData constructor steals it's input.
-    auto ref = req::ptr<RefData>::attach(
-      RefData::Make(*Variant(dummy).asTypedValue()));
-    Variant dummyRef(ref.get());
-    EXPECT_FALSE(ref->hasExactlyOneRef());
-    auto res = cast<DummyResource>(std::move(dummyRef));
-    EXPECT_EQ(res, dummy);
-    EXPECT_TRUE(dummyRef.isNull());
-    EXPECT_TRUE(dummy->hasMultipleRefs());
   }
 }
 

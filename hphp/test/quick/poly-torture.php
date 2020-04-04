@@ -1,4 +1,4 @@
-<?
+<?hh
 
 trait T1 {
   function dubiousArgs($a, $b, $c, $d, $e, $f, $g, $h, $i) {
@@ -42,17 +42,23 @@ class C {
   }
 }
 
+abstract final class PrandobjStatics {
+  public static $state = 0;
+  public static $names = varray['A', 'B', 'C'];
+}
+
 function pRandObj() {
-  static $state = 0;
-  static $names = array('A', 'B', 'C');
-  $name = $names[($state++ * 17) % 3];
+  $name = PrandobjStatics::$names[(PrandobjStatics::$state++ * 17) % 3];
   echo "    randObj: $name\n";
   return new $name();
 }
 
+abstract final class RandarrStatics {
+  public static $state = 0;
+}
+
 function randArr() {
-  static $state = 0;
-  return range(0, ($state++ * 17) % 128);
+  return range(0, (RandarrStatics::$state++ * 17) % 128);
 }
 
 class MagicBox {
@@ -62,12 +68,11 @@ class MagicBox {
   }
   function __call($nm, $arr) {
     echo "--";
-    call_user_func_array(array($this->inner, $nm), $arr);
+    call_user_func_array(varray[$this->inner, $nm], $arr);
   }
 }
 
-function main() {
-  $a = array();
+<<__EntryPoint>> function main(): void {
   for ($i = 0; $i < 5; $i++) {
     $m = new MagicBox(pRandObj());
     if ($i % 3 == 0) {
@@ -78,9 +83,7 @@ function main() {
       pRandObj()->dubiousArgs($i, $i,$i, $i,$i, $i,$i, $i,$i, $i,$i, $i,$i,
       $i,$i, $i,$i, $i,$i, $i,$i, $i,$i, $i,$i, $i,$i, $i,$i, $i);
       $m->$s();
-      call_user_func_array(array($m, 'noSuchMethodBoyeee'), randArr());
+      call_user_func_array(varray[$m, 'noSuchMethodBoyeee'], randArr());
     } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
   }
 }
-
-main();

@@ -1,6 +1,6 @@
-<?php
-
-$list = array (
+<?hh
+<<__EntryPoint>> function main(): void {
+$list = darray [
   0 => 'aaa,bbb',
   1 => 'aaa,"bbb"',
   2 => '"aaa","bbb"',
@@ -21,7 +21,7 @@ $list = array (
   17 => 'aaa"\\"a","bbb"',
   18 => '"\\"","aaa"',
   19 => '"\\""",aaa',
-);
+];
 
 $file = dirname(__FILE__) . 'fputcsv.csv';
 @unlink($file);
@@ -33,14 +33,14 @@ foreach ($list as $v) {
 fclose($fp);
 
 $res = file($file);
-foreach($res as &$val)
+foreach($res as $key => $val)
 {
-	$val = substr($val, 0, -1);
+	$res[$key] = substr($val, 0, -1);
 }
 echo '$list = ';var_export($res);echo ";\n";
 
 $fp = fopen($file, "r");
-$res = array();
+$res = varray[];
 while($l=fgetcsv($fp))
 {
 	$res[] = join(',',$l);
@@ -51,6 +51,5 @@ echo '$list = ';var_export($res);echo ";\n";
 
 @unlink($file);
 
-?>
-===DONE===
-<?php exit(0); ?>
+echo "===DONE===\n";
+}

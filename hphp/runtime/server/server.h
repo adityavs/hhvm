@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,11 +24,10 @@
 #include <memory>
 #include <string>
 
-#include <boost/noncopyable.hpp>
-
 #include "hphp/runtime/server/takeover-agent.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/util/exception.h"
+#include "hphp/util/health-monitor-types.h"
 #include "hphp/util/lock.h"
 
 /**
@@ -36,11 +35,10 @@
  *     their specific requests, we really want to minimize writing an HTTP
  *     server to something like this,
  *
- *     class MyRequestHandler : public RequestHandler {
- *       public:
- *         virtual void handleRequest(Transport *transport) {
- *           // ...
- *         }
+ *     struct MyRequestHandler : RequestHandler {
+ *       virtual void handleRequest(Transport *transport) {
+ *         // ...
+ *       }
  *     };
  *
  *     Then, run a server like this,
@@ -58,11 +56,11 @@
  *     server, derive a new class from Server just like LibEventServer
  *     does.
  *
- *     class MyTransport : public Transport {
+ *     struct MyTransport : Transport {
  *       // implements transport-related functions
  *     };
  *
- *     class MyServer : public Server {
+ *     struct MyServer : Server {
  *       // implements how to start/stop a server
  *     };
  *
@@ -86,16 +84,15 @@ using ServerFactoryPtr = std::shared_ptr<ServerFactory>;
  * Note that each request handler may be invoked multiple times for different
  * requests.
  */
-class RequestHandler {
-public:
+struct RequestHandler {
   explicit RequestHandler(int timeout) : m_timeout(timeout) {}
   virtual ~RequestHandler() {}
 
   /**
    * Called before and after request-handling work.
    */
-  virtual void setupRequest(Transport* transport) {}
-  virtual void teardownRequest(Transport* transport) noexcept {}
+  virtual void setupRequest(Transport* /*transport*/) {}
+  virtual void teardownRequest(Transport* /*transport*/) noexcept {}
 
   /**
    * Sub-class handles a request by implementing this function.
@@ -121,7 +118,7 @@ public:
   /**
    * Write an entry to the handler's access log.
    */
-  virtual void logToAccessLog(Transport* transport) {}
+  virtual void logToAccessLog(Transport* /*transport*/) {}
 
   int getDefaultTimeout() const { return m_timeout; }
 
@@ -129,15 +126,14 @@ private:
   int m_timeout;
 };
 
-typedef std::function<std::unique_ptr<RequestHandler>()> RequestHandlerFactory;
-typedef std::function<bool(const std::string&)> URLChecker;
+using RequestHandlerFactory = std::function<std::unique_ptr<RequestHandler>()>;
+using URLChecker = std::function<bool(const std::string&)>;
 
 /**
  * Base class of an HTTP server. Defining minimal interface an HTTP server
  * needs to implement.
  */
-class Server {
-public:
+struct Server : IHostHealthObserver {
   enum class RunStatus {
     NOT_YET_STARTED = 0,
     RUNNING,
@@ -157,16 +153,12 @@ public:
   static void InstallStopSignalHandlers(ServerPtr server);
 
 public:
-  class ServerEventListener {
-   public:
+  struct ServerEventListener {
     virtual ~ServerEventListener() {}
-    virtual void serverStopped(Server* server) {}
+    virtual void serverStopped(Server* /*server*/) {}
   };
 
-  /**
-   * Constructor.
-   */
-  Server(const std::string &address, int port, int threadCount);
+  Server(const std::string &address, int port);
 
   /**
    * Set the RequestHandlerFactory that this server will use.
@@ -214,32 +206,37 @@ public:
    *
    * This is a no-op for servers that do not support socket takeover.
    */
-  virtual void addTakeoverListener(TakeoverListener* listener) {}
-  virtual void removeTakeoverListener(TakeoverListener* listener) {}
+  virtual void addTakeoverListener(TakeoverListener* /*listener*/) {}
+  virtual void removeTakeoverListener(TakeoverListener* /*listener*/) {}
 
   /**
    * Add additional worker threads
    */
-  virtual void addWorkers(int numWorkers) = 0;
+  virtual void saturateWorkers() = 0;
 
   /**
    * Informational.
    */
   std::string getAddress() const { return m_address;}
   int getPort() const { return m_port;}
-  int getThreadCount() const { return m_threadCount;}
 
-  RunStatus getStatus() const {
-    return m_status;
+  RunStatus getStatus() const { return m_status;}
+  void setStatus(RunStatus status) { m_status = status;}
+  /**
+   * IHostHealthObserver interface.  Note that m_status doesn't
+   * contain server health information.
+   */
+  void notifyNewStatus(HealthLevel newLevel) override {
+    m_healthLevel = newLevel;
   }
-  void setStatus(RunStatus status) {
-    m_status = status;
+  HealthLevel getHealthLevel() override {
+    return m_healthLevel;
   }
 
   /**
    * Destructor.
    */
-  virtual ~Server() {}
+  ~Server() override {}
 
   /**
    * Start this web server. Note this is a non-blocking call.
@@ -260,9 +257,20 @@ public:
   virtual void stop() = 0;
 
   /**
+   * How many threads can be available for handling requests.
+   */
+  virtual size_t getMaxThreadCount() = 0;
+
+  /**
    * How many threads are actively working on handling requests.
    */
   virtual int getActiveWorker() = 0;
+
+  /**
+   * Update the maximum number of threads allowed to handle requests at a
+   * time.
+   */
+  virtual void updateMaxActiveWorkers(int) = 0;
 
   /**
    * How many jobs are queued waiting to be handled.
@@ -291,54 +299,77 @@ public:
    */
   virtual bool enableSSL(int port) = 0;
 
+  /**
+   * To enable SSL in addition to plaintext of the current server.
+   */
+  virtual bool enableSSLWithPlainText() {
+    return false;
+  }
+
 protected:
   std::string m_address;
   int m_port;
-  int m_threadCount;
   mutable Mutex m_mutex;
   RequestHandlerFactory m_handlerFactory;
   URLChecker m_urlChecker;
   std::list<ServerEventListener*> m_listeners;
 
 private:
-  RunStatus m_status;
+  RunStatus m_status{RunStatus::NOT_YET_STARTED};
+  HealthLevel m_healthLevel{HealthLevel::Bold};
 };
 
-class ServerOptions {
-public:
+struct ServerOptions {
   ServerOptions(const std::string &address,
                 uint16_t port,
-                int numThreads)
+                int maxThreads,
+                int initThreads = -1,
+                int maxQueue = -1,
+                bool legacyBehavior = true)
     : m_address(address),
       m_port(port),
-      m_numThreads(numThreads),
-      m_serverFD(-1),
-      m_sslFD(-1),
-      m_takeoverFilename(),
-      m_useFileSocket(false) {
+      m_maxThreads(maxThreads),
+      m_initThreads(initThreads),
+      m_maxQueue(maxQueue == -1 ? maxThreads : maxQueue),
+      m_legacyBehavior(legacyBehavior) {
+    assertx(m_maxThreads >= 0);
+    if (m_initThreads < 0 || m_initThreads > m_maxThreads) {
+      m_initThreads = m_maxThreads;
+    }
   }
 
   std::string m_address;
   uint16_t m_port;
-  int m_numThreads;
-  int m_serverFD;
-  int m_sslFD;
+  int m_maxThreads;
+  int m_initThreads;
+  int m_maxQueue;
+  bool m_legacyBehavior;
+  int m_serverFD{-1};
+  int m_sslFD{-1};
   std::string m_takeoverFilename;
-  bool m_useFileSocket;
+  bool m_useFileSocket{false};
+  int m_hugeThreads{0};
+  unsigned m_hugeStackKb{0};
+  unsigned m_extraKb{0};
+  uint32_t m_loop_sample_rate{0};
 };
 
 /**
  * A ServerFactory knows how to create Server objects.
  */
-class ServerFactory : private boost::noncopyable {
-public:
+struct ServerFactory {
+  ServerFactory() {}
   virtual ~ServerFactory() {}
+
+  ServerFactory(const ServerFactory&) = delete;
+  ServerFactory& operator=(const ServerFactory&) = delete;
 
   virtual ServerPtr createServer(const ServerOptions &options) = 0;
 
   ServerPtr createServer(const std::string &address,
                          uint16_t port,
-                         int numThreads);
+                         int maxThreads,
+                         int initThreads = -1);
 };
 
 /**
@@ -347,16 +378,19 @@ public:
  * This allows new server types to be plugged in dynamically, without having to
  * hard code the list of all possible server types.
  */
-class ServerFactoryRegistry : private boost::noncopyable {
-public:
+struct ServerFactoryRegistry {
   ServerFactoryRegistry();
+
+  ServerFactoryRegistry(const ServerFactoryRegistry&) = delete;
+  ServerFactoryRegistry& operator=(const ServerFactoryRegistry&) = delete;
 
   static ServerFactoryRegistry *getInstance();
 
   static ServerPtr createServer(const std::string &type,
                                 const std::string &address,
                                 uint16_t port,
-                                int numThreads);
+                                int maxThreads,
+                                int initThreads = -1);
 
   void registerFactory(const std::string &name,
                        const ServerFactoryPtr &factory);
@@ -371,14 +405,12 @@ private:
 /**
  * All exceptions Server throws should derive from this base class.
  */
-class ServerException : public Exception {
-public:
+struct ServerException : Exception {
   ServerException(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
     ATTRIBUTE_PRINTF(2,3);
 };
 
-class FailedToListenException : public ServerException {
-public:
+struct FailedToListenException : ServerException {
   explicit FailedToListenException(const std::string &addr)
     : ServerException("Failed to listen to unix socket at %s", addr.c_str()) {
   }
@@ -387,22 +419,19 @@ public:
   }
 };
 
-class InvalidUrlException : public ServerException {
-public:
+struct InvalidUrlException : ServerException {
   explicit InvalidUrlException(const char *part)
     : ServerException("Invalid URL: %s", part) {
   }
 };
 
-class InvalidMethodException : public ServerException {
-public:
+struct InvalidMethodException : ServerException {
   explicit InvalidMethodException(const char *msg)
     : ServerException("Invalid method: %s", msg) {
   }
 };
 
-class InvalidHeaderException : public ServerException {
-public:
+struct InvalidHeaderException : ServerException {
   InvalidHeaderException(const char *name, const char *value)
     : ServerException("Invalid header: %s: %s", name, value) {
   }

@@ -22,67 +22,32 @@
 
 #include <squangle/mysql_client/AsyncMysqlClient.h>
 #include <squangle/mysql_client/AsyncConnectionPool.h>
+#include <squangle/mysql_client/SSLOptionsProviderBase.h>
 #include <squangle/mysql_client/Row.h>
 
 #include <squangle/logger/DBEventCounter.h>
 
 #include "hphp/runtime/ext/asio/asio-external-thread-event.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
 #include "hphp/runtime/ext/extension.h"
 
 #include <folly/Format.h>
 
-using folly::StringPiece;
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+struct c_Vector;
+
 namespace am = facebook::common::mysql_client;
 namespace db = facebook::db;
-
-extern const int64_t k_NOT_NULL_FLAG;
-extern const int64_t k_PRI_KEY_FLAG;
-extern const int64_t k_UNIQUE_KEY_FLAG;
-extern const int64_t k_MULTIPLE_KEY_FLAG;
-extern const int64_t k_UNSIGNED_FLAG;
-extern const int64_t k_ZEROFILL_FLAG;
-extern const int64_t k_BINARY_FLAG;
-extern const int64_t k_AUTO_INCREMENT_FLAG;
-extern const int64_t k_ENUM_FLAG;
-extern const int64_t k_SET_FLAG;
-extern const int64_t k_BLOB_FLAG;
-extern const int64_t k_TIMESTAMP_FLAG;
-extern const int64_t k_NUM_FLAG;
-extern const int64_t k_NO_DEFAULT_VALUE_FLAG;
-
-extern const int64_t k_MYSQL_TYPE_TINY;
-extern const int64_t k_MYSQL_TYPE_SHORT;
-extern const int64_t k_MYSQL_TYPE_LONG;
-extern const int64_t k_MYSQL_TYPE_INT24;
-extern const int64_t k_MYSQL_TYPE_LONGLONG;
-extern const int64_t k_MYSQL_TYPE_DECIMAL;
-extern const int64_t k_MYSQL_TYPE_NEWDECIMAL;
-extern const int64_t k_MYSQL_TYPE_FLOAT;
-extern const int64_t k_MYSQL_TYPE_DOUBLE;
-extern const int64_t k_MYSQL_TYPE_BIT;
-extern const int64_t k_MYSQL_TYPE_TIMESTAMP;
-extern const int64_t k_MYSQL_TYPE_DATE;
-extern const int64_t k_MYSQL_TYPE_TIME;
-extern const int64_t k_MYSQL_TYPE_DATETIME;
-extern const int64_t k_MYSQL_TYPE_YEAR;
-extern const int64_t k_MYSQL_TYPE_STRING;
-extern const int64_t k_MYSQL_TYPE_VAR_STRING;
-extern const int64_t k_MYSQL_TYPE_BLOB;
-extern const int64_t k_MYSQL_TYPE_SET;
-extern const int64_t k_MYSQL_TYPE_ENUM;
-extern const int64_t k_MYSQL_TYPE_GEOMETRY;
-extern const int64_t k_MYSQL_TYPE_NULL;
 
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlConnectionPool
 
-class AsyncMysqlConnectionPool {
-public:
+struct AsyncMysqlConnectionPool {
   AsyncMysqlConnectionPool() = default;
+  void sweep();
+
   std::shared_ptr<am::AsyncConnectionPool> m_async_pool;
   static const StaticString s_className;
 
@@ -93,8 +58,7 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlConnection
 
-class AsyncMysqlConnection {
- public:
+struct AsyncMysqlConnection {
   AsyncMysqlConnection();
   AsyncMysqlConnection(const AsyncMysqlConnection&) = delete;
   AsyncMysqlConnection& operator=(const AsyncMysqlConnection&) = delete;
@@ -103,12 +67,18 @@ class AsyncMysqlConnection {
   void setConnectOperation(std::shared_ptr<am::ConnectOperation> op);
   void setClientStats(db::ClientPerfStats perfStats);
   void verifyValidConnection();
+  bool isValidConnection();
   static Class* getClass();
   static Object newInstance(
       std::unique_ptr<am::Connection> conn,
       std::shared_ptr<am::ConnectOperation> conn_op = nullptr,
       db::ClientPerfStats clientStats = db::ClientPerfStats());
-  Object query(ObjectData* this_, am::Query query, int64_t timeout_micros = -1);
+  using AttributeMap = std::unordered_map<std::string, std::string>;
+  Object query(
+      ObjectData* this_,
+      am::Query query,
+      int64_t timeout_micros = -1,
+      const AttributeMap& queryAttributes = AttributeMap());
 
   std::unique_ptr<am::Connection> m_conn;
   String m_host;
@@ -124,10 +94,46 @@ class AsyncMysqlConnection {
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+// class MySSLContext
+
+struct MySSLContextProvider {
+  MySSLContextProvider() {}
+  explicit MySSLContextProvider(
+      std::shared_ptr<am::SSLOptionsProviderBase> provider);
+
+  MySSLContextProvider& operator=(const MySSLContextProvider& that_) = delete;
+
+  static Object newInstance(
+      std::shared_ptr<am::SSLOptionsProviderBase> ssl_provider);
+  static Class* getClass();
+  std::shared_ptr<am::SSLOptionsProviderBase> getSSLProvider();
+  void setSSLProvider(std::shared_ptr<am::SSLOptionsProviderBase> ssl_provider);
+
+  static Class* s_class;
+  static const StaticString s_className;
+
+  std::shared_ptr<am::SSLOptionsProviderBase> m_provider;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+// class AsyncMysqlConnectionOptions
+
+struct AsyncMysqlConnectionOptions {
+  AsyncMysqlConnectionOptions();
+  static Class* getClass();
+  const am::ConnectionOptions& getConnectionOptions();
+
+  static Class* s_class;
+  static const StaticString s_className;
+
+  am::ConnectionOptions m_conn_opts;
+  TYPE_SCAN_IGNORE_FIELD(m_conn_opts);
+};
+
+///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlResult
 
-class AsyncMysqlResult {
-public:
+struct AsyncMysqlResult {
   virtual ~AsyncMysqlResult() {}
   int64_t elapsedMicros();
   double startTime();
@@ -151,10 +157,9 @@ public:
 // Intended to just hold extra data about the Operation. This should be created
 // in `AsyncMysqlConnection`.
 
-class AsyncMysqlConnectResult : public AsyncMysqlResult {
- public:
+struct AsyncMysqlConnectResult : AsyncMysqlResult {
   AsyncMysqlConnectResult() = default;
-  virtual ~AsyncMysqlConnectResult() {}
+  ~AsyncMysqlConnectResult() override {}
   static Class* getClass();
   static Object newInstance(std::shared_ptr<am::Operation> op,
                             db::ClientPerfStats clientStats);
@@ -170,10 +175,9 @@ class AsyncMysqlConnectResult : public AsyncMysqlResult {
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlErrorResult
 
-class AsyncMysqlErrorResult : public AsyncMysqlResult {
- public:
+struct AsyncMysqlErrorResult : AsyncMysqlResult {
   AsyncMysqlErrorResult() = default;
-  virtual ~AsyncMysqlErrorResult() {}
+  ~AsyncMysqlErrorResult() override {}
 
   static Class* getClass();
   static Object newInstance(std::shared_ptr<am::Operation> op,
@@ -189,8 +193,7 @@ class AsyncMysqlErrorResult : public AsyncMysqlResult {
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlQueryErrorResult
 
-class AsyncMysqlQueryErrorResult {
-public:
+struct AsyncMysqlQueryErrorResult {
   AsyncMysqlQueryErrorResult();
   AsyncMysqlQueryErrorResult(const AsyncMysqlQueryErrorResult&) = delete;
   AsyncMysqlQueryErrorResult& operator=(const AsyncMysqlQueryErrorResult&) =
@@ -224,43 +227,42 @@ public:
 // to build maps where we just reuse them so we avoid copying.
 // Thus, eliminating repetition of map keys and also gain speed.
 
-class FieldIndex {
- public:
+struct FieldIndex {
   explicit FieldIndex(const am::RowFields* row_fields);
 
   size_t getFieldIndex(String field_name) const;
   String getFieldString(size_t field_index) const;
 
  private:
+  // NB: It's possible to just use a req::vector_map<String> for names,
+  // and rely on insertion order to compute indexes, but sometimes this
+  // FieldIndex has duplicate names. last-name-wins, requiring the map.
   req::vector<String> field_names_;
-  req::hash_map<
-    String,
-    size_t,
-    hphp_string_hash,
-    hphp_string_same> field_name_map_;
+  req::fast_map<String, size_t, hphp_string_hash, hphp_string_same>
+    field_name_map_;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlQueryResult
 
-class AsyncMysqlQueryResult : public AsyncMysqlResult {
- public:
+struct AsyncMysqlQueryResult : AsyncMysqlResult {
   AsyncMysqlQueryResult() = default;
-  virtual ~AsyncMysqlQueryResult() {}
+  ~AsyncMysqlQueryResult() override {}
   void sweep();
-  void create(std::shared_ptr<am::Operation> op,
-              db::ClientPerfStats values,
-              am::QueryResult query_result);
+  void
+  create(std::shared_ptr<am::Operation> op, db::ClientPerfStats values,
+         am::QueryResult query_result, bool noIndexUsed);
   Object buildRows(bool as_maps, bool typed_values);
   static Class* getClass();
-  static Object newInstance(std::shared_ptr<am::Operation> op,
-                            db::ClientPerfStats values,
-                            am::QueryResult query_result);
+  static Object
+  newInstance(std::shared_ptr<am::Operation> op, db::ClientPerfStats values,
+              am::QueryResult query_result, bool noIndexUsed);
 
   std::unique_ptr<am::QueryResult> m_query_result;
+  bool m_no_index_used;
 
   // Created here for buildRows and passed to RowBlocks
-  std::shared_ptr<FieldIndex> m_field_index;
+  req::shared_ptr<FieldIndex> m_field_index;
   static Class* s_class;
   static const StaticString s_className;
 
@@ -271,8 +273,7 @@ class AsyncMysqlQueryResult : public AsyncMysqlResult {
 ///////////////////////////////////////////////////////////////////////////////
 // Async events
 
-class AsyncMysqlConnectEvent final : public AsioExternalThreadEvent {
- public:
+struct AsyncMysqlConnectEvent final : AsioExternalThreadEvent {
   explicit AsyncMysqlConnectEvent(std::shared_ptr<am::ConnectOperation> op) {
     m_op = op;
   }
@@ -284,15 +285,14 @@ class AsyncMysqlConnectEvent final : public AsioExternalThreadEvent {
   }
 
  protected:
-  void unserialize(Cell& result) override final;
+  void unserialize(TypedValue& result) final;
 
  private:
   std::shared_ptr<am::ConnectOperation> m_op;
   db::ClientPerfStats m_clientStats;
 };
 
-class AsyncMysqlQueryEvent final : public AsioExternalThreadEvent {
- public:
+struct AsyncMysqlQueryEvent final : AsioExternalThreadEvent {
   AsyncMysqlQueryEvent(ObjectData* conn,
                        std::shared_ptr<am::QueryOperation> op)
       : AsioExternalThreadEvent(conn) {
@@ -306,15 +306,14 @@ class AsyncMysqlQueryEvent final : public AsioExternalThreadEvent {
   }
 
  protected:
-  void unserialize(Cell& result) override final;
+  void unserialize(TypedValue& result) final;
 
  private:
   std::shared_ptr<am::QueryOperation> m_query_op;
   db::ClientPerfStats m_clientStats;
 };
 
-class AsyncMysqlMultiQueryEvent final : public AsioExternalThreadEvent {
- public:
+struct AsyncMysqlMultiQueryEvent final : AsioExternalThreadEvent {
   AsyncMysqlMultiQueryEvent(ObjectData* conn,
                             std::shared_ptr<am::MultiQueryOperation> op)
       : AsioExternalThreadEvent(conn) {
@@ -328,18 +327,42 @@ class AsyncMysqlMultiQueryEvent final : public AsioExternalThreadEvent {
   }
 
  protected:
-  void unserialize(Cell& result) override final;
+  void unserialize(TypedValue& result) final;
 
  private:
   std::shared_ptr<am::MultiQueryOperation> m_multi_op;
   db::ClientPerfStats m_clientStats;
 };
 
+struct AsyncMysqlConnectAndMultiQueryEvent final : AsioExternalThreadEvent {
+  explicit AsyncMysqlConnectAndMultiQueryEvent(
+      std::shared_ptr<am::ConnectOperation> op) {
+    m_connect_op = op;
+  }
+
+  void setQueryOp(std::shared_ptr<am::MultiQueryOperation> op) {
+    m_multi_query_op = std::move(op);
+  }
+
+  void opFinished() { markAsFinished(); }
+
+  void setClientStats(db::ClientPerfStats stats) {
+    m_clientStats = std::move(stats);
+  }
+
+ protected:
+  void unserialize(TypedValue& result) final;
+
+ private:
+  std::shared_ptr<am::ConnectOperation> m_connect_op;
+  std::shared_ptr<am::MultiQueryOperation> m_multi_query_op;
+  db::ClientPerfStats m_clientStats;
+};
+
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlRowBlock
 
-class AsyncMysqlRowBlock {
- public:
+struct AsyncMysqlRowBlock {
   AsyncMysqlRowBlock() = default;
 
   void sweep();
@@ -348,10 +371,10 @@ class AsyncMysqlRowBlock {
   FieldType getFieldAs(int64_t row, const Variant& field);
   static Class* getClass();
   static Object newInstance(am::RowBlock* row_block,
-                            std::shared_ptr<FieldIndex> indexer);
+                            req::shared_ptr<FieldIndex> indexer);
 
   std::unique_ptr<am::RowBlock> m_row_block;
-  std::shared_ptr<FieldIndex> m_field_index;
+  req::shared_ptr<FieldIndex> m_field_index;
   static Class* s_class;
   static const StaticString s_className;
 
@@ -362,8 +385,7 @@ class AsyncMysqlRowBlock {
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlRowBlockIterator
 
-class AsyncMysqlRowBlockIterator {
- public:
+struct AsyncMysqlRowBlockIterator {
   AsyncMysqlRowBlockIterator() = default;
   static Class* getClass();
   static Object newInstance(Object row_block, size_t row_number);
@@ -381,8 +403,7 @@ class AsyncMysqlRowBlockIterator {
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlRow
 
-class AsyncMysqlRow {
- public:
+struct AsyncMysqlRow {
   AsyncMysqlRow() = default;
 
   static Class* getClass();
@@ -400,8 +421,7 @@ class AsyncMysqlRow {
 ///////////////////////////////////////////////////////////////////////////////
 // class AsyncMysqlRowIterator
 
-class AsyncMysqlRowIterator {
- public:
+struct AsyncMysqlRowIterator {
   AsyncMysqlRowIterator() = default;
 
   static Class* getClass();

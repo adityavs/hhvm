@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,8 +23,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Location {
-public:
+struct Location {
   Location() = default;
   Location(int l0, int c0, int l1, int c1)
       : r(l0, c0, l1, c1) {}
@@ -39,10 +38,14 @@ public:
     int char1{1};
 
     int compare(const Range& other) const {
-      if (line0 < other.line0) return -1; if (line0 > other.line0) return 1;
-      if (char0 < other.char0) return -1; if (char0 > other.char0) return 1;
-      if (line1 < other.line1) return -1; if (line1 > other.line1) return 1;
-      if (char1 < other.char1) return -1; if (char1 > other.char1) return 1;
+      if (line0 < other.line0) return -1;
+      if (line0 > other.line0) return 1;
+      if (char0 < other.char0) return -1;
+      if (char0 > other.char0) return 1;
+      if (line1 < other.line1) return -1;
+      if (line1 > other.line1) return 1;
+      if (char1 < other.char1) return -1;
+      if (char1 > other.char1) return 1;
       return 0;
     }
   };

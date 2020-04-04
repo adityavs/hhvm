@@ -1,0 +1,12 @@
+array(3) {
+  ["kind"]=>
+  int(15)
+  ["classname"]=>
+  string(1) "C"
+  ["exact"]=>
+  bool(true)
+}
+string(%d) "%s/test/slow/type_annotation/type_annotation_autoloader-1.inc"
+string(%d) "%s/test/slow/type_annotation/type_annotation_autoloader-2.inc"
+string(%d) "%s/test/slow/type_annotation/type_annotation_autoloader-3.inc"
+string(%d) "%s/test/slow/type_annotation/type_annotation_autoloader-4.inc"

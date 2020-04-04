@@ -1,11 +1,8 @@
-<?php
-
-// disable array -> "Array" conversion notice
-error_reporting(error_reporting() & ~E_NOTICE);
+<?hh
 
 class base {
   public function __call($x, $y) {
-    echo "base::__call: $x, $y " . get_called_class() . "\n";
+    echo "base::__call: $x, $y " . static::class . "\n";
   }
 }
 
@@ -26,12 +23,18 @@ function main() {
   $one = new one;
   $two = new two;
   $go->go($one);
-  foreach (array(1,2,3) as $_) {
-    foreach (array($one, $two) as $o) {
+  foreach (varray[1,2,3] as $_) {
+    foreach (varray[$one, $two] as $o) {
       $go->go($o);
       $go->go($o);
     }
   }
 }
+<<__EntryPoint>>
+function main_entry(): void {
 
-main();
+  // disable array -> "Array" conversion notice
+  error_reporting(error_reporting() & ~E_NOTICE);
+
+  main();
+}

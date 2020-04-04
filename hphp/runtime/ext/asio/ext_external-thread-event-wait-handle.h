@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -30,35 +30,33 @@ namespace HPHP {
  *
  * See asio-external-thread-event.h for more details.
  */
-class AsioExternalThreadEvent;
+struct AsioExternalThreadEvent;
 struct c_ExternalThreadEventWaitHandle final : c_WaitableWaitHandle {
-  DECLARE_CLASS_NO_SWEEP(ExternalThreadEventWaitHandle)
+  WAITHANDLE_CLASSOF(ExternalThreadEventWaitHandle);
+  WAITHANDLE_DTOR(ExternalThreadEventWaitHandle);
   void sweep();
 
-  explicit c_ExternalThreadEventWaitHandle(Class* cls =
-      c_ExternalThreadEventWaitHandle::classof())
-    : c_WaitableWaitHandle(cls) {}
+  explicit c_ExternalThreadEventWaitHandle()
+    : c_WaitableWaitHandle(classof(), HeaderKind::WaitHandle,
+        type_scan::getIndexForMalloc<c_ExternalThreadEventWaitHandle>()) {}
   ~c_ExternalThreadEventWaitHandle() {}
-
-  static void ti_setoncreatecallback(const Variant& callback);
-  static void ti_setonsuccesscallback(const Variant& callback);
-  static void ti_setonfailcallback(const Variant& callback);
 
  public:
   static req::ptr<c_ExternalThreadEventWaitHandle>
     Create(AsioExternalThreadEvent* event, ObjectData* priv_data);
 
   c_ExternalThreadEventWaitHandle* getNextToProcess() {
-    assert(getState() == STATE_WAITING);
+    assertx(getState() == STATE_WAITING);
     return m_nextToProcess;
   }
   void setNextToProcess(c_ExternalThreadEventWaitHandle* next) {
-    assert(getState() == STATE_WAITING);
+    assertx(getState() == STATE_WAITING);
     m_nextToProcess = next;
   }
   ObjectData* getPrivData() { return m_privData.get(); }
 
   void abandon(bool sweeping);
+  bool cancel(const Object& exception);
   void process();
   String getName();
   void exitContext(context_idx_t ctx_idx);
@@ -71,19 +69,34 @@ struct c_ExternalThreadEventWaitHandle final : c_WaitableWaitHandle {
   void destroyEvent(bool sweeping = false);
 
  private:
+  // Manipulated by other threads; logically part of the linked list
+  // owned by AsioExternalThreadEventQueue::m_received.
   c_ExternalThreadEventWaitHandle* m_nextToProcess;
-  AsioExternalThreadEvent* m_event;
-  Object m_privData;
-  SweepableMember<c_ExternalThreadEventWaitHandle> m_sweepable;
 
+  // The i/o thread-lowned event object, one per ETEWH
+  AsioExternalThreadEvent* m_event;
+
+  Object m_privData;
+
+  // Register for sweep, making this ETEWH also a root. AETE's could
+  // also be tracked as roots but its more complicated since they
+  // are malloc'd and accessed by other threads.
+  SweepableMember<c_ExternalThreadEventWaitHandle> m_sweepable;
  public:
   static const uint8_t STATE_WAITING = 2;
 
   friend struct SweepableMember<c_ExternalThreadEventWaitHandle>;
 };
 
-inline c_ExternalThreadEventWaitHandle* c_WaitHandle::asExternalThreadEvent() {
-  assert(getKind() == Kind::ExternalThreadEvent);
+void HHVM_STATIC_METHOD(ExternalThreadEventWaitHandle, setOnCreateCallback,
+                        const Variant& callback);
+void HHVM_STATIC_METHOD(ExternalThreadEventWaitHandle, setOnSuccessCallback,
+                        const Variant& callback);
+void HHVM_STATIC_METHOD(ExternalThreadEventWaitHandle, setOnFailCallback,
+                        const Variant& callback);
+
+inline c_ExternalThreadEventWaitHandle* c_Awaitable::asExternalThreadEvent() {
+  assertx(getKind() == Kind::ExternalThreadEvent);
   return static_cast<c_ExternalThreadEventWaitHandle*>(this);
 }
 

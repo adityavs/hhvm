@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 
 trait T {
@@ -9,5 +9,6 @@ trait T {
 class A {
   use T;
 }
-
+<<__EntryPoint>> function main(): void {
 print_r(get_class_methods('A'));
+}

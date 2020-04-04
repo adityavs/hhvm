@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,19 +16,16 @@
 
 #include "hphp/runtime/debugger/dummy_sandbox.h"
 
-#include <boost/noncopyable.hpp>
-
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_hook_handler.h"
 #include "hphp/runtime/debugger/cmd/cmd_signal.h"
 #include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
 #include "hphp/runtime/server/source-root-info.h"
-#include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/php-globals.h"
+#include "hphp/runtime/base/file-util.h"
 
 #include "hphp/util/logger.h"
-#include "hphp/util/process.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -57,7 +54,7 @@ bool DummySandbox::stop(int timeout) {
 
 namespace {
 
-struct CLISession : private boost::noncopyable {
+struct CLISession {
   CLISession() {
     TRACE(2, "CLISession::CLISession\n");
     char *argv[] = {"", nullptr};
@@ -69,6 +66,9 @@ struct CLISession : private boost::noncopyable {
     DebuggerHook::detach();
     execute_command_line_end(0, false, nullptr);
   }
+
+  CLISession(const CLISession&) = delete;
+  CLISession& operator=(const CLISession&) = delete;
 };
 
 }
@@ -77,7 +77,7 @@ const StaticString s__SERVER("_SERVER");
 
 void DummySandbox::run() {
   TRACE(2, "DummySandbox::run\n");
-  ThreadInfo *ti = ThreadInfo::s_threadInfo.getNoCheck();
+  RequestInfo *ti = RequestInfo::s_requestInfo.getNoCheck();
   while (!m_stopped) {
     try {
       CLISession hphpSession;
@@ -94,8 +94,8 @@ void DummySandbox::run() {
             "PHP files may not be loaded properly.\n";
         } else {
           auto server = php_global_exchange(s__SERVER, init_null());
-          forceToArray(server);
-          Array arr = server.toArrRef();
+          forceToDArray(server);
+          Array arr = server.asArrRef();
           server.unset();
           php_global_set(s__SERVER, sri.setServerVariables(std::move(arr)));
         }
@@ -110,8 +110,8 @@ void DummySandbox::run() {
                        doc.c_str(), cwd);
           bool error; std::string errorMsg;
           bool ret = hphp_invoke(g_context.getNoCheck(), doc, false, null_array,
-                                 uninit_null(), "", "", error, errorMsg, true,
-                                 false, true);
+                                 nullptr, "", "", error, errorMsg, true,
+                                 false, true, RuntimeOption::EvalPreludePath);
           if (!ret || error) {
             msg += "Unable to pre-load " + doc;
             if (!errorMsg.empty()) {
@@ -124,7 +124,13 @@ void DummySandbox::run() {
         g_context->setSandboxId(m_proxy->getDummyInfo().id());
       }
 
-      DebuggerHook::attach<HphpdHook>(ti);
+      if (!DebuggerHook::attach<HphpdHook>(ti)) {
+        const char* fail = "Could not attach hphpd to request: another debugger"
+                           " is already attached.";
+        Logger::Error("%s", fail);
+        Debugger::InterruptSessionStarted(nullptr, fail);
+        throw DebuggerClientAttachFailureException();
+      }
       {
         DebuggerDummyEnv dde;
         // This is really the entire point of having the dummy sandbox. This
@@ -146,10 +152,10 @@ void DummySandbox::run() {
         }
         m_signum = CmdSignal::SignalNone;
       }
-    } catch (const DebuggerClientExitException &e) {
+    } catch (const DebuggerClientExitException& e) {
       // stopped by the dummy sandbox thread itself
       break;
-    } catch (const DebuggerException &e) {
+    } catch (const DebuggerException& e) {
     }
   }
 }
@@ -176,27 +182,7 @@ std::string DummySandbox::getStartupDoc(const DSandboxInfo &sandbox) {
       path += '/';
     }
     path += m_startupFile;
-
-    // resolving home directory
-    if (path[0] == '~') {
-      std::string user, home;
-      size_t pos = path.find('/');
-      if (pos == std::string::npos) pos = path.size();
-      if (pos > 1) {
-        user = path.substr(1, pos - 1);
-      }
-      if (user.empty()) user = sandbox.m_user;
-      if (user.empty() || user == Process::GetCurrentUser()) {
-        home = Process::GetHomeDirectory();
-      } else {
-        home = "/home/" + user + "/";
-      }
-      if (pos + 1 < path.size()) {
-        path = home + path.substr(pos + 1);
-      } else {
-        path = home;
-      }
-    }
+    path = FileUtil::expandUser(path, sandbox.m_user);
   }
   return path;
 }

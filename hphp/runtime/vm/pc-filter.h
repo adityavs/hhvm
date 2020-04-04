@@ -26,39 +26,45 @@ namespace HPHP {
 // Map which holds a set of PCs and supports reasonably fast addition and
 // lookup. Used to decide if a given PC falls within an interesting area, e.g.,
 // for breakpoints and stepping.
-class PCFilter {
+struct PCFilter {
+  static constexpr auto PTRMAP_PTR_SIZE = sizeof(void*) * 8;
+  static constexpr auto PTRMAP_LEVEL_BITS = 8LL;
+  static constexpr auto PTRMAP_LEVEL_ENTRIES = 1LL << PTRMAP_LEVEL_BITS;
+  static constexpr auto PTRMAP_LEVEL_MASK = PTRMAP_LEVEL_ENTRIES - 1LL;
 private:
   // Radix-tree implementation of pointer map
-  struct PtrMapNode;
-  class PtrMap {
-#define PTRMAP_PTR_SIZE       (sizeof(void*) * 8)
-#define PTRMAP_LEVEL_BITS     8LL
-#define PTRMAP_LEVEL_ENTRIES  (1LL << PTRMAP_LEVEL_BITS)
-#define PTRMAP_LEVEL_MASK     (PTRMAP_LEVEL_ENTRIES - 1LL)
-
-  public:
+  struct PtrMapNode {
+    union {
+      PtrMapNode* m_entries;
+      void* m_value;
+    };
+    void clearImpl(unsigned short bits);
+  };
+  struct PtrMap {
     PtrMap() {
       static_assert(PTRMAP_PTR_SIZE % PTRMAP_LEVEL_BITS == 0,
                     "PTRMAP_PTR_SIZE must be a multiple of PTRMAP_LEVEL_BITS");
-      m_root = nullptr;
+      m_root.m_entries = nullptr;
     }
     ~PtrMap() { clear(); }
     PtrMap(const PtrMap&) = delete;
     PtrMap& operator=(const PtrMap&) = delete;
 
+    static PtrMapNode makeNode();
     void setPointer(void* ptr, void* val);
     void* getPointer(void* ptr) const {
-      if (!m_root) return nullptr;
+      if (!m_root.m_entries) return nullptr;
       return getPointerImpl(ptr);
     }
     void clear();
     void swap(PtrMap& other) {
       std::swap(m_root, other.m_root);
     }
-    bool isNull() { return m_root == nullptr; }
+    bool isNull() { return m_root.m_entries == nullptr; }
   private:
     void* getPointerImpl(void* ptr) const;
-    void* m_root;
+    PtrMapNode m_root;
+    TYPE_SCAN_IGNORE_FIELD(m_root); // points to a malloc'd radix tree node
   };
 
   PtrMap m_map;
@@ -67,7 +73,7 @@ public:
   PCFilter() {}
 
   // Filter function to exclude opcodes when adding ranges.
-  typedef std::function<bool(Op)> OpcodeFilter;
+  using OpcodeFilter = std::function<bool(Op)>;
 
   // Add/remove offsets, either individually or by range. By default allow all
   // opcodes.

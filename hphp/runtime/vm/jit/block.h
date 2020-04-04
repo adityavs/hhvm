@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,8 @@
 #define incl_HPHP_VM_BLOCK_H_
 
 #include <algorithm>
+
+#include <folly/Optional.h>
 
 #include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/edge.h"
@@ -36,9 +38,11 @@ namespace HPHP { namespace jit {
  * so usually you can use Block directly.  These methods also update
  * IRInstruction::m_block transparently.
  */
-struct Block : boost::noncopyable {
+struct Block {
   typedef InstructionList::iterator iterator;
   typedef InstructionList::const_iterator const_iterator;
+  typedef InstructionList::reverse_iterator reverse_iterator;
+  typedef InstructionList::const_reverse_iterator const_reverse_iterator;
   typedef InstructionList::reference reference;
   typedef InstructionList::const_reference const_reference;
 
@@ -62,19 +66,30 @@ struct Block : boost::noncopyable {
    * emitted in profiling mode (which become dead after optimized code is
    * emitted). Code for these blocks is emitted into the 'afrozen' section.
    *
-   * See also util/code-cache.h for comment on the 'ahot' and 'aprof' sections.
+   * See also runtime/vm/jit/code-cache.h for comment on the 'hot' and 'prof'
+   * sections.
+   *
+   * IMPORTANT NOTE: These hints are sorted in increasing order or likelihood.
+   * This order is used in fixBlockHints().
    */
 
-  enum class Hint { Neither, Likely, Unlikely, Unused };
+  enum class Hint { Unused, Unlikely, Neither, Likely };
 
-  explicit Block(unsigned id)
-    : m_id(id)
+  explicit Block(unsigned id, uint64_t profCount)
+    : m_profCount(checkedProfCount(profCount))
+    , m_id(id)
     , m_hint(Hint::Neither)
   {}
+
+  Block(const Block&) = delete;
+  Block& operator=(const Block&) = delete;
 
   unsigned    id() const           { return m_id; }
   Hint        hint() const         { return m_hint; }
   void        setHint(Hint hint)   { m_hint = hint; }
+  uint64_t    profCount() const    { return m_profCount; }
+
+  void setProfCount(uint64_t count) { m_profCount = checkedProfCount(count); }
 
   // Returns true if this block has no successors.
   bool isExit() const { return !empty() && !taken() && !next(); }
@@ -115,8 +130,8 @@ struct Block : boost::noncopyable {
   // then return an iterator to the newly inserted instruction.
   iterator prepend(IRInstruction* inst);
 
-  // return iterator to first instruction after the DefLabel (if
-  // present) and BeginCatch (if present).
+  // return iterator to first instruction after any DefFP, DefFrameRelSP,
+  // DefRegSP, DefLabel, and/or BeginCatch instructions.
   iterator skipHeader();
   const_iterator skipHeader() const;
 
@@ -161,8 +176,17 @@ struct Block : boost::noncopyable {
   iterator         end()         { return m_instrs.end(); }
   const_iterator   begin() const { return m_instrs.begin(); }
   const_iterator   end()   const { return m_instrs.end(); }
+  reverse_iterator rbegin()       { return m_instrs.rbegin(); }
+  reverse_iterator rend()         { return m_instrs.rend(); }
+  const_reverse_iterator rbegin() const { return m_instrs.rbegin(); }
+  const_reverse_iterator rend()   const { return m_instrs.rend(); }
+
+  // Erase the given instruction from this block and unlinks any outgoing edges.
+  // These methods don't delete the instruction, so it may be reused after
+  // calling erase().
   iterator         erase(iterator pos);
   iterator         erase(IRInstruction* inst);
+
   iterator insert(iterator pos, IRInstruction* inst);
   void splice(iterator pos, Block* from, iterator begin, iterator end);
   void push_back(std::initializer_list<IRInstruction*> insts);
@@ -183,11 +207,18 @@ struct Block : boost::noncopyable {
   std::string toString() const;
 
  private:
+  static uint64_t checkedProfCount(uint64_t profCount);
+
   InstructionList m_instrs; // instructions in this block
-  const unsigned m_id;      // unit-assigned unique id of this block
   EdgeList m_preds;         // Edges that point to this block
+  uint64_t m_profCount;     // execution profile count of the region block
+                            // containing this IR block.
+  const unsigned m_id;      // unit-assigned unique id of this block
   Hint m_hint;              // execution frequency hint
 };
+
+// Try to keep this structure small; watch for alignment issues.
+static_assert(sizeof(Block) == 64, "");
 
 using BlockList = jit::vector<Block*>;
 using BlockSet = jit::flat_set<Block*>;
@@ -209,6 +240,7 @@ inline Block::const_reference Block::back() const {
 }
 
 inline Block::iterator Block::erase(iterator pos) {
+  if (pos->hasEdges()) pos->clearEdges();
   pos->setBlock(nullptr);
   return m_instrs.erase(pos);
 }
@@ -227,8 +259,10 @@ inline Block::iterator Block::prepend(IRInstruction* inst) {
 inline Block::iterator Block::skipHeader() {
   auto it = begin();
   auto e = end();
-  if (it != e && it->op() == DefLabel) ++it;
-  if (it != e && it->op() == BeginCatch) ++it;
+  while (it != e &&
+         it->is(DefFP, DefFrameRelSP, DefRegSP, DefLabel, BeginCatch)) {
+    ++it;
+  }
   return it;
 }
 
@@ -332,6 +366,17 @@ inline bool Block::isCatch() const {
   return (--it)->op() == BeginCatch;
 }
 
+inline uint64_t Block::checkedProfCount(uint64_t profCount) {
+  // If the profCount is too big, it typically means some issue.  So
+  // trigger an assert in debug builds, and cap it in opt builds.
+  constexpr auto profCountCap = std::numeric_limits<int64_t>::max();
+  assert_flog(profCount <= profCountCap,
+              "Trying to create IR block with suspicious profCount {}\n",
+              profCount);
+  if (profCount > profCountCap) profCount = profCountCap;
+  return profCount;
+}
+
 inline BCMarker Block::catchMarker() const {
   assertx(isCatch());
   auto it = skipHeader();
@@ -346,6 +391,24 @@ inline void Edge::setTo(Block* to) {
 
 inline Block* Edge::from() const {
   return inst() != nullptr ? inst()->block() : nullptr;
+}
+
+inline const char* blockHintName(Block::Hint hint) {
+  switch (hint) {
+    case Block::Hint::Unused:   return "Unused";
+    case Block::Hint::Unlikely: return "Unlikely";
+    case Block::Hint::Neither:  return "Neither";
+    case Block::Hint::Likely:   return "Likely";
+  }
+  not_reached();
+}
+
+inline folly::Optional<Block::Hint> nameToHint(const std::string& hintStr) {
+  if (hintStr == "Unused")   return Block::Hint::Unused;
+  if (hintStr == "Unlikely") return Block::Hint::Unlikely;
+  if (hintStr == "Neither")  return Block::Hint::Neither;
+  if (hintStr == "Likely")   return Block::Hint::Likely;
+  return folly::none;
 }
 
 }}

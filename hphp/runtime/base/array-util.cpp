@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,7 +23,7 @@
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/string-util.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
 
 #include "hphp/runtime/ext/std/ext_std_math.h"
 #include "hphp/runtime/ext/string/ext_string.h"
@@ -39,7 +39,7 @@ namespace HPHP {
 // compositions
 
 Variant ArrayUtil::Splice(const Array& input, int offset, int64_t length /* = 0 */,
-                          const Variant& replacement /* = null_variant */,
+                          const Variant& replacement /* = uninit_variant */,
                           Array *removed /* = NULL */) {
   int num_in = input.size();
   if (offset > num_in) {
@@ -59,71 +59,85 @@ Variant ArrayUtil::Splice(const Array& input, int offset, int64_t length /* = 0 
   ArrayIter iter(input);
   for (; pos < offset && iter; ++pos, ++iter) {
     Variant key(iter.first());
-    const Variant& v = iter.secondRef();
+    auto const v = iter.secondVal();
     if (key.isNumeric()) {
-      out_hash.appendWithRef(v);
+      out_hash.append(v);
     } else {
-      out_hash.setWithRef(key, v, true);
+      out_hash.set(key, v, true);
     }
   }
 
   for (; pos < offset + length && iter; ++pos, ++iter) {
     if (removed) {
       Variant key(iter.first());
-      const Variant& v = iter.secondRef();
+      auto const v = iter.secondVal();
       if (key.isNumeric()) {
-        removed->appendWithRef(v);
+        removed->append(v);
       } else {
-        removed->setWithRef(key, v, true);
+        removed->set(key, v, true);
       }
     }
   }
 
   Array arr = replacement.toArray();
   if (!arr.empty()) {
-    for (ArrayIter iter(arr); iter; ++iter) {
-      const Variant& v = iter.secondRef();
-      out_hash.appendWithRef(v);
+    for (ArrayIter iterb(arr); iterb; ++iterb) {
+      auto const v = iterb.secondVal();
+      out_hash.append(v);
     }
   }
 
   for (; iter; ++iter) {
     Variant key(iter.first());
-    const Variant& v = iter.secondRef();
+    auto const v = iter.secondVal();
     if (key.isNumeric()) {
-      out_hash.appendWithRef(v);
+      out_hash.append(v);
     } else {
-      out_hash.setWithRef(key, v, true);
+      out_hash.set(key, v, true);
     }
   }
 
   return out_hash;
 }
 
-Variant ArrayUtil::Pad(const Array& input, const Variant& pad_value, int pad_size,
-                       bool pad_right /* = true */) {
+Variant ArrayUtil::PadRight(const Array& input, const Variant& pad_value,
+                            int pad_size) {
   int input_size = input.size();
   if (input_size >= pad_size) {
     return input;
   }
 
-  Array ret = Array::Create();
-  if (pad_right) {
-    ret = input;
-    for (int i = input_size; i < pad_size; i++) {
-      ret.append(pad_value);
-    }
+  Array ret = input;
+  for (int i = input_size; i < pad_size; i++) {
+    ret.append(pad_value);
+  }
+  return ret;
+}
+
+Variant ArrayUtil::PadLeft(const Array& input, const Variant& pad_value,
+                           int pad_size) {
+  int input_size = input.size();
+  if (input_size >= pad_size) {
+    return input;
+  }
+
+  ArrayData* data;
+  if (input.get()->hasVanillaPackedLayout()) {
+    data = PackedArray::MakeReserveVArray(pad_size);
   } else {
-    for (int i = input_size; i < pad_size; i++) {
-      ret.append(pad_value);
-    }
-    for (ArrayIter iter(input); iter; ++iter) {
-      Variant key(iter.first());
-      if (key.isNumeric()) {
-        ret.appendWithRef(iter.secondRef());
-      } else {
-        ret.setWithRef(key, iter.secondRef(), true);
-      }
+    data = MixedArray::MakeReserveDArray(pad_size);
+  }
+  auto ret = Array::attach(data);
+  for (int i = input_size; i < pad_size; i++) {
+    ret.append(pad_value);
+  }
+  for (ArrayIter iter(input); iter; ++iter) {
+    Variant key(iter.first());
+    auto const v = iter.secondVal();
+    if (key.isNumeric()) {
+      ret.append(v);
+    } else {
+      ret.set(key, v, true);
     }
   }
   return ret;
@@ -132,11 +146,11 @@ Variant ArrayUtil::Pad(const Array& input, const Variant& pad_value, int pad_siz
 Variant ArrayUtil::Range(unsigned char low, unsigned char high,
                          int64_t step /* = 1 */) {
   if (step <= 0) {
-    throw_invalid_argument("step exceeds the specified range");
+    raise_invalid_argument_warning("step exceeds the specified range");
     return false;
   }
 
-  Array ret;
+  auto ret = Array::CreateVArray();
   if (low > high) { // Negative Steps
     for (; low >= high; low -= (unsigned int)step) {
       ret.append(String::FromChar(low));
@@ -165,37 +179,41 @@ namespace {
 void rangeCheckAlloc(double estNumSteps) {
   // An array can hold at most INT_MAX elements
   if (estNumSteps > std::numeric_limits<int32_t>::max()) {
-    MM().forceOOM();
-    check_request_surprise_unlikely();
+    tl_heap->forceOOM();
+    check_non_safepoint_surprise();
     return;
   }
 
   int32_t numElms = static_cast<int32_t>(estNumSteps);
-  if (MM().preAllocOOM(MixedArray::computeAllocBytesFromMaxElms(numElms))) {
-    check_request_surprise_unlikely();
+  if (tl_heap->preAllocOOM(MixedArray::computeAllocBytesFromMaxElms(numElms))) {
+    check_non_safepoint_surprise();
   }
 }
 }
 
 Variant ArrayUtil::Range(double low, double high, double step /* = 1.0 */) {
-  Array ret;
+  auto ret = Array::CreateVArray();
+  double element;
+  int64_t i;
   if (low > high) { // Negative steps
     if (low - high < step || step <= 0) {
-      throw_invalid_argument("step exceeds the specified range");
+      raise_invalid_argument_warning("step exceeds the specified range");
       return false;
     }
     rangeCheckAlloc((low - high) / step);
-    for (; low >= (high - DOUBLE_DRIFT_FIX); low -= step) {
-      ret.append(low);
+    for (i = 0, element = low; element >= (high - DOUBLE_DRIFT_FIX);
+         i++, element = low - (i * step)) {
+      ret.append(element);
     }
   } else if (high > low) { // Positive steps
     if (high - low < step || step <= 0) {
-      throw_invalid_argument("step exceeds the specified range");
+      raise_invalid_argument_warning("step exceeds the specified range");
       return false;
     }
     rangeCheckAlloc((high - low) / step);
-    for (; low <= (high + DOUBLE_DRIFT_FIX); low += step) {
-      ret.append(low);
+    for (i = 0, element = low; element <= (high + DOUBLE_DRIFT_FIX);
+         i++, element = low + (i * step)) {
+      ret.append(element);
     }
   } else {
     ret.append(low);
@@ -203,28 +221,28 @@ Variant ArrayUtil::Range(double low, double high, double step /* = 1.0 */) {
   return ret;
 }
 
-Variant ArrayUtil::Range(double low, double high, int64_t step /* = 1 */) {
-  Array ret;
+Variant ArrayUtil::Range(int64_t low, int64_t high, int64_t step /* = 1 */) {
+  auto ret = Array::CreateVArray();
   if (low > high) { // Negative steps
     if (low - high < step || step <= 0) {
-      throw_invalid_argument("step exceeds the specified range");
+      raise_invalid_argument_warning("step exceeds the specified range");
       return false;
     }
     rangeCheckAlloc((low - high) / step);
     for (; low >= high; low -= step) {
-      ret.append((int64_t)low);
+      ret.append(low);
     }
   } else if (high > low) { // Positive steps
     if (high - low < step || step <= 0) {
-      throw_invalid_argument("step exceeds the specified range");
+      raise_invalid_argument_warning("step exceeds the specified range");
       return false;
     }
     rangeCheckAlloc((high - low) / step);
     for (; low <= high; low += step) {
-      ret.append((int64_t)low);
+      ret.append(low);
     }
   } else {
-    ret.append((int64_t)low);
+    ret.append(low);
   }
   return ret;
 }
@@ -235,12 +253,15 @@ Variant ArrayUtil::Range(double low, double high, int64_t step /* = 1 */) {
 Variant ArrayUtil::CountValues(const Array& input) {
   Array ret = Array::Create();
   for (ArrayIter iter(input); iter; ++iter) {
-    const Variant& entry(iter.secondRef());
-    if (entry.isInteger() || entry.isString()) {
-      if (!ret.exists(entry)) {
-        ret.set(entry, 1);
+    auto const inner = iter.secondVal();
+    if (isIntType(type(inner)) || isStringType(type(inner)) ||
+        isFuncType(type(inner)) || isClassType(type(inner))) {
+      auto const inner_key = ret.convertKey<IntishCast::Cast>(inner);
+      if (!ret.exists(inner_key)) {
+        ret.set(inner_key, make_tv<KindOfInt64>(1));
       } else {
-        ret.set(entry, ret[entry].toInt64() + 1);
+        ret.set(inner_key,
+                make_tv<KindOfInt64>(ret[inner_key].toInt64() + 1));
       }
     } else {
       raise_warning("Can only count STRING and INTEGER values!");
@@ -258,12 +279,12 @@ Variant ArrayUtil::ChangeKeyCase(const Array& input, bool lower) {
     Variant key(iter.first());
     if (key.isString()) {
       if (lower) {
-        ret.set(HHVM_FN(strtolower)(key.toString()), iter.secondRef());
+        ret.set(HHVM_FN(strtolower)(key.toString()), iter.secondVal());
       } else {
-        ret.set(HHVM_FN(strtoupper)(key.toString()), iter.secondRef());
+        ret.set(HHVM_FN(strtoupper)(key.toString()), iter.secondVal());
       }
     } else {
-      ret.set(key, iter.secondRef());
+      ret.set(key, iter.secondVal());
     }
   }
   return ret;
@@ -271,18 +292,18 @@ Variant ArrayUtil::ChangeKeyCase(const Array& input, bool lower) {
 
 Variant ArrayUtil::Reverse(const Array& input, bool preserve_keys /* = false */) {
   if (input.empty()) {
-    return input;
+    return empty_array();
   }
 
-  Array ret = Array::Create();
+  auto ret = Array::Create();
   auto pos_limit = input->iter_end();
   for (ssize_t pos = input->iter_last(); pos != pos_limit;
        pos = input->iter_rewind(pos)) {
-    Variant key(input->getKey(pos));
-    if (preserve_keys || key.isString()) {
-      ret.setWithRef(key, input->getValueRef(pos), true);
+    auto const key = input->nvGetKey(pos);
+    if (preserve_keys || isStringType(key.m_type)) {
+      ret.set(key, input->nvGetVal(pos), true);
     } else {
-      ret.appendWithRef(input->getValueRef(pos));
+      ret.append(input->nvGetVal(pos));
     }
   }
   return ret;
@@ -318,12 +339,35 @@ Variant ArrayUtil::Shuffle(const Array& input) {
   }
   php_array_data_shuffle(indices);
 
-  PackedArrayInit ret(count);
-  for (int i = 0; i < count; i++) {
-    ssize_t pos = indices[i];
-    ret.appendWithRef(input->getValueRef(pos));
+  if (input.isVecArray()) {
+    VecArrayInit ret(count);
+    for (int i = 0; i < count; i++) {
+      ssize_t pos = indices[i];
+      ret.append(input->nvGetVal(pos));
+    }
+    return ret.toVariant();
+  } else if (input.isDict()) {
+    DictInit ret(count);
+    for (int i = 0; i < count; i++) {
+      ssize_t pos = indices[i];
+      ret.append(input->nvGetVal(pos));
+    }
+    return ret.toVariant();
+  } else if (input.isKeyset()) {
+    KeysetInit ret(count);
+    for (int i = 0; i < count; i++) {
+      ssize_t pos = indices[i];
+      ret.add(input->nvGetVal(pos));
+    }
+    return ret.toVariant();
+  } else {
+    PackedArrayInit ret(count);
+    for (int i = 0; i < count; i++) {
+      ssize_t pos = indices[i];
+      ret.append(input->nvGetVal(pos));
+    }
+    return ret.toVariant();
   }
-  return ret.toVariant();
 }
 
 Variant ArrayUtil::RandomKeys(const Array& input, int num_req /* = 1 */) {
@@ -366,14 +410,14 @@ Variant ArrayUtil::RandomKeys(const Array& input, int num_req /* = 1 */) {
 }
 
 Variant ArrayUtil::StringUnique(const Array& input) {
-  Array seenValues;
+  Array seenValues = Array::CreateKeyset();
   Array ret = Array::Create();
   for (ArrayIter iter(input); iter; ++iter) {
-    const Variant& entry(iter.secondRef());
-    String str(entry.toString());
+    auto const str = tvCastToString(iter.secondVal());
     if (!seenValues.exists(str)) {
-      seenValues.set(str, 1);
-      ret.set(iter.first(), entry);
+      seenValues.append(str);
+      ret.set(ret.convertKey<IntishCast::Cast>(iter.first()),
+                                                       iter.secondVal());
     }
   }
   return ret;
@@ -383,12 +427,12 @@ Variant ArrayUtil::NumericUnique(const Array& input) {
   std::set<double> seenValues;
   Array ret = Array::Create();
   for (ArrayIter iter(input); iter; ++iter) {
-    const Variant& entry(iter.secondRef());
-    double value = entry.toDouble();
+    auto const value = tvCastToDouble(iter.secondVal());
     std::pair<std::set<double>::iterator, bool> res =
       seenValues.insert(value);
     if (res.second) { // it was inserted
-      ret.set(iter.first(), entry);
+      ret.set(ret.convertKey<IntishCast::Cast>(iter.first()),
+                                                       iter.secondVal());
     }
   }
   return ret;
@@ -430,7 +474,9 @@ Variant ArrayUtil::RegularSortUnique(const Array& input) {
   ArrayInit ret(indices.size() - duplicates_count, ArrayInit::Map{});
   int i = 0;
   for (ArrayIter iter(input); iter; ++iter, ++i) {
-    if (!duplicates[i]) ret.setValidKey(iter.first(), iter.secondRef());
+    if (!duplicates[i]) {
+      ret.setValidKey(*iter.first().asTypedValue(), iter.secondVal());
+    }
   }
   return ret.toVariant();
 }
@@ -438,69 +484,9 @@ Variant ArrayUtil::RegularSortUnique(const Array& input) {
 ///////////////////////////////////////////////////////////////////////////////
 // iterations
 
-static void create_miter_for_walk(folly::Optional<MArrayIter>& miter,
-                                  Variant& var) {
-  if (!var.is(KindOfObject)) {
-    miter.emplace(var.asRef()->m_data.pref);
-    return;
-  }
-
-  auto const odata = var.getObjectData();
-  if (odata->isCollection()) {
-    raise_error("Collection elements cannot be taken by reference");
-  }
-  bool isIterable;
-  Object iterable = odata->iterableObject(isIterable);
-  if (isIterable) {
-    throw FatalErrorException("An iterator cannot be used with "
-                              "foreach by reference");
-  }
-  Array properties = iterable->o_toIterArray(null_string,
-                                             ObjectData::CreateRefs);
-  miter.emplace(properties.detach());
-}
-
-void ArrayUtil::Walk(Variant& input, PFUNC_WALK walk_function,
-                     const void *data, bool recursive /* = false */,
-                     PointerSet *seen /* = NULL */,
-                     const Variant& userdata /* = null_variant */) {
-  assert(walk_function);
-
-  // The Optional is just to avoid copy constructing MArrayIter.
-  folly::Optional<MArrayIter> miter;
-  create_miter_for_walk(miter, input);
-  assert(miter.hasValue());
-
-  Variant k;
-  Variant v;
-  while (miter->advance()) {
-    k = miter->key();
-    v.assignRef(miter->val());
-    if (recursive && v.is(KindOfArray)) {
-      assert(seen);
-      ArrayData *arr = v.getArrayData();
-
-      if (v.isReferenced()) {
-        if (seen->find((void*)arr) != seen->end()) {
-          raise_warning("array_walk_recursive(): recursion detected");
-          return;
-        }
-        seen->insert((void*)arr);
-      }
-
-      Walk(v, walk_function, data, recursive, seen, userdata);
-      if (v.isReferenced()) {
-        seen->erase((void*)arr);
-      }
-    } else {
-      walk_function(v, k, userdata, data);
-    }
-  }
-}
-
 Variant ArrayUtil::Reduce(const Array& input, PFUNC_REDUCE reduce_function,
                           const void *data,
-                          const Variant& initial /* = null_variant */) {
+                          const Variant& initial /* = uninit_variant */) {
   Variant result(initial);
   for (ArrayIter iter(input); iter; ++iter) {
     result = reduce_function(result, iter.second(), data);

@@ -1,4 +1,4 @@
-<?php
+<?hh
 // Copyright 2004-present Facebook. All Rights Reserved.
 
 function s1() {
@@ -17,4 +17,8 @@ function s2() {
   return 'hi again!';
 }
 
+
+<<__EntryPoint>>
+function main_constant_input() {
 var_dump(s1(), s2());
+}

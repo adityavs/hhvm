@@ -1,7 +1,11 @@
 <?hh
 
-function block() { return RescheduleWaitHandle::create(1,1); };
-
+function block() {
+  return RescheduleWaitHandle::create(
+    RescheduleWaitHandle::QUEUE_NO_PENDING_IO,
+    1,
+  );
+}
 async function test() {
   $closure = function ($a) {
     echo "closure\n";
@@ -20,4 +24,9 @@ async function test() {
   var_dump(HH\Asio\join($asyncclosure(3)));
 }
 
+<<__EntryPoint>>
+function main_closure_in_async() {
+;
+
 HH\Asio\join(test());
+}

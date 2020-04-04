@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,6 +19,7 @@
 #include <set>
 #include <vector>
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/ext/array/ext_array.h"
@@ -101,7 +102,7 @@ bool CmdExtension::processList(DebuggerProxy &proxy) {
   }
   for (auto const& name : names) {
     auto ext = ExtensionRegistry::get(name);
-    assert(ext);
+    assertx(ext);
     if (ext) {
       int support = ext->debuggerSupport();
       std::string line;
@@ -118,12 +119,15 @@ bool CmdExtension::processList(DebuggerProxy &proxy) {
   if (hrLen > DebuggerClient::LineWidth) hrLen = DebuggerClient::LineWidth;
 
   StringBuffer sb;
-  for (int i = 0; i < hrLen; i++) sb.append(BOX_H); sb.append("\n");
+  for (int i = 0; i < hrLen; i++) sb.append(BOX_H);
+  sb.append("\n");
   sb.append(StringUtil::Pad("Name\\Support", nameLen));
   sb.append("Info    Dump    Verb    Version\n");
-  for (int i = 0; i < hrLen; i++) sb.append(BOX_H); sb.append("\n");
+  for (int i = 0; i < hrLen; i++) sb.append(BOX_H);
+  sb.append("\n");
   sb.append(body);
-  for (int i = 0; i < hrLen; i++) sb.append(BOX_H); sb.append("\n");
+  for (int i = 0; i < hrLen; i++) sb.append(BOX_H);
+  sb.append("\n");
 
   m_out = sb.detach();
   return proxy.sendToClient(this);

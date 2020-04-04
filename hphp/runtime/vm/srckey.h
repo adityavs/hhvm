@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,12 +17,15 @@
 #define incl_HPHP_SRCKEY_H_
 
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/resumable.h"
 
 #include <boost/operators.hpp>
 
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
+
+namespace arrprov { struct Tag; }
 
 struct Func;
 struct Unit;
@@ -43,12 +46,13 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
   using AtomicInt = uint64_t;
 
   struct Hasher;
+  struct TbbHashCompare;
 
   /*
    * Used for SrcKeys corresponding to the prologue which precedes a function
    * entry source location.
    *
-   * Used disjointly from the `resumed' flag.
+   * Used disjointly from the `resumeMode'.
    */
   enum class PrologueTag {};
 
@@ -59,12 +63,13 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
    */
   SrcKey();
 
-  SrcKey(const Func* f, Offset off, bool resumed);
-  SrcKey(const Func* f, PC pc, bool resumed);
-  SrcKey(FuncId funcId, Offset off, bool resumed);
+  SrcKey(const Func* f, Offset off, ResumeMode resumeMode);
+  SrcKey(const Func* f, PC pc, ResumeMode resumeMode);
+  SrcKey(FuncId funcId, Offset off, ResumeMode resumeMode);
 
   SrcKey(const Func* f, Offset off, PrologueTag);
   SrcKey(const Func* f, PC pc, PrologueTag);
+  SrcKey(FuncId funcId, Offset off, PrologueTag);
 
   SrcKey(SrcKey other, Offset off);
 
@@ -92,7 +97,8 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
   FuncId funcID() const;
   int offset() const;
   bool prologue() const;
-  bool resumed() const;
+  ResumeMode resumeMode() const;
+  bool hasThis() const;
 
   /*
    * Derived accessors.
@@ -150,13 +156,17 @@ struct SrcKey : private boost::totally_ordered<SrcKey> {
   /////////////////////////////////////////////////////////////////////////////
 
 private:
+  uint32_t encodeResumeMode(ResumeMode resumeMode);
+  uint32_t encodePrologue();
+
+  /////////////////////////////////////////////////////////////////////////////
+
   union {
     AtomicInt m_atomicInt;
     struct {
       FuncId m_funcID;
       uint32_t m_offset : 30;
-      bool m_prologue : 1;
-      bool m_resumed : 1;
+      uint32_t m_resumeModeAndPrologue : 2;
     };
   };
 };
@@ -170,6 +180,13 @@ struct SrcKey::Hasher {
 };
 
 using SrcKeySet = hphp_hash_set<SrcKey,SrcKey::Hasher>;
+
+///////////////////////////////////////////////////////////////////////////////
+
+struct SrcKey::TbbHashCompare {
+  static size_t hash(const SrcKey& sk) { return hash_int64(sk.toAtomicInt()); }
+  static bool equal(const SrcKey& a, const SrcKey& b) { return a == b; }
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 

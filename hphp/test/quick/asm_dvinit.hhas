@@ -1,3 +1,4 @@
+.hh_file 1;
 #
 # Try out dv initializers in the assembler
 #
@@ -7,9 +8,10 @@
   Print
   PopC
 
-  FPushFuncD 0 "main"
-  FCall 0
-  UnboxR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
   RetC
 }
 
@@ -64,35 +66,39 @@
 }
 
 .function main() {
-  FPushFuncD 1 "foo"
+  NullUninit
+  NullUninit
+  NullUninit
   String "sup: "
-  FPassC 0
-  FCall 1
-  PopR
+  FCallFuncD <> 1 1 "" - "" "foo"
+  PopC
 
-  FPushFuncD 2 "foo"
+  NullUninit
+  NullUninit
+  NullUninit
   String "sup: "
-  FPassC 0
   String " non-default y value\n"
-  FPassC 1
-  FCall 2
-  PopR
+  FCallFuncD <> 2 1 "" - "" "foo"
+  PopC
 
-  FPushFuncD 0 "multiple"
-  FCall 0
-  PopR
-  FPushFuncD 1 "multiple"
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "multiple"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
   String "nondef\n"
-  FPassC 0
-  FCall 1
-  PopR
-  FPushFuncD 2 "multiple"
+  FCallFuncD <> 1 1 "" - "" "multiple"
+  PopC
+  NullUninit
+  NullUninit
+  NullUninit
   String "nondef1\n"
-  FPassC 0
   String "nondef2\n"
-  FPassC 1
-  FCall 2
-  PopR
+  FCallFuncD <> 2 1 "" - "" "multiple"
+  PopC
 
   String "done\n"
   Print

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -39,7 +39,7 @@ Resource HHVM_FUNCTION(mailparse_msg_create) {
   return Resource(req::make<MimePart>());
 }
 
-bool HHVM_FUNCTION(mailparse_msg_free, const Resource& mimemail) {
+bool HHVM_FUNCTION(mailparse_msg_free, const Resource& /*mimemail*/) {
   return true;
 }
 
@@ -379,8 +379,7 @@ Variant HHVM_FUNCTION(mailparse_determine_best_xfer_encoding,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MailparseExtension final : public Extension {
- public:
+struct MailparseExtension final : Extension {
   MailparseExtension() : Extension("mailparse") { }
   void moduleInit() override {
     HHVM_FE(mailparse_msg_create);

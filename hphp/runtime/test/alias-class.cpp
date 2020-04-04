@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -44,13 +44,14 @@ std::vector<AliasClass> generic_classes() {
 }
 
 std::vector<AliasClass> specialized_classes(IRUnit& unit) {
-  auto const marker = BCMarker::Dummy();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
 
   // Specialized test cases need some SSATmp*'s and similar things, so let's
   // make some instructions.
-  auto const mainFP = unit.gen(DefFP, marker)->dst();
+  auto const mainFP = unit.gen(DefFP, bcctx)->dst();
   auto const SP = unit.gen(
-    DefSP, marker, FPInvOffsetData { FPInvOffset { 10 } }, mainFP)->dst();
+    DefFrameRelSP, bcctx, FPInvOffsetData { FPInvOffset { 10 } }, mainFP
+  )->dst();
 
   return {
     // Frame locals.
@@ -59,14 +60,14 @@ std::vector<AliasClass> specialized_classes(IRUnit& unit) {
     AFrame { mainFP, 6 },
 
     // Some stack locations.
-    AStack { SP, -1, 1 },
-    AStack { SP, -2, 3 },
+    AStack { SP, IRSPRelOffset { -1 }, 1 },
+    AStack { SP, IRSPRelOffset { -2 }, 3 },
 
     // Frame-based 'canonicalized' stack locations.
-    AStack { mainFP, -12, std::numeric_limits<int32_t>::max() },
-    AStack { mainFP, -12, 4 },
-    AStack { mainFP, -11, 3 },
-    AStack { mainFP, -52, 10 },
+    AStack { mainFP, FPRelOffset { -12 }, std::numeric_limits<int32_t>::max() },
+    AStack { mainFP, FPRelOffset { -12 }, 4 },
+    AStack { mainFP, FPRelOffset { -11 }, 3 },
+    AStack { mainFP, FPRelOffset { -52 }, 10 },
   };
 }
 
@@ -156,7 +157,8 @@ TEST(AliasClass, AliasIdSet) {
 TEST(AliasClass, Basic) {
   IRUnit unit{test_context};
   auto const specialized = specialized_classes(unit);
-  auto const joined = boost::join(generic_classes(), specialized);
+  auto const generic = generic_classes();
+  auto const joined = boost::join(generic, specialized);
 
   for (auto cls : joined) {
     // Everything is a subclass of AUnknown and intersects AUnknown.
@@ -192,8 +194,8 @@ TEST(AliasClass, Basic) {
   // == implies <=, and <= implies maybe
   for (auto c1 : joined) {
     for (auto c2 : joined) {
-      if (c1 == c2) EXPECT_TRUE(c1 <= c2);
-      if (c1 <= c2) EXPECT_TRUE(c1.maybe(c2));
+      EXPECT_TRUE(!(c1 == c2) || c1 <= c2);
+      EXPECT_TRUE(!(c1 <= c2) || c1.maybe(c2));
     }
   }
 
@@ -211,15 +213,15 @@ TEST(AliasClass, Basic) {
 
 TEST(AliasClass, StackBasics) {
   IRUnit unit{test_context};
-  auto const marker = BCMarker::Dummy();
-  auto const FP = unit.gen(DefFP, marker)->dst();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
+  auto const FP = unit.gen(DefFP, bcctx)->dst();
   auto const SP = unit.gen(
-    DefSP, marker, FPInvOffsetData { FPInvOffset { 5 } }, FP)->dst();
+    DefFrameRelSP, bcctx, FPInvOffsetData { FPInvOffset { 5 } }, FP)->dst();
 
   // Some basic canonicalization and maybe.
   {
-    AliasClass const stk1 = AStack { SP, 0, 1 };
-    AliasClass const stk2 = AStack { FP, -5, 1 };
+    AliasClass const stk1 = AStack { SP, IRSPRelOffset { 0 }, 1 };
+    AliasClass const stk2 = AStack { FP, FPRelOffset { -5 }, 1 };
 
     EXPECT_TRUE(stk1 <= AStackAny);
     EXPECT_TRUE(stk2 <= AStackAny);
@@ -233,16 +235,16 @@ TEST(AliasClass, StackBasics) {
 
   // Stack ranges, with subtype and maybe.
   {
-    AliasClass const stk1 = AStack { FP, -10, 1 };
-    AliasClass const stk2 = AStack { FP, -10, 2 };
+    AliasClass const stk1 = AStack { FP, FPRelOffset { -10 }, 1 };
+    AliasClass const stk2 = AStack { FP, FPRelOffset { -10 }, 2 };
     EXPECT_TRUE(stk1 <= stk2);
     EXPECT_TRUE(stk1.maybe(stk2));
 
-    AliasClass const stk3 = AStack { FP, -10, 5 };
+    AliasClass const stk3 = AStack { FP, FPRelOffset { -10 }, 5 };
     EXPECT_TRUE(stk1 <= stk3);
     EXPECT_TRUE(stk1.maybe(stk3));
-    AliasClass const stk4 = AStack { FP, -15, 1 };
-    AliasClass const stk5 = AStack { FP, -14, 1 };
+    AliasClass const stk4 = AStack { FP, FPRelOffset { -15 }, 1 };
+    AliasClass const stk5 = AStack { FP, FPRelOffset { -14 }, 1 };
     // stk4's slot is immediately below stk3's range, but stk5 is the last slot
     // of its range.
     EXPECT_FALSE(stk3.maybe(stk4));
@@ -256,12 +258,12 @@ TEST(AliasClass, StackBasics) {
 
 TEST(AliasClass, SpecializedUnions) {
   IRUnit unit{test_context};
-  auto const marker = BCMarker::Dummy();
-  auto const FP = unit.gen(DefFP, marker)->dst();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
+  auto const FP = unit.gen(DefFP, bcctx)->dst();
 
-  AliasClass const stk = AStack { FP, -10, 3 };
-  AliasClass const unrelated_stk = AStack { FP, -14, 1 };
-  AliasClass const related_stk = AStack { FP, -11, 2 };
+  AliasClass const stk = AStack { FP, FPRelOffset { -10 }, 3 };
+  AliasClass const unrelated_stk = AStack { FP, FPRelOffset { -14 }, 1 };
+  AliasClass const related_stk = AStack { FP, FPRelOffset { -11 }, 2 };
 
   auto const stk_and_frame = stk | AFrameAny;
   EXPECT_TRUE(!stk_and_frame.is_stack());
@@ -331,18 +333,18 @@ TEST(AliasClass, SpecializedUnions) {
 
 TEST(AliasClass, StackUnions) {
   IRUnit unit{test_context};
-  auto const marker = BCMarker::Dummy();
-  auto const FP = unit.gen(DefFP, marker)->dst();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
+  auto const FP = unit.gen(DefFP, bcctx)->dst();
   auto const SP = unit.gen(
-    DefSP, marker, FPInvOffsetData { FPInvOffset { 1 } }, FP)->dst();
+    DefFrameRelSP, bcctx, FPInvOffsetData { FPInvOffset { 1 } }, FP)->dst();
 
   {
-    AliasClass const stk1  = AStack { FP, -3, 1 };
-    AliasClass const stk2  = AStack { FP, -4, 1 };
-    AliasClass const stk3  = AStack { FP, -5, 1 };
-    AliasClass const stk12 = AStack { FP, -3, 2 };
-    AliasClass const stk23 = AStack { FP, -4, 2 };
-    AliasClass const stk13 = AStack { FP, -3, 3 };
+    AliasClass const stk1  = AStack { FP, FPRelOffset { -3 }, 1 };
+    AliasClass const stk2  = AStack { FP, FPRelOffset { -4 }, 1 };
+    AliasClass const stk3  = AStack { FP, FPRelOffset { -5 }, 1 };
+    AliasClass const stk12 = AStack { FP, FPRelOffset { -3 }, 2 };
+    AliasClass const stk23 = AStack { FP, FPRelOffset { -4 }, 2 };
+    AliasClass const stk13 = AStack { FP, FPRelOffset { -3 }, 3 };
     EXPECT_EQ(stk1 | stk2, stk12);
     EXPECT_EQ(stk2 | stk3, stk23);
     EXPECT_EQ(stk1 | stk3, stk13);
@@ -350,37 +352,37 @@ TEST(AliasClass, StackUnions) {
 
   // Same as above but with some other bits.
   {
-    AliasClass const stk1  = AHeapAny | AStack { FP, -3, 1 };
-    AliasClass const stk2  = AHeapAny | AStack { FP, -4, 1 };
-    AliasClass const stk3  = AHeapAny | AStack { FP, -5, 1 };
-    AliasClass const stk12 = AHeapAny | AStack { FP, -3, 2 };
-    AliasClass const stk23 = AHeapAny | AStack { FP, -4, 2 };
-    AliasClass const stk13 = AHeapAny | AStack { FP, -3, 3 };
+    AliasClass const stk1  = AHeapAny | AStack { FP, FPRelOffset { -3 }, 1 };
+    AliasClass const stk2  = AHeapAny | AStack { FP, FPRelOffset { -4 }, 1 };
+    AliasClass const stk3  = AHeapAny | AStack { FP, FPRelOffset { -5 }, 1 };
+    AliasClass const stk12 = AHeapAny | AStack { FP, FPRelOffset { -3 }, 2 };
+    AliasClass const stk23 = AHeapAny | AStack { FP, FPRelOffset { -4 }, 2 };
+    AliasClass const stk13 = AHeapAny | AStack { FP, FPRelOffset { -3 }, 3 };
     EXPECT_EQ(stk1 | stk2, stk12);
     EXPECT_EQ(stk2 | stk3, stk23);
     EXPECT_EQ(stk1 | stk3, stk13);
   }
 
   {
-    AliasClass const stk1 = AStack { FP, -1, 1 };
-    AliasClass const stk2 = AStack { SP, -2, 1 };
-    AliasClass const true_union = AStack { FP, -1, 3 };
+    AliasClass const stk1 = AStack { FP, FPRelOffset { -1 }, 1 };
+    AliasClass const stk2 = AStack { SP, IRSPRelOffset { -2 }, 1 };
+    AliasClass const true_union = AStack { FP, FPRelOffset { -1 }, 3 };
     EXPECT_NE(stk1 | stk2, AStackAny);
     EXPECT_EQ(stk1 | stk2, true_union);
   }
 
   {
     auto const imax = std::numeric_limits<int32_t>::max();
-    AliasClass const deep_stk1 = AStack { FP, -10, imax };
-    AliasClass const deep_stk2 = AStack { FP, -14, imax };
+    AliasClass const deep_stk1 = AStack { FP, FPRelOffset { -10 }, imax };
+    AliasClass const deep_stk2 = AStack { FP, FPRelOffset { -14 }, imax };
     EXPECT_EQ(deep_stk1 | deep_stk2, deep_stk1);
   }
 }
 
 TEST(AliasClass, IterUnion) {
   IRUnit unit{test_context};
-  auto const marker = BCMarker::Dummy();
-  auto const FP = unit.gen(DefFP, marker)->dst();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
+  auto const FP = unit.gen(DefFP, bcctx)->dst();
 
   {
     AliasClass const iterP0 = AIterPos { FP, 0 };
@@ -392,23 +394,55 @@ TEST(AliasClass, IterUnion) {
   }
 
   {
-    AliasClass const iterP0 = AIterPos { FP, 0 };
     AliasClass const iterB0 = AIterBase { FP, 0 };
+    AliasClass const iterP0 = AIterPos { FP, 0 };
+    AliasClass const iterE0 = AIterEnd { FP, 0 };
     AliasClass const iterP1 = AIterPos { FP, 1 };
-    auto const u1 = iterP0 | iterB0;
-    EXPECT_TRUE(iterP0 <= u1);
+
+    // All the alias classes should be distinct to start.
+    auto const classes = std::vector{iterB0, iterP0, iterE0, iterP1};
+    for (auto const cls1 : classes) {
+      for (auto const cls2 : classes) {
+        if (cls1 == cls2) continue;
+        EXPECT_FALSE(cls1 <= cls2);
+      }
+    }
+
+    // If we union a base and a pos of the same iterator, we'll get the
+    // class of all fields of that iterator, which we can still distinguish
+    // from fields of other iterators.
+    auto const u1 = iterB0 | iterP0;
     EXPECT_TRUE(iterB0 <= u1);
+    EXPECT_TRUE(iterP0 <= u1);
+    EXPECT_TRUE(iterE0 <= u1);
+    EXPECT_FALSE(iterP1 <= u1);
     EXPECT_FALSE(u1 <= AIterPosAny);
     EXPECT_FALSE(u1 <= AIterBaseAny);
-    EXPECT_TRUE(u1 <= (AIterPosAny | AIterBaseAny));
-    EXPECT_FALSE(iterP1 <= u1);
-    EXPECT_FALSE(iterP1 <= iterP0);
-    EXPECT_FALSE(iterP1 <= iterB0);
+    EXPECT_FALSE(u1 <= (AIterBaseAny | AIterPosAny));
+    EXPECT_TRUE(u1 <= AIterAny);
 
     EXPECT_TRUE(!!u1.iterPos());
     EXPECT_TRUE(!!u1.iterBase());
     EXPECT_TRUE(!u1.is_iterPos());
     EXPECT_TRUE(!u1.is_iterBase());
+
+    // If we union a base and a pos of different iterators, we'll get the
+    // class of all iter bases and positions, which we can still distinguish
+    // from other iterator fields like iterator ends.
+    auto const u2 = iterB0 | iterP1;
+    EXPECT_TRUE(iterP0 <= u2);
+    EXPECT_TRUE(iterB0 <= u2);
+    EXPECT_TRUE(iterP1 <= u2);
+    EXPECT_FALSE(iterE0 <= u2);
+    EXPECT_FALSE(u2 <= AIterPosAny);
+    EXPECT_FALSE(u2 <= AIterBaseAny);
+    EXPECT_TRUE(u2 <= (AIterBaseAny | AIterPosAny));
+    EXPECT_TRUE(u2 <= AIterAny);
+
+    EXPECT_TRUE(!u2.iterPos());
+    EXPECT_TRUE(!!u2.iterBase());
+    EXPECT_TRUE(!u2.is_iterPos());
+    EXPECT_TRUE(!u2.is_iterBase());
   }
 
   {
@@ -461,10 +495,10 @@ TEST(AliasClass, IterUnion) {
 
 TEST(AliasClass, Pointees) {
   IRUnit unit{test_context};
-  auto const marker = BCMarker::Dummy();
-  auto ptr = unit.gen(LdMBase, marker, TPtrToGen)->dst();
+  auto const bcctx = BCContext { BCMarker::Dummy(), 0 };
+  auto ptr = unit.gen(LdMBase, bcctx, TLvalToCell)->dst();
   auto const acls = pointee(ptr);
-  EXPECT_EQ(AHeapAny | AFrameAny | AStackAny | AMIStateTV, acls);
+  EXPECT_EQ(AHeapAny | AFrameAny | AStackAny | AMIStateTV | ARdsAny, acls);
 }
 
 //////////////////////////////////////////////////////////////////////

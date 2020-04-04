@@ -1,4 +1,4 @@
-<?php
+<?hh
 /* Prototype  : string mb_strrchr(string haystack, string needle[, bool part[, string encoding]])
  * Description: Finds the last occurrence of a character in a string within another 
  * Source code: ext/mbstring/mbstring.c
@@ -14,7 +14,7 @@ function test_error_handler($err_no, $err_msg, $filename, $linenum, $vars) {
 		echo "Error: $err_no - $err_msg, $filename($linenum)\n";
 	}
 }
-set_error_handler('test_error_handler');
+set_error_handler(fun('test_error_handler'));
 
 // Initialise function arguments not being substituted (if any)
 $haystack = b'string_val';
@@ -46,11 +46,11 @@ EOT;
 $fp = fopen(__FILE__, "r");
 
 // add arrays
-$index_array = array (1, 2, 3);
-$assoc_array = array ('one' => 1, 'two' => 2);
+$index_array = varray [1, 2, 3];
+$assoc_array = darray ['one' => 1, 'two' => 2];
 
 //array of values to iterate over
-$inputs = array(
+$inputs = darray[
 
       // int data
       'int 0' => 0,
@@ -66,10 +66,10 @@ $inputs = array(
       'float .5' => .5,
 
       // array data
-      'empty array' => array(),
+      'empty array' => varray[],
       'int indexed array' => $index_array,
       'associative array' => $assoc_array,
-      'nested arrays' => array('foo', $index_array, $assoc_array),
+      'nested arrays' => varray['foo', $index_array, $assoc_array],
 
       // null data
       'uppercase NULL' => NULL,
@@ -97,16 +97,15 @@ $inputs = array(
       
       // resource variable
       'resource' => $fp      
-);
+];
 
 // loop through each element of the array for needle
 
 foreach($inputs as $key =>$value) {
       echo "\n--$key--\n";
-      var_dump( mb_strrchr($haystack, $value, $part, $encoding) );
+      try { var_dump( mb_strrchr($haystack, $value, $part, $encoding) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 };
 
 fclose($fp);
 
-?>
-===DONE===
+echo "===DONE===\n";

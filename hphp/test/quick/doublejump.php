@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function f() {
   $a = true;
@@ -20,10 +20,8 @@ function f() {
   }
 }
 
-function main() {
+<<__EntryPoint>> function main(): void {
   for($i = 0; $i < 1000; $i++) {
     f();
   }
 }
-main();
-

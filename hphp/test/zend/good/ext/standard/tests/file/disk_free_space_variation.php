@@ -1,12 +1,12 @@
-<?php
+<?hh
 /*
  *  Prototype: float disk_free_space( string directory )
  *  Description: Given a string containing a directory, this function 
  *               will return the number of bytes available on the corresponding
  *               filesystem or disk partition
  */
-
-$file_path = dirname(__FILE__);
+<<__EntryPoint>> function main(): void {
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 
 echo "*** Testing with a directory ***\n";
 var_dump( disk_free_space($file_path."/..") ); 
@@ -20,7 +20,7 @@ echo "\n*** Testing with different directory combinations ***";
 $dir = "/disk_free_space";
 mkdir($file_path.$dir);
 
-$dirs_arr = array(
+$dirs_arr = varray[
   ".",
   $file_path.$dir,
   $file_path."/.".$dir,
@@ -39,7 +39,7 @@ $dirs_arr = array(
   $file_path."/.".$dir.chr(0),
   ".".chr(0).$file_path.$dir,
   ".".chr(0).$file_path.$dir.chr(0)
-);
+];
 
 $count = 1;
 /* loop through to test each element the above array */
@@ -51,11 +51,7 @@ foreach($dirs_arr as $dir1) {
 }
 
 echo"\n--- Done ---";
-?>
-
-<?php error_reporting(0); ?>
-<?php
-$file_path = dirname(__FILE__);
+error_reporting(0);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 rmdir($file_path."/disk_free_space");
-?>
-
+}

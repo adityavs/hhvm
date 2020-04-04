@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,18 @@
 
 #include "hphp/runtime/vm/jit/extra-data.h"
 
+#include <sstream>
+
 #include "hphp/runtime/vm/jit/ssa-tmp.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/util/text-util.h"
 
 namespace HPHP { namespace jit {
+
+std::string KeyedIndexData::show() const {
+  auto const escaped = escapeStringForCPP(key->data(), key->size());
+  return folly::format("{},\"{}\"", index, key->data()).str();
+}
 
 std::string NewStructData::show() const {
   std::ostringstream os;

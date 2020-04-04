@@ -1,45 +1,45 @@
-object(HH\ImmVector)#3 (2) {
+object(HH\ImmVector) (2) {
   [0]=>
-  object(HH\Vector)#1 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(1)
   }
   [1]=>
-  object(HH\Vector)#2 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(2)
   }
 }
-object(HH\ImmMap)#4 (2) {
+object(HH\ImmMap) (2) {
   [0]=>
-  object(HH\Vector)#5 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(1)
   }
   [1]=>
-  object(HH\Vector)#6 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(2)
   }
 }
-object(HH\Pair)#7 (2) {
+object(HH\Pair) (2) {
   [0]=>
-  object(HH\Vector)#8 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(1)
   }
   [1]=>
-  object(HH\Vector)#9 (1) {
+  object(HH\Vector) (1) {
     [0]=>
     int(2)
   }
 }
 
-object(HH\ImmVector)#13 (2) {
+object(HH\ImmVector) (2) {
   [0]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#11 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(1)
     }
@@ -47,17 +47,17 @@ object(HH\ImmVector)#13 (2) {
   [1]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#12 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(2)
     }
   }
 }
-object(HH\ImmMap)#14 (2) {
+object(HH\ImmMap) (2) {
   [0]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#15 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(1)
     }
@@ -65,17 +65,17 @@ object(HH\ImmMap)#14 (2) {
   [1]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#16 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(2)
     }
   }
 }
-object(HH\Pair)#17 (2) {
+object(HH\Pair) (2) {
   [0]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#18 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(1)
     }
@@ -83,7 +83,7 @@ object(HH\Pair)#17 (2) {
   [1]=>
   array(1) {
     [0]=>
-    object(HH\Vector)#19 (1) {
+    object(HH\Vector) (1) {
       [0]=>
       int(2)
     }
@@ -125,6 +125,3 @@ Caught exception: Cannot modify immutable object of type HH\Pair
 Caught exception: Cannot use [] with collections for reading in an lvalue context
 Caught exception: Cannot use [] with collections for reading in an lvalue context
 Caught exception: Cannot use [] with collections for reading in an lvalue context
-
-
-Fatal error: Collection elements cannot be taken by reference in %s on line 174

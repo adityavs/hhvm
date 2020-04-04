@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,8 +26,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlIterator;
 
-class IntlIterator : public IntlError {
-public:
+struct IntlIterator : IntlError {
   IntlIterator() {}
   IntlIterator(const IntlIterator&) = delete;
   IntlIterator& operator=(const IntlIterator& src) {
@@ -52,7 +51,7 @@ public:
   static Object newInstance(icu::StringEnumeration *se = nullptr) {
     if (!c_IntlIterator) {
       c_IntlIterator = Unit::lookupClass(s_IntlIterator.get());
-      assert(c_IntlIterator);
+      assertx(c_IntlIterator);
     }
     Object obj{c_IntlIterator};
     if (se) {
@@ -108,9 +107,7 @@ private:
 
 #if U_ICU_VERSION_MAJOR_NUM * 10 + U_ICU_VERSION_MINOR_NUM >= 42
 // Proxy StringEnumeration for consistent behavior
-class BugStringCharEnumeration : public icu::StringEnumeration
-{
-public:
+struct BugStringCharEnumeration : icu::StringEnumeration {
   explicit BugStringCharEnumeration(UEnumeration* _uenum) : uenum(_uenum) {}
   ~BugStringCharEnumeration() { uenum_close(uenum); }
 
@@ -118,7 +115,7 @@ public:
     return uenum_count(uenum, &status);
   }
 
-  const UnicodeString* snext(UErrorCode& status) override {
+  const icu::UnicodeString* snext(UErrorCode& status) override {
     int32_t length;
     const UChar* str = uenum_unext(uenum, &length, &status);
     if (str == 0 || U_FAILURE(status)) {

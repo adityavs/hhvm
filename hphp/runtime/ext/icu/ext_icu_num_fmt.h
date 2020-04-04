@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,8 +26,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_NumberFormatter;
 
-class NumberFormatter : public IntlError {
-public:
+struct NumberFormatter : IntlError {
   NumberFormatter() {}
   NumberFormatter(const NumberFormatter&) = delete;
   NumberFormatter& operator=(const NumberFormatter& src) {
@@ -53,7 +52,7 @@ public:
   static Object newInstance() {
     if (!c_NumberFormatter) {
       c_NumberFormatter = Unit::lookupClass(s_NumberFormatter.get());
-      assert(c_NumberFormatter);
+      assertx(c_NumberFormatter);
     }
     return Object{c_NumberFormatter};
   }

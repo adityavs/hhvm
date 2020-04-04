@@ -1,23 +1,23 @@
-<?php
-
-$ary = array(
-	0 => array(
+<?hh
+<<__EntryPoint>> function main(): void {
+$ary = darray[
+	0 => varray[
 		"a",
 		1,
-	),
-	"a" => array(
-		2,
-		"b",
-		3 => array(
+	],
+	"a" => darray[
+		0 => 2,
+		1 => "b",
+		3 => varray[
 			4,
 			"c",
-		),
-		"3" => array(
+		],
+		"3" => varray[
 			4,
 			"c",
-		),
-	),
-);
+		],
+	],
+];
 
 $it = new RecursiveArrayIterator($ary);
 echo "-- flags = BYPASS_KEY --\n";
@@ -41,5 +41,5 @@ foreach(new RecursiveTreeIterator($it, 0, CachingIterator::CATCH_GET_CHILD) as $
 	echo "[$k] => $v\n";
 }
 
-?>
-===DONE===
+echo "===DONE===\n";
+}

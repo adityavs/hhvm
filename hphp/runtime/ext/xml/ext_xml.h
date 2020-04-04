@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,7 +24,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 Resource HHVM_FUNCTION(xml_parser_create,
-                       const Variant& encoding = null_variant);
+                       const Variant& encoding = uninit_variant);
 bool HHVM_FUNCTION(xml_parser_free,
                    const Resource& parser);
 int64_t HHVM_FUNCTION(xml_parse,
@@ -34,11 +34,11 @@ int64_t HHVM_FUNCTION(xml_parse,
 int64_t HHVM_FUNCTION(xml_parse_into_struct,
                       const Resource& parser,
                       const String& data,
-                      VRefParam values,
-                      VRefParam index = uninit_null());
+                      Array& values,
+                      Array& index);
 Resource HHVM_FUNCTION(xml_parser_create_ns,
-                       const Variant& encoding = null_variant,
-                       const Variant& separator = null_variant);
+                       const Variant& encoding = uninit_variant,
+                       const Variant& separator = uninit_variant);
 Variant HHVM_FUNCTION(xml_parser_get_option,
                       const Resource& parser,
                       int option);
@@ -76,7 +76,7 @@ bool HHVM_FUNCTION(xml_set_notation_decl_handler,
                    const Variant& handler);
 bool HHVM_FUNCTION(xml_set_object,
                    const Resource& parser,
-                   VRefParam object);
+                   const Variant& object);
 int64_t HHVM_FUNCTION(xml_get_current_byte_index,
                       const Resource& parser);
 int64_t HHVM_FUNCTION(xml_get_current_column_number,

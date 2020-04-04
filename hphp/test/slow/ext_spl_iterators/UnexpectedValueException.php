@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class RecursiveArrayIteratorIterator extends RecursiveIteratorIterator
 {
@@ -8,11 +8,15 @@ class RecursiveArrayIteratorIterator extends RecursiveIteratorIterator
   }
 }
 
+
+<<__EntryPoint>>
+function main_unexpected_value_exception() {
 try {
-  $arr = array(0, array(1));
+  $arr = varray[0, varray[1]];
   foreach(new RecursiveArrayIteratorIterator(
           new RecursiveArrayIterator($arr)) as $k=>$v) {
   }
 } catch(UnexpectedValueException $e) {
   echo "UnexpectedValueException caught", PHP_EOL;
+}
 }

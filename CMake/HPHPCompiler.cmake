@@ -15,128 +15,299 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
   set(WINDOWS TRUE)
 endif()
 
-# using Clang
-if (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang")
-  # For unclear reasons, our detection for what crc32 intrinsics you have will
-  # cause clang to ICE. Specifying a baseline here works around the issue.
-  # (SSE4.2 has been available on processors for quite some time now.)
-  set(LLVM_OPT "-msse4.2")
-  execute_process(
-    COMMAND ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_ARG1} --version COMMAND head -1
-    OUTPUT_VARIABLE _clang_version_info)
-  string(
-    REGEX MATCH "(clang version|based on LLVM) ([0-9]\\.[0-9]\\.?[0-9]?)"
-    CLANG_VERSION "${_clang_version_info}")
-  # Enabled GCC/LLVM stack-smashing protection
+# Do this until cmake has a define for ARMv8
+INCLUDE(CheckCXXSourceCompiles)
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __x86_64__
+#error Not x64
+#endif
+int main() { return 0; }" IS_X64)
+
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __AARCH64EL__
+#error Not ARMv8
+#endif
+int main() { return 0; }" IS_AARCH64)
+
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __powerpc64__
+#error Not PPC64
+#endif
+int main() { return 0; }" IS_PPC64)
+
+# using Clang or GCC
+if (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" OR ${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
+  # Warnings to disable by name, -Wno-${name}
+  set(DISABLED_NAMED_WARNINGS)
+  list(APPEND DISABLED_NAMED_WARNINGS
+    "error=array-bounds"
+    "error=switch"
+    "attributes"
+    "deprecated"
+    "invalid-offsetof"
+    "register"
+    "sign-compare"
+    "strict-aliasing"
+    "unused-function"
+    "unused-local-typedefs"
+    "unused-result"
+    "write-strings"
+  )
+
+  # Warnings to disable by name when building C code.
+  set(DISABLED_C_NAMED_WARNINGS)
+  list(APPEND DISABLED_C_NAMED_WARNINGS
+    "missing-field-initializers"
+    "sign-compare"
+  )
+
+  # General options to pass to both C & C++ compilers
+  set(GENERAL_OPTIONS)
+
+  # General options to pass to the C++ compiler
+  set(GENERAL_CXX_OPTIONS)
+  list(APPEND GENERAL_CXX_OPTIONS
+    "std=gnu++1z"
+    "fno-omit-frame-pointer"
+    "fno-operator-names"
+    "Wall"
+    "Woverloaded-virtual"
+    "Werror=format-security"
+  )
+
+  # Options to pass for debug mode to the C++ compiler
+  set(DEBUG_CXX_OPTIONS)
+
+  # Options to pass for release mode to the C++ compiler
+  set(RELEASE_CXX_OPTIONS)
+
+  # Suboption of -g in debug mode
+  set(GDB_SUBOPTION)
+
+  # Enable GCC/LLVM stack-smashing protection
   if(ENABLE_SSP)
-    if(CLANG_VERSION VERSION_GREATER 3.6 OR CLANG_VERSION VERSION_EQUAL 3.6)
-      set(LLVM_OPT "${LLVM_OPT} -fstack-protector-strong")
-    else()
-      set(LLVM_OPT "${LLVM_OPT} -fstack-protector")
+    list(APPEND GENERAL_OPTIONS
+      # This needs two dashes in the name, so put one here.
+      "-param=ssp-buffer-size=4"
+      "pie"
+      "fPIC"
+    )
+  endif()
+
+  if (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang") # using Clang
+    if (IS_X64)
+      list(APPEND GENERAL_OPTIONS
+        # For unclear reasons, our detection for what crc32 intrinsics you have
+        # will cause clang to ICE. Specifying a baseline here works around the
+        # issue. (SSE4.2 has been available on processors for quite some time now.)
+        "msse4.2"
+      )
+      # Also need to pass the right option to ASM files to avoid inconsistencies
+      # in CRC hash function handling
+      set(CMAKE_ASM_FLAGS  "${CMAKE_ASM_FLAGS} -msse4.2")
     endif()
-    set(LLVM_OPT "${LLVM_OPT} --param=ssp-buffer-size=4 -pie -fPIC")
-  endif()
 
-  if(CLANG_FORCE_LIBSTDCXX)
-    set(CLANG_STDLIB "libstdc++")
-  else()
-    set(CLANG_STDLIB "libc++")
-  endif()
+    list(APPEND GENERAL_CXX_OPTIONS
+      "Qunused-arguments"
+    )
+    list(APPEND DISABLED_C_NAMED_WARNINGS
+      "unused-command-line-argument"
+    )
+    list(APPEND DISABLED_NAMED_WARNINGS
+      "return-type-c-linkage"
+      "unknown-warning-option"
+      "unused-command-line-argument"
+    )
 
-  set(CMAKE_C_FLAGS_DEBUG            "-g")
-  set(CMAKE_CXX_FLAGS_DEBUG          "-g")
-  set(CMAKE_C_FLAGS_MINSIZEREL       "-Os -DNDEBUG")
-  set(CMAKE_CXX_FLAGS_MINSIZEREL     "-Os -DNDEBUG")
-  set(CMAKE_C_FLAGS_RELEASE          "-O3 -DNDEBUG")
-  set(CMAKE_CXX_FLAGS_RELEASE        "-O3 -DNDEBUG")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g")
-  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
-  set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} ${LLVM_OPT} -w")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=gnu++11 -stdlib=${CLANG_STDLIB} -fno-omit-frame-pointer -Woverloaded-virtual -Wno-deprecated -Wno-strict-aliasing -Wno-write-strings -Wno-invalid-offsetof -fno-operator-names -Wno-error=array-bounds -Wno-error=switch -Werror=format-security -Wno-unused-result -Wno-sign-compare -Wno-attributes -Wno-maybe-uninitialized -Wno-mismatched-tags -Wno-unknown-warning-option -Wno-return-type-c-linkage -Qunused-arguments ${LLVM_OPT}")
-# using GCC
-elseif (${CMAKE_CXX_COMPILER_ID} STREQUAL "GNU")
-  execute_process(COMMAND ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_ARG1} -dumpversion OUTPUT_VARIABLE GCC_VERSION)
-  set(GNUCC_OPT "")
-  if(GCC_VERSION VERSION_GREATER 4.8 OR GCC_VERSION VERSION_EQUAL 4.8)
-    # FIXME: GCC 4.8+ regressions http://git.io/4r7VCQ
-    set(GNUCC_OPT "${GNUCC_OPT} -ftrack-macro-expansion=0 -fno-builtin-memcmp")
-  else()
-     message(FATAL_ERROR "${PROJECT_NAME} requires g++ 4.8 or greater.")
-  endif()
-
-  # Fix problem with GCC 4.9, https://kb.isc.org/article/AA-01167
-  if(GCC_VERSION VERSION_GREATER 4.9 OR GCC_VERSION VERSION_EQUAL 4.9)
-    set(GNUCC_OPT "${GNUCC_OPT} -fno-delete-null-pointer-checks")
-  endif()
-
-  if(GCC_VERSION VERSION_GREATER 5.0 OR GCC_VERSION VERSION_EQUAL 5.0)
-    message(WARNING "HHVM is primarily tested on GCC 4.8 and GCC 4.9. Using other versions may produce unexpected results, or may not even build at all.")
-  endif()
-
-  if(GCC_VERSION VERSION_GREATER 5.1 OR GCC_VERSION VERSION_EQUAL 5.1)
-    set(GNUCC_OPT "${GNUCC_OPT} -D_GLIBCXX_USE_CXX11_ABI=0 -Wno-bool-compare -DFOLLY_HAVE_MALLOC_H")
-  endif()
-
-  # Enabled GCC/LLVM stack-smashing protection
-  if(ENABLE_SSP)
-    if(GCC_VERSION VERSION_GREATER 4.8 OR GCC_VERSION VERSION_EQUAL 4.8)
-      if(LINUX)
-        # https://isisblogs.poly.edu/2011/06/01/relro-relocation-read-only/
-        set(GNUCC_OPT "${GNUCC_OPT} -Wl,-z,relro,-z,now")
+    # Enabled GCC/LLVM stack-smashing protection
+    if(ENABLE_SSP)
+      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 3.6 OR
+         CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 3.6)
+        list(APPEND GENERAL_OPTIONS "fstack-protector-strong")
+      else()
+        list(APPEND GENERAL_OPTIONS "fstack-protector")
       endif()
-      if(GCC_VERSION VERSION_GREATER 4.9 OR GCC_VERSION VERSION_EQUAL 4.9)
-        set(GNUCC_OPT "${GNUCC_OPT} -fstack-protector-strong")
-      endif()
-    else()
-      set(GNUCC_OPT "${GNUCC_OPT} -fstack-protector")
     endif()
-    set(GNUCC_OPT "${GNUCC_OPT} -pie -fPIC --param=ssp-buffer-size=4")
-  endif()
 
-  # X64
-  set(GNUCC_PLAT_OPT "")
-  if(IS_X64)
-    set(GNUCC_PLAT_OPT "-mcrc32")
-  endif()
+    if(CLANG_FORCE_LIBSTDCXX)
+      list(APPEND GENERAL_CXX_OPTIONS "stdlib=libstdc++")
+    else()
+      list(APPEND GENERAL_CXX_OPTIONS "stdlib=libc++")
+    endif()
+  else() # using GCC
+    list(APPEND DISABLED_NAMED_WARNINGS
+      "deprecated-declarations"
+      "maybe-uninitialized"
+    )
+    list(APPEND DISABLED_C_NAMED_WARNINGS
+      "maybe-uninitialized"
+      "old-style-declaration"
+    )
+    list(APPEND GENERAL_OPTIONS
+      "ffunction-sections"
+    )
+    list(APPEND GENERAL_CXX_OPTIONS
+      "fdata-sections"
+      "fno-gcse"
+      "fno-canonical-system-headers"
+      "Wvla"
+    )
+    list(APPEND RELEASE_CXX_OPTIONS
+      "-param max-inline-insns-auto=100"
+      "-param early-inlining-insns=200"
+      "-param max-early-inliner-iterations=50"
+      "-param=inline-unit-growth=200"
+      "-param=large-unit-insns=10000"
+    )
 
-  # PPC64
-  if(NOT IS_PPC64)
-    set(CMAKE_CXX_OMIT_LEAF_FRAME_POINTER "-momit-leaf-frame-pointer")
+    # Fix problem with GCC 4.9, https://kb.isc.org/article/AA-01167
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 4.9 OR
+       CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 4.9)
+      list(APPEND GENERAL_OPTIONS "fno-delete-null-pointer-checks")
+    else()
+       message(FATAL_ERROR "${PROJECT_NAME} requires g++ 4.9 or greater.")
+    endif()
+
+    # Warn about a GCC 4.9 bug leading to an incorrect refcounting issue
+    # https://github.com/facebook/hhvm/issues/8011
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.0)
+       message(WARNING "HHVM is known to trigger optimization bugs in GCC 4.9. Upgrading to GCC 5 is recommended. See https://github.com/facebook/hhvm/issues/8011 for more details.")
+    endif()
+
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 8.3 OR
+       CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 8.3)
+     message(WARNING "HHVM is primarily tested on GCC 5.0-8.3. Using other versions may produce unexpected results, or may not even build at all.")
+    endif()
+
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 5.1 OR
+       CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 5.1)
+      list(APPEND DISABLED_NAMED_WARNINGS "bool-compare")
+      list(APPEND GENERAL_OPTIONS "DFOLLY_HAVE_MALLOC_H")
+    endif()
+
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 6.0 OR
+       CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 6.0)
+      list(APPEND GENERAL_CXX_OPTIONS "Wno-misleading-indentation")
+    endif()
+
+    # Enabled GCC/LLVM stack-smashing protection
+    if(ENABLE_SSP)
+      if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 4.8 OR
+         CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 4.8)
+        if(LINUX)
+          # https://isisblogs.poly.edu/2011/06/01/relro-relocation-read-only/
+          list(APPEND GENERAL_OPTIONS "Wl,-z,relro,-z,now")
+        endif()
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 4.9 OR
+           CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 4.9)
+          list(APPEND GENERAL_OPTIONS "fstack-protector-strong")
+        endif()
+      else()
+        list(APPEND GENERAL_OPTIONS "fstack-protector")
+      endif()
+    endif()
+
+    # X64
+    if(IS_X64)
+      list(APPEND GENERAL_CXX_OPTIONS "mcrc32")
+        if(ENABLE_SSE4_2)
+          list(APPEND GENERAL_CXX_OPTIONS
+          # SSE4.2 has been available on processors for quite some time now. This
+          # allows enabling CRC hash function code
+          "msse4.2"
+          )
+          # Also pass the right option to ASM files to avoid inconsistencies
+          # in CRC hash function handling
+          set(CMAKE_ASM_FLAGS  "${CMAKE_ASM_FLAGS} -msse4.2")
+        endif()
+    endif()
+
+    # ARM64
+    if(IS_AARCH64)
+      # Force char type to be signed, which is not the case on aarch64.
+      list(APPEND GENERAL_OPTIONS "fsigned-char")
+
+      # If a CPU was specified, build a -mcpu option for the compiler.
+      set(AARCH64_TARGET_CPU "" CACHE STRING "CPU to tell gcc to optimize for (-mcpu)")
+      if(AARCH64_TARGET_CPU)
+        list(APPEND GENERAL_OPTIONS "mcpu=${AARCH64_TARGET_CPU}")
+        set(CMAKE_ASM_FLAGS  "${CMAKE_ASM_FLAGS} -mcpu=${AARCH64_TARGET_CPU}")
+
+        # Make sure GCC is not using the fix for errata 843419. This change
+        # interferes with the gold linker. Note that GCC applies this fix
+        # even if you specify an mcpu other than cortex-a53, which is why
+        # it's explicitly being disabled here for any cpu other than
+        # cortex-a53. If you're running a newer pass of the cortex-a53, then
+        # you can likely disable this fix with the following flag too. YMMV
+        if(NOT ${AARCH64_TARGET_CPU} STREQUAL "cortex-a53")
+          list(APPEND GENERAL_OPTIONS "mno-fix-cortex-a53-843419")
+        endif()
+      endif()
+    endif()
+
+    # PPC64
+    if(NOT IS_PPC64)
+      list(APPEND RELEASE_CXX_OPTIONS "momit-leaf-frame-pointer")
+    endif()
+
+    if(STATIC_CXX_LIB)
+      set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
+    endif()
+
+    if (ENABLE_SPLIT_DWARF)
+      set(GDB_SUBOPTION "split-dwarf")
+    endif()
   endif()
 
   # No optimizations for debug builds.
   # -Og enables some optimizations, but makes debugging harder by optimizing
   # away some functions and locals. -O0 is more debuggable.
   # -O0-ggdb was reputed to cause gdb to crash (github #4450)
-  set(CMAKE_C_FLAGS_DEBUG    "-O0 -g")
-  set(CMAKE_CXX_FLAGS_DEBUG  "-O0 -g")
-
-  # Generic GCC flags and Optional flags
+  set(CMAKE_C_FLAGS_DEBUG            "-O0 -g${GDB_SUBOPTION}")
+  set(CMAKE_CXX_FLAGS_DEBUG          "-O0 -g${GDB_SUBOPTION}")
+  set(CMAKE_C_FLAGS_DEBUGOPT         "-O2 -g${GDB_SUBOPTION}")
+  set(CMAKE_CXX_FLAGS_DEBUGOPT       "-O2 -g${GDB_SUBOPTION}")
   set(CMAKE_C_FLAGS_MINSIZEREL       "-Os -DNDEBUG")
   set(CMAKE_CXX_FLAGS_MINSIZEREL     "-Os -DNDEBUG")
   set(CMAKE_C_FLAGS_RELEASE          "-O3 -DNDEBUG")
-  set(CMAKE_CXX_FLAGS_RELEASE        "-O3 -DNDEBUG -fno-gcse ${CMAKE_CXX_OMIT_LEAF_FRAME_POINTER} --param max-inline-insns-auto=100 --param early-inlining-insns=200 --param max-early-inliner-iterations=50 --param=inline-unit-growth=200 --param=large-unit-insns=10000")
-  set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g")
-  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
-  set(CMAKE_C_FLAGS                  "${CMAKE_C_FLAGS} ${GNUCC_OPT} -w")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=gnu++11 -ffunction-sections -fdata-sections -fno-gcse -fno-omit-frame-pointer -Woverloaded-virtual -Wno-deprecated -Wno-strict-aliasing -Wno-write-strings -Wno-invalid-offsetof -fno-operator-names -Wno-error=array-bounds -Wno-error=switch -Werror=format-security -Wno-unused-result -Wno-sign-compare -Wno-attributes -Wno-maybe-uninitialized -Wno-unused-local-typedefs -fno-canonical-system-headers -Wno-deprecated-declarations -Wno-unused-function -Wvla ${GNUCC_OPT} ${GNUCC_PLAT_OPT}")
-  if(STATIC_CXX_LIB)
-    set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
-  endif()
+  set(CMAKE_CXX_FLAGS_RELEASE        "-O3 -DNDEBUG")
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g${GDB_SUBOPTION} -DNDEBUG")
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g${GDB_SUBOPTION} -DNDEBUG")
+  set(CMAKE_C_FLAGS                  "${CMAKE_C_FLAGS} -W -Werror=implicit-function-declaration")
+
+  mark_as_advanced(CMAKE_C_FLAGS_DEBUGOPT CMAKE_CXX_FLAGS_DEBUGOPT)
+
+  foreach(opt ${DISABLED_NAMED_WARNINGS})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-${opt}")
+  endforeach()
+
+  foreach(opt ${DISABLED_C_NAMED_WARNINGS})
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-${opt}")
+  endforeach()
+
+  foreach(opt ${GENERAL_OPTIONS})
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -${opt}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -${opt}")
+  endforeach()
+
+  foreach(opt ${GENERAL_CXX_OPTIONS})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -${opt}")
+  endforeach()
+
+  foreach(opt ${DEBUG_CXX_OPTIONS})
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -${opt}")
+  endforeach()
+
+  foreach(opt ${RELEASE_CXX_OPTIONS})
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -${opt}")
+  endforeach()
+
+  # The ASM part of this makes it more effort than it's worth
+  # to add these to the general flags system.
   if(ENABLE_AVX2)
     set(CMAKE_C_FLAGS    "${CMAKE_C_FLAGS} -mavx2 -march=core-avx2")
     set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -mavx2 -march=core-avx2")
     set(CMAKE_ASM_FLAGS  "${CMAKE_ASM_FLAGS} -mavx2 -march=core-avx2")
-  endif()
-
-  if(CYGWIN)
-  # in debug mode large files can overflow pe/coff sections
-  # this switches binutils to use the pe+ format
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wa,-mbig-obj")
-    # stack limit is set at compile time on windows
-    # code expects a minimum of 8 * 1024 * 1024 + 8 for a buffer
-    # the default is 2 mb
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--stack,8388616")
   endif()
 # using Intel C++
 elseif (${CMAKE_CXX_COMPILER_ID} STREQUAL "Intel")
@@ -162,28 +333,37 @@ elseif (${CMAKE_CXX_COMPILER_ID} STREQUAL "MSVC")
   set(MSVC_RELEASE_EXE_LINKER_OPTIONS)
 
   # Some addional configuration options.
-  set(MSVC_FAVORED_ARCHITECTURE "blend" CACHE STRING "One of 'blend', 'AMD64', 'INTEL64', or 'ATOM'. This tells the compiler to generate code optimized to run best on the specified architecture.")
-  set(MSVC_ENABLE_LTCG OFF CACHE BOOL "If enabled, use Link Time Code Generation for Release builds.")
-  set(MSVC_ENABLE_STATIC_ANALYSIS OFF CACHE BOOL "If enabled, do more complex static analysis and generate warnings appropriately.")
-  set(MSVC_NO_ASSERT_IN_DEBUG OFF CACHE BOOL "If enabled, don't do asserts in debug mode. The reduces the size of hphp_runtime_static by ~300mb.")
-  set(MSVC_ENABLE_PCH ON CACHE BOOL "If enabled, use precompiled headers to speed up the build.")
+  set(MSVC_ENABLE_ALL_WARNINGS ON CACHE BOOL "If enabled, pass /Wall to the compiler.")
   set(MSVC_ENABLE_DEBUG_INLINING ON CACHE BOOL "If enabled, enable inlining in the debug configuration. This allows /Zc:inline to be far more effective, resulting in hphp_runtime_static being ~450mb smaller.")
+  set(MSVC_ENABLE_LTCG OFF CACHE BOOL "If enabled, use Link Time Code Generation for Release builds.")
+  set(MSVC_ENABLE_PARALLEL_BUILD ON CACHE BOOL "If enabled, build multiple source files in parallel.")
+  set(MSVC_ENABLE_PCH ON CACHE BOOL "If enabled, use precompiled headers to speed up the build.")
+  set(MSVC_ENABLE_STATIC_ANALYSIS OFF CACHE BOOL "If enabled, do more complex static analysis and generate warnings appropriately.")
+  set(MSVC_FAVORED_ARCHITECTURE "blend" CACHE STRING "One of 'blend', 'AMD64', 'INTEL64', or 'ATOM'. This tells the compiler to generate code optimized to run best on the specified architecture.")
 
   # The general options passed:
   list(APPEND MSVC_GENERAL_OPTIONS
     "bigobj" # Support objects with > 65k sections. Needed for folly due to templates.
     "fp:precise" # Precise floating point model used in every other build, use it here as well.
     "EHa" # Enable both SEH and C++ Exceptions.
-    "MP" # Enable multi-processor compilation.
     "Oy-" # Disable elimination of stack frames.
-    "Wall" # Enable all warnings.
     "Zc:inline" # Have the compiler eliminate unreferenced COMDAT functions and data before emitting the object file. This produces significantly less input to the linker, resulting in MUCH faster linking.
     "Zo" # Enable enhanced optimized debugging. Produces slightly larger pdb files, but the resulting optimized code is much much easier to debug.
   )
 
+  # Enable all warnings if requested.
+  if (MSVC_ENABLE_ALL_WARNINGS)
+    list(APPEND MSVC_GENERAL_OPTIONS "Wall")
+  endif()
+
   # Enable static analysis if requested.
   if (MSVC_ENABLE_STATIC_ANALYSIS)
     list(APPEND MSVC_GENERAL_OPTIONS "analyze")
+  endif()
+
+  # Enable multi-processor compilation if requested.
+  if (MSVC_ENABLE_PARALLEL_BUILD)
+    list(APPEND MSVC_GENERAL_OPTIONS "MP")
   endif()
 
   # Enable AVX2 codegen if available and requested.
@@ -208,62 +388,69 @@ elseif (${CMAKE_CXX_COMPILER_ID} STREQUAL "MSVC")
     "4800" # Values being forced to bool, this happens many places, and is a "performance warning".
   )
 
-  # These warnings are disabled because we've
-  # enabled all warnings. If all warnings are
-  # not enabled, then these don't need to be
-  # disabled.
-  list(APPEND MSVC_DISABLED_WARNINGS
-    "4100" # Unreferenced formal parameter.
-    "4127" # Conditional expression is constant.
-    "4131" # Old style declarator used. This is triggered by ext_bc's backend code.
-    "4189" # Local variable is initialized but not referenced.
-    "4191" # Unsafe type cast.
-    "4200" # Non-standard extension, zero sized array.
-    "4201" # Non-standard extension used: nameless struct/union.
-    "4232" # Non-standard extension used: 'pCurrent': address of dllimport.
-    "4245" # Implicit change from signed/unsigned when initializing.
-    "4255" # Implicitly converting fucntion prototype from `()` to `(void)`.
-    "4265" # Class has virtual functions, but destructor is not virtual.
-    "4287" # Unsigned/negative constant mismatch.
-    "4296" # '<' Expression is always false.
-    "4315" # 'this' pointer for member may not be aligned to 8 bytes as expected by the constructor.
-    "4324" # Structure was padded due to alignment specifier.
-    "4355" # 'this' used in base member initializer list.
-    "4365" # Signed/unsigned mismatch.
-    "4371" # Layout of class may have changed due to fixes in packing.
-    "4388" # Signed/unsigned mismatch on relative comparison operator.
-    "4389" # Signed/unsigned mismatch on equality comparison operator.
-    "4435" # Object layout under /vd2 will change due to virtual base.
-    "4456" # Declaration of local hides previous definition of local by the same name.
-    "4457" # Declaration of local hides function parameter.
-    "4458" # Declaration of parameter hides class member.
-    "4459" # Declaration of parameter hides global declaration.
-    "4514" # Unreferenced inline function has been removed. (caused by /Zc:inline)
-    "4548" # Expression before comma has no effect. I wouldn't disable this normally, but malloc.h triggers this warning.
-    "4555" # Expression has no effect; expected expression with side-effect. This is triggered by boost/variant.hpp.
-    "4574" # ifdef'd macro was defined to 0.
-    "4582" # Constructor is not implicitly called.
-    "4583" # Destructor is not implicitly called.
-    "4608" # Member has already been initialized by another union member initializer.
-    "4619" # Invalid warning number used in #pragma warning.
-    "4623" # Default constructor was implicitly defined as deleted.
-    "4625" # Copy constructor was implicitly defined as deleted.
-    "4626" # Assignment operator was implicitly defined as deleted.
-    "4647" # __is_pod() has a different value in pervious versions of MSVC.
-    "4668" # Macro was not defined, replacing with 0.
-    "4701" # Potentially uninitialized local variable used.
-    "4702" # Unreachable code.
-    "4706" # Assignment within conditional expression.
-    "4710" # Function was not inlined.
-    "4711" # Function was selected for automated inlining. This produces tens of thousands of warnings in release mode if you leave it enabled, which will completely break Visual Studio, so don't enable it.
-    "4714" # Function marked as __forceinline not inlined.
-    "4774" # Format string expected in argument is not a string literal.
-    "4820" # Padding added after data member.
-    "4917" # A GUID can only be associated with a class. This is triggered by some standard windows headers.
-    "4946" # reinterpret_cast used between related types.
-    "5026" # Move constructor was implicitly defined as deleted.
-    "5027" # Move assignment operator was implicitly defined as deleted.
-  )
+  if (MSVC_ENABLE_ALL_WARNINGS)
+    # These warnings are disabled because we've
+    # enabled all warnings. If all warnings are
+    # not enabled, then these don't need to be
+    # disabled.
+    list(APPEND MSVC_DISABLED_WARNINGS
+      "4061" # Enum value not handled by a case in a switch on an enum. This isn't very helpful because it is produced even if a default statement is present.
+      "4100" # Unreferenced formal parameter.
+      "4127" # Conditional expression is constant.
+      "4131" # Old style declarator used. This is triggered by ext_bc's backend code.
+      "4189" # Local variable is initialized but not referenced.
+      "4191" # Unsafe type cast.
+      "4200" # Non-standard extension, zero sized array.
+      "4201" # Non-standard extension used: nameless struct/union.
+      "4232" # Non-standard extension used: 'pCurrent': address of dllimport.
+      "4245" # Implicit change from signed/unsigned when initializing.
+      "4255" # Implicitly converting fucntion prototype from `()` to `(void)`.
+      "4265" # Class has virtual functions, but destructor is not virtual.
+      "4287" # Unsigned/negative constant mismatch.
+      "4296" # '<' Expression is always false.
+      "4315" # 'this' pointer for member may not be aligned to 8 bytes as expected by the constructor.
+      "4324" # Structure was padded due to alignment specifier.
+      "4355" # 'this' used in base member initializer list.
+      "4365" # Signed/unsigned mismatch.
+      "4371" # Layout of class may have changed due to fixes in packing.
+      "4388" # Signed/unsigned mismatch on relative comparison operator.
+      "4389" # Signed/unsigned mismatch on equality comparison operator.
+      "4435" # Object layout under /vd2 will change due to virtual base.
+      "4456" # Declaration of local hides previous definition of local by the same name.
+      "4457" # Declaration of local hides function parameter.
+      "4458" # Declaration of parameter hides class member.
+      "4459" # Declaration of parameter hides global declaration.
+      "4464" # Relative include path contains "..". This is triggered by the TBB headers.
+      "4505" # Unreferenced local function has been removed. This is mostly the result of things not being needed under MSVC.
+      "4514" # Unreferenced inline function has been removed. (caused by /Zc:inline)
+      "4548" # Expression before comma has no effect. I wouldn't disable this normally, but malloc.h triggers this warning.
+      "4555" # Expression has no effect; expected expression with side-effect. This is triggered by boost/variant.hpp.
+      "4574" # ifdef'd macro was defined to 0.
+      "4582" # Constructor is not implicitly called.
+      "4583" # Destructor is not implicitly called.
+      "4608" # Member has already been initialized by another union member initializer.
+      "4619" # Invalid warning number used in #pragma warning.
+      "4623" # Default constructor was implicitly defined as deleted.
+      "4625" # Copy constructor was implicitly defined as deleted.
+      "4626" # Assignment operator was implicitly defined as deleted.
+      "4647" # __is_pod() has a different value in pervious versions of MSVC.
+      "4668" # Macro was not defined, replacing with 0.
+      "4701" # Potentially uninitialized local variable used.
+      "4702" # Unreachable code.
+      "4706" # Assignment within conditional expression.
+      "4709" # Comma operator within array index expression. This currently just produces false-positives.
+      "4710" # Function was not inlined.
+      "4711" # Function was selected for automated inlining. This produces tens of thousands of warnings in release mode if you leave it enabled, which will completely break Visual Studio, so don't enable it.
+      "4714" # Function marked as __forceinline not inlined.
+      "4774" # Format string expected in argument is not a string literal.
+      "4820" # Padding added after data member.
+      "4917" # A GUID can only be associated with a class. This is triggered by some standard windows headers.
+      "4946" # reinterpret_cast used between related types.
+      "5026" # Move constructor was implicitly defined as deleted.
+      "5027" # Move assignment operator was implicitly defined as deleted.
+      "5031" # #pragma warning(pop): likely mismatch, popping warning state pushed in different file. This is needed because of how boost does things.
+    )
+  endif()
 
   if (MSVC_ENABLE_STATIC_ANALYSIS)
     # Warnings disabled for /analyze
@@ -467,3 +654,5 @@ elseif (${CMAKE_CXX_COMPILER_ID} STREQUAL "MSVC")
 else()
   message("Warning: unknown/unsupported compiler, things may go wrong")
 endif()
+
+include(ThinArchives)

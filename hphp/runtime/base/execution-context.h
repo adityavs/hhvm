@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,10 @@
 #ifndef incl_HPHP_EXECUTION_CONTEXT_H_
 #define incl_HPHP_EXECUTION_CONTEXT_H_
 
-#include <list>
-#include <set>
-#include <string>
-#include <unordered_map>
-#include <utility>
-#include <vector>
-
-#include "hphp/util/lock.h"
-#include "hphp/util/thread-local.h"
-#include "hphp/util/tiny-vector.h"
+#include "hphp/runtime/base/req-list.h"
+#include "hphp/runtime/base/req-tiny-vector.h"
+#include "hphp/runtime/base/req-vector.h"
 #include "hphp/runtime/base/apc-handle.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/string-buffer.h"
@@ -40,13 +32,22 @@
 #include "hphp/runtime/vm/minstr-state.h"
 #include "hphp/runtime/vm/pc-filter.h"
 
-namespace vixl { class Simulator; }
+#include "hphp/util/lock.h"
+#include "hphp/util/logger.h"
+#include "hphp/util/rds-local.h"
+#include "hphp/util/thread-local.h"
+
+#include <list>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace HPHP {
 struct RequestEventHandler;
 struct EventHook;
 struct Resumable;
-namespace jit { struct Translator; }
 }
 
 namespace HPHP {
@@ -60,19 +61,9 @@ struct VMState {
   TypedValue* sp;
   MInstrState mInstrState;
   ActRec* jitCalledFrame;
-};
-
-enum class CallType {
-  ClsMethod,
-  ObjMethod,
-  CtorMethod,
-};
-enum class LookupResult {
-  MethodFoundWithThis,
-  MethodFoundNoThis,
-  MagicCallFound,
-  MagicCallStaticFound,
-  MethodNotFound,
+  jit::TCA jitReturnAddr;
+  Either<ObjectData*, Exception*> exn;
+  bool unwinderSideEnter;
 };
 
 enum class InclOpFlags {
@@ -91,8 +82,33 @@ inline bool operator&(const InclOpFlags& l, const InclOpFlags& r) {
   return static_cast<int>(l) & static_cast<int>(r);
 }
 
+enum class OBFlags {
+  None = 0,
+  Cleanable = 1,
+  Flushable = 2,
+  Removable = 4,
+  OutputDisabled = 8,
+  WriteToStdout = 16,
+  Default = 1 | 2 | 4
+};
+
+inline OBFlags operator|(const OBFlags& l, const OBFlags& r) {
+  return static_cast<OBFlags>(static_cast<int>(l) | static_cast<int>(r));
+}
+
+inline OBFlags & operator|=(OBFlags& l, const OBFlags& r) {
+  return l = l | r;
+}
+
+inline OBFlags operator&(const OBFlags& l, const OBFlags& r) {
+  return static_cast<OBFlags>(static_cast<int>(l) & static_cast<int>(r));
+}
+
+inline bool any(OBFlags f) { return f != OBFlags::None; }
+inline bool operator!(OBFlags f) { return f == OBFlags::None; }
+
 struct VMParserFrame {
-  std::string filename;
+  LowStringPtr filename;
   int lineNumber;
 };
 
@@ -102,14 +118,33 @@ struct DebuggerSettings {
   int printLevel = -1;
 };
 
+struct ThrowAllErrorsSetter {
+  ThrowAllErrorsSetter();
+  ~ThrowAllErrorsSetter();
+
+private:
+  bool m_throwAllErrors;
+};
+
+enum class FileLoadFlags {
+  kDup,
+  kHitMem,
+  kWaited,
+  kHitDisk,
+  kCompiled,
+  kEvicted
+};
+
 using InvokeArgs = folly::Range<const TypedValue*>;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 struct ExecutionContext {
+  friend ThrowAllErrorsSetter;
+
   enum ShutdownType {
-    ShutDown,
-    PostSend,
+    ShutDown = 0,
+    PostSend = 1,
   };
 
   enum class ErrorThrowMode {
@@ -153,11 +188,13 @@ public:
    */
   Transport* getTransport();
   void setTransport(Transport*);
+  void setRequestTrace(rqtrace::Trace*);
   std::string getRequestUrl(size_t szLimit = std::string::npos);
   String getMimeType() const;
   void setContentType(const String& mimetype, const String& charset);
   String getCwd() const;
   void setCwd(const String&);
+  rqtrace::Trace* getRequestTrace();
 
   /**
    * Write to output.
@@ -169,22 +206,34 @@ public:
   void writeStdout(const char* s, int len);
   size_t getStdoutBytesWritten() const;
 
-  using PFUNC_STDOUT = void (*)(const char* s, int len, void* data);
-  void setStdout(PFUNC_STDOUT func, void* data);
+  /**
+   * Write to the transport, or to stdout if there is no transport.
+   */
+  void writeTransport(const char* s, int len);
+
+  struct StdoutHook {
+    virtual void operator()(const char* s, int len) = 0;
+    virtual ~StdoutHook() {};
+  };
+  void addStdoutHook(StdoutHook*);
+  bool removeStdoutHook(StdoutHook*);
 
   /**
    * Output buffering.
    */
-  void obStart(const Variant& handler = uninit_null(), int chunk_size = 0);
+  void obStart(const Variant& handler = uninit_null(),
+               int chunk_size = 0,
+               OBFlags flags = OBFlags::Default);
   String obCopyContents();
   String obDetachContents();
   int obGetContentLength();
   void obClean(int handler_flag);
-  bool obFlush();
+  bool obFlush(bool force = false);
   void obFlushAll();
   bool obEnd();
   void obEndAll();
   int obGetLevel();
+  String obGetBufferName();
   Array obGetStatus(bool full);
   void obSetImplicitFlush(bool on);
   Array obGetHandlers();
@@ -197,13 +246,11 @@ public:
   /**
    * Request sequences and program execution hooks.
    */
+  void acceptRequestEventHandlers(bool enable);
   std::size_t registerRequestEventHandler(RequestEventHandler* handler);
   void unregisterRequestEventHandler(RequestEventHandler* handler,
                                      std::size_t index);
-  void registerShutdownFunction(const Variant& function, Array arguments,
-                                ShutdownType type);
-  bool removeShutdownFunction(const Variant& function, ShutdownType type);
-  bool hasShutdownFunctions(ShutdownType type);
+  void registerShutdownFunction(const Variant& function, ShutdownType type);
   void onRequestShutdown();
   void onShutdownPreSend();
   void onShutdownPostSend();
@@ -215,6 +262,7 @@ public:
   Variant pushUserExceptionHandler(const Variant& function);
   void popUserErrorHandler();
   void popUserExceptionHandler();
+  void clearUserErrorHandlers();
   bool errorNeedsHandling(int errnum,
                           bool callUserHandler,
                           ErrorThrowMode mode);
@@ -223,13 +271,13 @@ public:
                    int errnum,
                    bool callUserHandler,
                    ErrorThrowMode mode,
-                   const std::string &prefix,
+                   const std::string& prefix,
                    bool skipFrame = false);
-  bool callUserErrorHandler(const Exception &e, int errnum,
+  bool callUserErrorHandler(const Exception& e, int errnum,
                             bool swallowExceptions);
-  void recordLastError(const Exception &e, int errnum = 0);
+  void recordLastError(const Exception& e, int errnum = 0);
   void clearLastError();
-  bool onFatalError(const Exception &e); // returns handled
+  bool onFatalError(const Exception& e); // returns handled
   bool onUnhandledException(Object e);
   ErrorState getErrorState() const;
   void setErrorState(ErrorState);
@@ -239,6 +287,9 @@ public:
   void setErrorPage(const String&);
   String getLastErrorPath() const;
   int getLastErrorLine() const;
+
+  // Obtain the current queued errors, resetting the queue in the process.
+  Array releaseDeferredErrors();
 
   /**
    * Misc. settings
@@ -252,7 +303,6 @@ public:
   void setTimeZone(const String&);
 
   bool getThrowAllErrors() const;
-  void setThrowAllErrors(bool);
 
   Variant getExitCallback();
   void setExitCallback(Variant);
@@ -271,25 +321,31 @@ public:
 
   bool hasRequestEventHandlers() const;
 
+  const RepoOptions& getRepoOptionsForCurrentFrame() const;
+
+  const RepoOptions* getRepoOptionsForRequest() const;
+
+  // When a file is loaded inside of a request context we perform a consistency
+  // check to ensure that all files loaded within the request use the same
+  // options.
+  void onLoadWithOptions(const char* f, const RepoOptions& options);
+
 private:
   struct OutputBuffer {
-    explicit OutputBuffer(Variant&& h, int chunk_sz)
-      : oss(8192), handler(std::move(h)), chunk_size(chunk_sz)
+    explicit OutputBuffer(Variant&& h, int chunk_sz, OBFlags flgs)
+      : oss(8192), handler(std::move(h)), chunk_size(chunk_sz), flags(flgs)
     {}
     StringBuffer oss;
     Variant handler;
     int chunk_size;
-    template<class F> void scan(F& mark) {
-      mark(oss);
-      mark(handler);
-      mark(chunk_size);
-    }
+    OBFlags flags;
   };
 
 private:
   // helper functions
   void resetCurrentBuffer();
   void executeFunctions(ShutdownType type);
+  void setThrowAllErrors(bool);
 
 public:
   void requestInit();
@@ -300,25 +356,6 @@ public:
   void cleanup();
 
 public:
-  const Func* lookupMethodCtx(const Class* cls,
-                                        const StringData* methodName,
-                                        const Class* pctx,
-                                        CallType lookupType,
-                                        bool raise = false);
-  LookupResult lookupObjMethod(const Func*& f,
-                               const Class* cls,
-                               const StringData* methodName,
-                               const Class* ctx,
-                               bool raise = false);
-  LookupResult lookupClsMethod(const Func*& f,
-                               const Class* cls,
-                               const StringData* methodName,
-                               ObjectData* this_,
-                               const Class* ctx,
-                               bool raise = false);
-  LookupResult lookupCtorMethod(const Func*& f,
-                                const Class* cls,
-                                bool raise = false);
   ObjectData* createObject(const Class* cls,
                            const Variant& params,
                            bool init);
@@ -336,14 +373,14 @@ public:
   /*
    * Look up a class constant.
    *
-   * The returned Cell is guaranteed not to hold a reference counted
+   * The returned TypedValue is guaranteed not to hold a reference counted
    * type.  Raises an error if the class has no constant with that
    * name, or if the class is not defined.
    */
-  Cell lookupClsCns(const NamedEntity* ne,
+  TypedValue lookupClsCns(const NamedEntity* ne,
                     const StringData* cls,
                     const StringData* cns);
-  Cell lookupClsCns(const StringData* cls,
+  TypedValue lookupClsCns(const StringData* cls,
                     const StringData* cns);
 
   // Get the next outermost VM frame, even across re-entry
@@ -351,32 +388,32 @@ public:
 
   ActRec* getStackFrame();
   ObjectData* getThis();
-  Class* getContextClass();
-  Class* getParentContextClass();
   StringData* getContainingFileName();
   int getLine();
-  Array getCallerInfo();
-  int64_t getDebugBacktraceHash();
-  bool evalUnit(Unit* unit, PC& pc, int funcType);
-  void invokeUnit(TypedValue* retval, const Unit* unit);
+  bool evalUnit(Unit* unit, PC callPC, PC& pc, int funcType);
+  TypedValue invokeUnit(const Unit* unit, bool callByHPHPInvoke = false);
   Unit* compileEvalString(StringData* code,
                                 const char* evalFilename = nullptr);
-  StrNR createFunction(const String& args, const String& code);
 
-  // Compiles the passed string and evaluates it in the given frame. Returns
-  // false on failure.
-  bool evalPHPDebugger(TypedValue* retval, StringData* code, int frame);
+  struct EvaluationResult {
+    bool failed;
+    Variant result;
+    std::string error;
+  };
 
-  // Evaluates the a unit compiled via compile_string in the given frame.
-  // Returns false on failure.
-  bool evalPHPDebugger(TypedValue* retval, Unit* unit, int frame);
+  // Evaluates the given unit in the Nth frame from the current frame (ignoring
+  // skip-frames).
+  EvaluationResult evalPHPDebugger(StringData* code, int frame);
+  EvaluationResult evalPHPDebugger(Unit* unit, int frame);
 
   void enterDebuggerDummyEnv();
   void exitDebuggerDummyEnv();
-  void destructObjects();
+  void debuggerExecutePsps();
+
+  Array& getDebuggerEnv() { return m_debuggerEnv; }
 
   bool isNested() { return m_nesting != 0; }
-  void pushVMState(Cell* savedSP);
+  void pushVMState(TypedValue* savedSP);
   void popVMState();
 
   /*
@@ -394,21 +431,28 @@ public:
   ActRec* getPrevVMState(const ActRec* fp,
                          Offset* prevPc = nullptr,
                          TypedValue** prevSp = nullptr,
-                         bool* fromVMEntry = nullptr);
-
+                         bool* fromVMEntry = nullptr,
+                         uint64_t* jitReturnAddr = nullptr);
+  ActRec* getPrevVMStateSkipFrame(const ActRec* fp,
+                                  Offset* prevPc = nullptr,
+                                  TypedValue** prevSp = nullptr,
+                                  bool* fromVMEntry = nullptr);
   /*
    * Returns the caller of the given frame.
    */
   const Func* getPrevFunc(const ActRec*);
 
-  ActRec* getFrameAtDepth(int frame = 0);
-  VarEnv* getOrCreateVarEnv(int frame = 0);
-  VarEnv* hasVarEnv(int frame = 0);
-  void setVar(StringData* name, const TypedValue* v);
-  void bindVar(StringData* name, TypedValue* v);
-  Array getLocalDefinedVariables(int frame);
-  const Variant& getEvaledArg(const StringData* val,
-                              const String& namespacedName);
+  /*
+   * Returns the call frame at the specified depth, intended only
+   * for use by the debugger. Use in other contexts may not be safe.
+   */
+  ActRec* getFrameAtDepthForDebuggerUnsafe(int frame = 0);
+  VarEnv* getVarEnv(const ActRec* fp);
+  void setVar(StringData* name, tv_rval v);
+  Array getLocalDefinedVariablesDebugger(int frame);
+  Variant getEvaledArg(const StringData* val,
+                       const String& namespacedName,
+                       const Unit* funcUnit);
 
 private:
   template <bool forwarding>
@@ -417,113 +461,78 @@ private:
 public:
   void syncGdbState();
 
-  enum InvokeFlags {
-    InvokeNormal,
-    InvokeCuf,
-    InvokePseudoMain
-  };
+  TypedValue invokePseudoMain(const Func* f,
+                              VarEnv* varEnv = nullptr,
+                              ObjectData* this_ = nullptr,
+                              Class* class_ = nullptr);
 
-  void invokeFunc(TypedValue* retval,
-                  const Func* f,
-                  const Variant& args_ = init_null_variant,
-                  ObjectData* this_ = nullptr,
-                  Class* class_ = nullptr,
-                  VarEnv* varEnv = nullptr,
-                  StringData* invName = nullptr,
-                  InvokeFlags flags = InvokeNormal);
+  using ThisOrClass = Either<ObjectData*, Class*>;
 
-  void invokeFunc(TypedValue* retval,
-                  const CallCtx& ctx,
-                  const Variant& args_,
-                  VarEnv* varEnv = nullptr);
+  TypedValue invokeFunc(const Func* f,
+                        const Variant& args_ = init_null_variant,
+                        ObjectData* this_ = nullptr,
+                        Class* class_ = nullptr,
+                        StringData* invName = nullptr,
+                        bool dynamic = true,
+                        bool checkRefAnnot = false,
+                        bool allowDynCallNoPointer = false,
+                        Array&& reifiedGenerics = Array());
 
-  void invokeFuncFew(TypedValue* retval,
-                     const Func* f,
-                     void* thisOrCls,
-                     StringData* invName,
-                     int argc,
-                     const TypedValue* argv);
+  TypedValue invokeFunc(const CallCtx& ctx,
+                        const Variant& args_);
 
-  void invokeFuncFew(TypedValue* retval,
-                     const Func* f,
-                     void* thisOrCls,
-                     StringData* invName = nullptr);
+  TypedValue invokeFuncFew(const Func* f,
+                           ThisOrClass thisOrCls,
+                           StringData* invName,
+                           uint32_t numArgs,
+                           const TypedValue* argv,
+                           bool dynamic = true,
+                           bool allowDynCallNoPointer = false);
 
-  void invokeFuncFew(TypedValue* retval,
-                     const CallCtx& ctx,
-                     int argc,
-                     const TypedValue* argv);
+  TypedValue invokeFuncFew(const Func* f,
+                           ThisOrClass thisOrCls,
+                           StringData* invName = nullptr);
+
+  TypedValue invokeFuncFew(const CallCtx& ctx,
+                           uint32_t numArgs,
+                           const TypedValue* argv);
 
   TypedValue invokeMethod(
     ObjectData* obj,
     const Func* meth,
-    InvokeArgs args = InvokeArgs()
+    InvokeArgs args = InvokeArgs(),
+    bool dynamic = true
   );
 
   Variant invokeMethodV(
     ObjectData* obj,
     const Func* meth,
-    InvokeArgs args = InvokeArgs()
+    InvokeArgs args = InvokeArgs(),
+    bool dynamic = true
   );
 
   void resumeAsyncFunc(Resumable* resumable, ObjectData* freeObj,
-                       Cell awaitResult);
+                       TypedValue awaitResult);
   void resumeAsyncFuncThrow(Resumable* resumable, ObjectData* freeObj,
                             ObjectData* exception);
 
-public:
-  template<class F> void scan(F& mark) {
-    //mark(m_transport);
-    mark(m_cwd);
-    //mark(m_sb); // points into m_buffers
-    //mark(m_out); // points into m_buffers
-    mark(m_remember_chunk);
-    for (auto& b : m_buffers) b.scan(mark);
-    mark(m_insideOBHandler);
-    mark(m_implicitFlush);
-    mark(m_protectedLevel);
-    //mark(m_stdout);
-    //mark(m_stdoutData);
-    mark(m_stdoutBytesWritten);
-    mark(m_rawPostData);
-    mark(m_requestEventHandlers);
-    mark(m_shutdowns);
-    mark(m_userErrorHandlers);
-    mark(m_userExceptionHandlers);
-    //mark(m_errorState);
-    mark(m_lastError);
-    mark(m_errorPage);
-    mark(m_envs);
-    mark(m_timezone);
-    mark(m_throwAllErrors);
-    //mark(m_streamContext);
-    mark(m_shutdownsBackup);
-    mark(m_userErrorHandlersBackup);
-    mark(m_userExceptionHandlersBackup);
-    mark(m_exitCallback);
-    mark(m_sandboxId);
-    //mark(m_vhost); // VirtualHost* not allocated in php request heap
-    //mark(debuggerSettings);
-    mark(m_liveBCObjs);
-    mark(m_apcMemSize);
-    //mark(m_apcHandles);
-    //mark(dynPropTable); // don't root objects with dyn props
-    mark(m_globalVarEnv);
-    mark(m_evaledFiles);
-    mark(m_evaledFilesOrder);
-    mark(m_createdFuncs);
-    //for (auto& f : m_faults) mark(f);
-    mark(m_lambdaCounter);
-    //mark(m_nestedVMs);
-    mark(m_nesting);
-    mark(m_dbgNoBreak);
-    mark(m_evaledArgs);
-    mark(m_lastErrorPath);
-    mark(m_lastErrorLine);
-    mark(m_setprofileCallback);
-    mark(m_executingSetprofileCallback);
-    //mark(m_activeSims);
-  }
+  bool setHeaderCallback(const Variant& callback);
+
+  template<class Fn> void sweepDynPropTable(Fn);
+
+private:
+  template<class FEnterVM>
+  TypedValue invokeFuncImpl(const Func* f,
+                            ObjectData* thiz, Class* cls,
+                            uint32_t numArgsInclUnpack,
+                            FEnterVM doEnterVM);
+
+  struct ExcLoggerHook final : LoggerHook {
+    explicit ExcLoggerHook(ExecutionContext& ec) : ec(ec) {}
+    void operator()(const char* header, const char* msg, const char* ending)
+         override;
+    ExecutionContext& ec;
+  };
 
 ///////////////////////////////////////////////////////////////////////////////
 // only fields past here, please.
@@ -540,14 +549,15 @@ private:
   bool m_insideOBHandler{false};
   bool m_implicitFlush;
   int m_protectedLevel;
-  PFUNC_STDOUT m_stdout;
-  void* m_stdoutData;
+
+  std::unordered_set<StdoutHook*> m_stdoutHooks;
   size_t m_stdoutBytesWritten;
   String m_rawPostData;
 
   // request handlers
   req::vector<RequestEventHandler*> m_requestEventHandlers;
-  Array m_shutdowns;
+  std::array<Array, 2> m_shutdowns;
+  bool m_acceptRequestEventHandlers;
 
   // error handling
   req::vector<std::pair<Variant,int>> m_userErrorHandlers;
@@ -556,6 +566,7 @@ private:
   String m_lastError;
   int m_lastErrorNum;
   String m_errorPage;
+  Array m_deferredErrors;
 
   // misc settings
   Array m_envs;
@@ -564,7 +575,7 @@ private:
   req::ptr<StreamContext> m_streamContext;
 
   // session backup/restore for RPCRequestHandler
-  Array m_shutdownsBackup;
+  std::array<Array, 2> m_shutdownsBackup;
   req::vector<std::pair<Variant,int>> m_userErrorHandlersBackup;
   req::vector<Variant> m_userExceptionHandlersBackup;
   Variant m_exitCallback;
@@ -573,7 +584,6 @@ private:
   const VirtualHost* m_vhost;
 public:
   DebuggerSettings debuggerSettings;
-  req::set<ObjectData*> m_liveBCObjs;
 private:
   size_t m_apcMemSize{0};
   std::vector<APCHandle*> m_apcHandles; // gets moved to treadmill
@@ -581,39 +591,65 @@ public:
   // Although the error handlers may want to access dynamic properties,
   // we cannot *call* the error handlers (or their destructors) while
   // destroying the context, so C++ order of destruction is not an issue.
-  req::hash_map<const ObjectData*,ArrayNoDtor> dynPropTable;
+  req::fast_map<const ObjectData*,ArrayNoDtor> dynPropTable;
+  TYPE_SCAN_IGNORE_FIELD(dynPropTable);
   VarEnv* m_globalVarEnv;
-  req::hash_map<const StringData*,Unit*,string_data_hash,string_data_same>
+  struct FileInfo {
+    Unit* unit;
+    time_t ts_sec; // timestamp seconds
+    unsigned long ts_nsec; // timestamp nanoseconds (or 0 if ns not supported)
+    FileLoadFlags flags;
+  };
+  req::fast_map<const StringData*, FileInfo, string_data_hash, string_data_same>
     m_evaledFiles;
   req::vector<const StringData*> m_evaledFilesOrder;
-  req::vector<Unit*> m_createdFuncs;
-  req::vector<Fault> m_faults;
   int m_lambdaCounter;
-  TinyVector<VMState, 32> m_nestedVMs;
+  using VMStateVec = req::TinyVector<VMState, 32>;
+  VMStateVec m_nestedVMs;
+  TYPE_SCAN_IGNORE_FIELD(m_nestedVMs); // handled explicitly in heap-scan.h
   int m_nesting;
   bool m_dbgNoBreak;
-  bool m_unwindingCppException;
 private:
   Array m_evaledArgs;
   String m_lastErrorPath;
   int m_lastErrorLine;
 public:
   Variant m_setprofileCallback;
+  Variant m_memThresholdCallback;
+  Variant m_timeThresholdCallback;
   uint64_t m_setprofileFlags;
   bool m_executingSetprofileCallback;
-  req::vector<vixl::Simulator*> m_activeSims;
+  hphp_fast_set<std::string> m_setprofileFunctions;
+public:
+  TypedValue m_headerCallback;
+  bool m_headerCallbackDone{false}; // used to prevent infinite loops
+private:
+  ExcLoggerHook m_logger_hook;
+  rqtrace::Trace* m_requestTrace{nullptr};
+
+  folly::Optional<RepoOptions> m_requestOptions;
+
+  Array m_debuggerEnv; // variables read/written in the REPL
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
 // MSVC doesn't instantiate this, causing an undefined symbol at link time
 // if the template<> is present, but other compilers require it.
+namespace rds { namespace local {
 #ifndef _MSC_VER
 template<>
 #endif
-void ThreadLocalNoCheck<ExecutionContext>::destroy();
+void RDSLocal<ExecutionContext, Initialize::Explicitly>::destroy();
+}}
 
-extern DECLARE_THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
+// Use AliasedRDSLocal for the ExecutionContext since it is accessed so
+// frequently, and AliasedRDSlocal may save up to 1 instruction and 1 load
+// per access.
+extern rds::local::AliasedRDSLocal<ExecutionContext,
+                                   rds::local::Initialize::Explicitly,
+                                   &rds::local::detail::HotRDSLocals::g_context
+                                  > g_context;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

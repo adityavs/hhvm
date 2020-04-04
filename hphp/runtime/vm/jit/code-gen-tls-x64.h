@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -50,10 +50,26 @@ namespace HPHP { namespace jit { namespace x64 { namespace detail {
  * out, we take a datum's linear address, and subtract it from the linear
  * address where TLS starts.
  */
-template<typename T>
-Vptr emitTLSAddr(Vout& v, TLSDatum<T> datum) {
+template <typename T>
+Vptr emitTLSAddr(Vout& /*v*/, TLSDatum<T> datum) {
   uintptr_t vaddr = uintptr_t(datum.tls) - tlsBase();
-  return Vptr{baseless(vaddr), Vptr::FS};
+  return Vptr{baseless(vaddr), Segment::FS};
+}
+
+template<typename T>
+Vreg emitTLSLea(Vout& v, TLSDatum<T> datum, int offset) {
+  auto const base = v.makeReg();
+  auto const addr = v.makeReg();
+  v << load{Vptr{baseless(0), Segment::FS}, base};
+
+  auto const tlsBaseAddr = tlsBase();
+  auto const datumAddr = uintptr_t(datum.tls) + offset;
+  if (datumAddr < tlsBaseAddr) {
+    v << subq{v.cns(tlsBaseAddr - datumAddr), base, addr, v.makeReg()};
+  } else {
+    v << addq{v.cns(datumAddr - tlsBaseAddr), base, addr, v.makeReg()};
+  }
+  return addr;
 }
 
 #else // __APPLE__
@@ -110,8 +126,15 @@ template<typename T>
 Vptr emitTLSAddr(Vout& v, TLSDatum<T> datum) {
   auto const scratch = v.makeReg();
 
-  v << load{Vptr{baseless(datum.raw[1] * 8), Vptr::GS}, scratch};
+  v << load{Vptr{baseless(datum.raw[1] * 8), Segment::GS}, scratch};
   return scratch[datum.raw[2]];
+}
+
+template<typename T>
+Vreg emitTLSLea(Vout& v, TLSDatum<T> datum, int offset) {
+  auto const b = v.makeReg();
+  v << lea{detail::emitTLSAddr(v, datum) + offset, b};
+  return b;
 }
 
 #endif

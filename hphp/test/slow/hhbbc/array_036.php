@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 function x() { return 2; }
-function foo() { return array(x()); }
+function foo() { return varray[x()]; }
 function bar() {
   $z = foo();
   $z[1] = 12;
@@ -16,5 +16,9 @@ function bar() {
   var_dump(is_int($z[1]));
   var_dump($z);
 }
-bar();
 
+
+<<__EntryPoint>>
+function main_array_036() {
+bar();
+}

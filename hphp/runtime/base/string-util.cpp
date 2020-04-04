@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -50,9 +50,9 @@ String StringUtil::StripHTMLTags(const String& input,
 // splits/joins
 
 Variant StringUtil::Explode(const String& input, const String& delimiter,
-                            int limit /* = 0x7FFFFFFF */) {
+                            int64_t limit /* = PHP_INT_MAX */) {
   if (delimiter.empty()) {
-    throw_invalid_argument("delimiter: (empty)");
+    raise_invalid_argument_warning("delimiter: (empty)");
     return false;
   }
 
@@ -88,7 +88,7 @@ Variant StringUtil::Explode(const String& input, const String& delimiter,
       std::vector<int> positions;
       int len = delimiter.size();
       int pos0 = 0;
-      int found = 0;
+      int64_t found = 0;
       do {
         positions.push_back(pos0);
         positions.push_back(pos - pos0);
@@ -102,8 +102,8 @@ Variant StringUtil::Explode(const String& input, const String& delimiter,
         positions.push_back(input.size() - pos0);
         found++;
       }
-      int iMax = (found + limit) << 1;
-      for (int i = 0; i < iMax; i += 2) {
+      uint64_t nelems = std::max(found + limit, (int64_t)0);
+      for (uint64_t i = 0; i < nelems * 2; i += 2) {
         ret.append(input.substr(positions[i], positions[i+1]));
       }
     } // else we have negative limit and delimiter not found
@@ -122,17 +122,16 @@ String StringUtil::Implode(const Variant& items, const String& delim,
   int size = getContainerSize(items);
   if (size == 0) return empty_string();
 
-  String* sitems = (String*)req::malloc(size * sizeof(String));
-  int len = 0;
-  int lenDelim = delim.size();
-  int i = 0;
+  req::vector<String> sitems;
+  sitems.reserve(size);
+  size_t len = 0;
+  size_t lenDelim = delim.size();
   for (ArrayIter iter(items); iter; ++iter) {
-    new (&sitems[i]) String(iter.second().toString());
-    len += sitems[i].size() + lenDelim;
-    i++;
+    sitems.emplace_back(iter.second().toString());
+    len += sitems.back().size() + lenDelim;
   }
   len -= lenDelim; // always one delimiter less than count of items
-  assert(i == size);
+  assertx(sitems.size() == size);
 
   String s = String(len, ReserveString);
   char *buffer = s.mutableData();
@@ -142,7 +141,6 @@ String StringUtil::Implode(const Variant& items, const String& delim,
   int init_len = init_str.size();
   memcpy(p, init_str.data(), init_len);
   p += init_len;
-  sitems[0].~String();
   for (int i = 1; i < size; i++) {
     String &item = sitems[i];
     memcpy(p, sdelim, lenDelim);
@@ -150,24 +148,22 @@ String StringUtil::Implode(const Variant& items, const String& delim,
     int lenItem = item.size();
     memcpy(p, item.data(), lenItem);
     p += lenItem;
-    sitems[i].~String();
   }
-  req::free(sitems);
-  assert(p - buffer == len);
+  assertx(p - buffer == len);
   s.setSize(len);
   return s;
 }
 
 Variant StringUtil::Split(const String& str, int64_t split_length /* = 1 */) {
   if (split_length <= 0) {
-    throw_invalid_argument(
+    raise_invalid_argument_warning(
       "The length of each segment must be greater than zero"
     );
     return false;
   }
 
   int len = str.size();
-  PackedArrayInit ret(len / split_length + 1, CheckAllocation{});
+  VArrayInit ret(len / split_length + 1);
   if (split_length >= len) {
     ret.append(str);
   } else {
@@ -181,7 +177,7 @@ Variant StringUtil::Split(const String& str, int64_t split_length /* = 1 */) {
 Variant StringUtil::ChunkSplit(const String& body, int chunklen /* = 76 */,
                                const String& end /* = "\r\n" */) {
   if (chunklen <= 0) {
-    throw_invalid_argument("chunklen: (non-positive)");
+    raise_invalid_argument_warning("chunklen: (non-positive)");
     return false;
   }
 
@@ -210,7 +206,7 @@ String StringUtil::HtmlEncode(const String& input, const int64_t qsBitmask,
                               const char *charset, bool dEncode, bool htmlEnt) {
   if (input.empty()) return input;
 
-  assert(charset);
+  assertx(charset);
   bool utf8 = true;
   if (strcasecmp(charset, "ISO-8859-1") == 0) {
     utf8 = false;
@@ -252,7 +248,7 @@ String StringUtil::HtmlEncodeExtra(const String& input, QuoteStyle quoteStyle,
                                    Array extra) {
   if (input.empty()) return input;
 
-  assert(charset);
+  assertx(charset);
   int flags = STRING_HTML_ENCODE_UTF8;
   if (nbsp) {
     flags |= STRING_HTML_ENCODE_NBSP;
@@ -316,7 +312,7 @@ String StringUtil::HtmlDecode(const String& input, QuoteStyle quoteStyle,
                               const char *charset, bool all) {
   if (input.empty()) return input;
 
-  assert(charset);
+  assertx(charset);
 
   int len = input.size();
   char *ret = string_html_decode(input.data(), len,
@@ -411,7 +407,7 @@ String StringUtil::DecodeFileUrl(const String& input) {
 // formatting
 
 String StringUtil::MoneyFormat(const char *format, double value) {
-  assert(format);
+  assertx(format);
   return string_money_format(format, value);
 }
 
@@ -436,10 +432,6 @@ String StringUtil::ROT13(const String& input) {
   if (input.empty()) return input;
   return String(string_rot13(input.data(), input.size()),
                 input.size(), AttachString);
-}
-
-int64_t StringUtil::CRC32(const String& input) {
-  return string_crc32(input.data(), input.size());
 }
 
 String StringUtil::Crypt(const String& input, const char *salt /* = "" */) {
@@ -479,8 +471,7 @@ size_t safe_address(size_t nmemb, size_t size, size_t offset) {
   uint64_t result =
     (uint64_t) nmemb * (uint64_t) size + (uint64_t) offset;
   if (UNLIKELY(result > StringData::MaxSize)) {
-    throw
-      FatalErrorException(0, "String length exceeded 2^31-2: %" PRIu64, result);
+    raiseStringLengthExceededError(result);
   }
   return result;
 }

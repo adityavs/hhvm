@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 
 namespace HPHP { namespace jit { namespace irgen {
+
 ////////////////////////////////////////////////////////////////////////////////
 
 /*
@@ -28,14 +29,17 @@ namespace HPHP { namespace jit { namespace irgen {
  * support irgen for the given source's type.
  */
 inline SSATmp* incDec(IRGS& env, IncDecOp op, SSATmp* src) {
-  if (src->isA(TNull)) {
-    return isInc(op) ? cns(env, 1) : src;
-  }
+  // Old behavior handles non int/double types.  New behavior warns/fatals for
+  // non int/double types.
+  if (RuntimeOption::EvalWarnOnIncDecInvalidType == 0) {
+    if (src->isA(TNull)) {
+      return isInc(op) ? cns(env, 1) : src;
+    }
 
-  if (src->type().subtypeOfAny(TBool, TArr, TObj, TRes)) {
-    return src;
+    if (src->type().subtypeOfAny(TBool, TArrLike, TObj, TRes)) {
+      return src;
+    }
   }
-
   if (!src->type().subtypeOfAny(TInt, TDbl)) {
     return nullptr;
   }
@@ -58,6 +62,7 @@ inline SSATmp* incDec(IRGS& env, IncDecOp op, SSATmp* src) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
 }}}
 
 #endif

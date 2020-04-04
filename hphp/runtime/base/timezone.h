@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,7 @@
 
 #include "hphp/runtime/base/resource-data.h"
 #include "hphp/runtime/base/type-string.h"
-#include "hphp/system/constants.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 
 #include <map>
 #include <memory>
@@ -30,15 +30,14 @@ extern "C" {
 
 namespace HPHP {
 
-class Array;
+struct Array;
 
 ///////////////////////////////////////////////////////////////////////////////
 
 /**
  * Handles all timezone related functions.
  */
-class TimeZone : public SweepableResourceData {
-public:
+struct TimeZone : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(TimeZone);
 
   /**
@@ -74,13 +73,25 @@ public:
   /**
    * Whether this represents a valid timezone.
    */
-  bool isValid() const { return get();}
+  bool isValid() const {
+    switch (m_tztype) {
+      case 0:
+        return false;
+      case TIMELIB_ZONETYPE_ID:
+        return getTZInfo();
+      case TIMELIB_ZONETYPE_OFFSET:
+      case TIMELIB_ZONETYPE_ABBR:
+        return true;
+    }
+    always_assert(false && "invalid tztype");
+  }
 
   /**
    * Get timezone's name or abbreviation.
    */
   String name() const;
   String abbr(int type = 0) const;
+  int type() const;
 
   /**
    * Get offset from UTC at the specified timestamp under this timezone.
@@ -117,14 +128,17 @@ public:
   req::ptr<TimeZone> cloneTimeZone() const;
 
 protected:
-  friend class DateTime;
-  friend class TimeStamp;
-  friend class DateInterval;
+  friend struct DateTime;
+  friend struct TimeStamp;
+  friend struct DateInterval;
 
   /**
    * Returns raw pointer. For internal use only.
+   *
+   * If type() !== TIMELIB_ZONETYPE_ID, this will definitely return nullptr,
+   * even if isValid().
    */
-  timelib_tzinfo *get() const { return m_tzi; }
+  timelib_tzinfo *getTZInfo() const { return m_tzi; }
 
 private:
   static const timelib_tzdb *GetDatabase();
@@ -134,12 +148,18 @@ private:
    */
   static timelib_tzinfo* GetTimeZoneInfoRaw(char* name, const timelib_tzdb* db);
 
-  timelib_tzinfo* m_tzi;
+  unsigned int m_tztype = 0;
+  timelib_tzinfo* m_tzi = nullptr;
+  int m_offset;
+  int m_dst;
+  String m_abbr;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 
 void timezone_init();
+const timelib_tzdb* timezone_get_tzdb();
+extern const timelib_tzdb* (*timezone_raw_get_tzdb)();
 
 ///////////////////////////////////////////////////////////////////////////////
 }

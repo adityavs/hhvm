@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,27 +16,25 @@
 #ifndef incl_HPHP_HHVM_PROCESS_INIT_H_
 #define incl_HPHP_HHVM_PROCESS_INIT_H_
 
+#include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/program-functions.h"
-#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/runtime-compiler.h"
 #include "hphp/compiler/analysis/emitter.h"
+#include "hphp/runtime/vm/treadmill.h"
 
 namespace HPHP {
 
 extern void (*g_vmProcessInit)();
 void hphp_process_init();
-
 void ProcessInit();
 void initialize_repo();
+
 /*
  * This must be called before execute_program_impl in an hhvm build.
  */
 inline void register_process_init() {
   g_vmProcessInit = &ProcessInit;
   g_hphp_compiler_parse = &HPHP::Compiler::hphp_compiler_parse;
-  g_hphp_build_native_func_unit = &HPHP::Compiler::
-    hphp_build_native_func_unit;
-  g_hphp_build_native_class_unit = &HPHP::Compiler::
-    hphp_build_native_class_unit;
 }
 
 /*
@@ -50,10 +48,9 @@ inline void init_for_unit_test() {
   IniSetting::Map ini = IniSetting::Map::object;
   Hdf config;
   RuntimeOption::Load(ini, config);
-  compile_file(0, 0, MD5(), 0);
+  hphp_compiler_init();
   hphp_process_init();
+  hphp_session_init(Treadmill::SessionKind::UnitTests);
 }
-
 }
-
 #endif

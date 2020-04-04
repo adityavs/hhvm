@@ -156,10 +156,9 @@ file_badread(struct magic_set *ms)
   file_error(ms, errno, "error reading");
 }
 
-protected int
-file_buffer(struct magic_set *ms, php_stream *stream, const char *inname, const void *buf,
-    size_t nb)
-{
+protected
+int file_buffer(struct magic_set* ms, php_stream* stream,
+                const char* /*inname*/, const void* buf, size_t nb) {
   int m = 0, rv = 0, looks_text = 0;
   int mime = ms->flags & MAGIC_MIME;
   const unsigned char *ubuf = CAST(const unsigned char *, buf);
@@ -358,7 +357,7 @@ file_getbuffer(struct magic_set *ms)
     return NULL;
   }
 
-#if defined(HAVE_WCHAR_H) && defined(HAVE_MBRTOWC) && defined(HAVE_WCWIDTH)
+#if defined(HAVE_WCHAR_H) && defined(HAVE_MBRTOWC)
   {
     mbstate_t state;
     wchar_t nextchar;
@@ -414,7 +413,7 @@ file_check_mem(struct magic_set *ms, unsigned int level)
   size_t len;
 
   if (level >= ms->c.len) {
-    len = (ms->c.len += 20) * sizeof(*ms->c.li);
+    len = (ms->c.len += 20 + level) * sizeof(*ms->c.li);
     ms->c.li = CAST(struct level_info *, (ms->c.li == NULL) ?
         emalloc(len) :
         erealloc(ms->c.li, len));
@@ -444,7 +443,7 @@ file_replace(struct magic_set *ms, const char *pat, const char *rep)
   HPHP::String patt(pat);
   int opts = 0;
   int res_len;
-  HPHP::Variant rep_cnt;
+  int64_t rep_cnt;
 
   opts |= PCRE_MULTILINE;
   convert_libmagic_pattern(patt, opts);
@@ -460,5 +459,5 @@ file_replace(struct magic_set *ms, const char *pat, const char *rep)
   strncpy(ms->o.buf, res.data(), res_len);
   ms->o.buf[res_len] = '\0';
 
-  return rep_cnt.toInt64Val();
+  return rep_cnt;
 }

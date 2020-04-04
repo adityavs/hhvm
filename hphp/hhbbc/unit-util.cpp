@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,6 +16,7 @@
 #include "hphp/hhbbc/unit-util.h"
 
 #include "hphp/hhbbc/representation.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/static-string-table.h"
 
 namespace HPHP { namespace HHBBC {
@@ -23,11 +24,9 @@ namespace HPHP { namespace HHBBC {
 //////////////////////////////////////////////////////////////////////
 
 bool is_systemlib_part(const php::Unit& unit) {
-  static const char prefix[] = "/:systemlib";
-  return !strncmp(unit.filename->data(), prefix, sizeof prefix - 1);
+  return FileUtil::isSystemName(unit.filename->slice());
 }
 
 //////////////////////////////////////////////////////////////////////
 
 }}
-

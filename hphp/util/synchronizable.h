@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,10 +27,11 @@ namespace HPHP {
  * Java-like base class for synchronization between object methods within the
  * same class. Check pool.h for a typical example.
  */
-class Synchronizable {
- public:
+struct Synchronizable {
   Synchronizable();
   virtual ~Synchronizable();
+  Synchronizable(const Synchronizable&) = delete;
+  Synchronizable& operator=(const Synchronizable&) = delete;
 
   void wait();
   bool wait(long seconds); // false if timed out
@@ -38,7 +39,8 @@ class Synchronizable {
   void notify();
   void notifyAll();
 
-  Mutex &getMutex() { return m_mutex;}
+  const Mutex& getMutex() const { return m_mutex; }
+  Mutex& getMutex() { return m_mutex; }
 
  private:
   Mutex m_mutex;

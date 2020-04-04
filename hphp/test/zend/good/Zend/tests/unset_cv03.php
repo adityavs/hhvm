@@ -1,6 +1,8 @@
-<?php
-$x = "ok\n";
-echo $x;
-include "unset.inc";
-echo $x;
-?>
+<?hh
+<<__EntryPoint>>
+function main_entry(): void {
+  $x = "ok\n";
+  echo $x;
+  include "unset.inc";
+  echo $x;
+}

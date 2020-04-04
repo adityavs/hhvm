@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 /**
  * Any failed MCRouter action will throw an
@@ -59,16 +59,16 @@ class MCRouter {
    * @return - Instance of MCRouter
    */
   public static function createSimple(ConstVector<string> $servers): MCRouter {
-    $options = array(
-      'config_str' => json_encode(array(
-        'pools' => array(
-          'P' => array(
+    $options = darray[
+      'config_str' => json_encode(darray[
+        'pools' => darray[
+          'P' => darray[
             'servers' => $servers,
-          ),
-        ),
+          ],
+        ],
         'route' => 'PoolRoute|P',
-      )),
-    );
+      ]),
+    ];
 
     return new MCRouter($options, implode(',', $servers));
   }
@@ -106,6 +106,24 @@ class MCRouter {
     string $key,
     string $value,
     int $flags = 0,
+    int $expiration = 0,
+  ): Awaitable<void>;
+
+  /**
+   * Compare and set
+   *
+   * @param int $cas - CAS token as returned by getRecord()
+   * @param string $key - Name of the key to store
+   * @param string $value - Datum to store
+   * @param int $expiration
+   *
+   * @throws On failure or mismatched CAS token
+   */
+  <<__Native>>
+  public function cas(
+    int $cas,
+    string $key,
+    string $value,
     int $expiration = 0,
   ): Awaitable<void>;
 
@@ -203,6 +221,22 @@ class MCRouter {
    */
   <<__Native>>
   public function get(string $key): Awaitable<string>;
+
+  /**
+   * Retreive a record and its metadata
+   *
+   * @param string $key = Name of the key to retreive
+   *
+   * @return array - Value retreived and additional metadata
+   *   array(
+   *     'value' => 'Value retreived',
+   *     'cas'   => 1234567890,
+   *     'flags' => 0x12345678,
+   *   )
+   * @throws On failure
+   */
+  <<__Native>>
+  public function gets(string $key): Awaitable<array>;
 
   /**
    * Get the remote server's current version

@@ -1,9 +1,9 @@
-<?php
-
-$ary = array(
-	"a" => array("b"),
-	"c" => array("d"),
-);
+<?hh
+<<__EntryPoint>> function main(): void {
+$ary = darray[
+	"a" => varray["b"],
+	"c" => varray["d"],
+];
 
 $it = new RecursiveArrayIterator($ary);
 $it = new RecursiveTreeIterator($it);
@@ -24,5 +24,5 @@ try {
 } catch (OutOfRangeException $e) {
 	echo "OutOfRangeException thrown\n";
 }
-?>
-===DONE===
+echo "===DONE===\n";
+}

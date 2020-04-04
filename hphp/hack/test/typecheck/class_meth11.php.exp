@@ -1,7 +1,11 @@
-fun  -> Tstring
-fun  -> Tstring
-fun  -> Tstring
-fun  -> Tstring
-fun  -> Tstring
-fun  -> Tstring
+File "class_meth11.php", line 10, characters 5-15:
+  (function(): string)
+File "class_meth11.php", line 13, characters 5-15:
+  (function(): string)
+File "class_meth11.php", line 21, characters 5-15:
+  (function(): string)
+File "class_meth11.php", line 38, characters 5-15:
+  (function(): string)
+File "class_meth11.php", line 42, characters 5-15:
+  (function(): string)
 No errors

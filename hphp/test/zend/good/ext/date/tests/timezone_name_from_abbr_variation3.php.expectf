@@ -1,0 +1,107 @@
+*** Testing timezone_name_from_abbr() : usage variation -  unexpected values to third argument $isdst***
+
+-- int 0 --
+string(3) "UTC"
+
+-- int 12345 --
+string(3) "UTC"
+
+-- int -12345 --
+string(3) "UTC"
+
+-- float 10.5 --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- float -10.5 --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- float .5 --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, double given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- empty array --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- int indexed array --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- associative array --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- nested arrays --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, array given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- uppercase NULL --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- lowercase null --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- lowercase true --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- lowercase false --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- uppercase TRUE --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- uppercase FALSE --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, boolean given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- empty string DQ --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- empty string SQ --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- string DQ --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- string SQ --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- mixed case string --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- heredoc --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, string given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- instance of classWithToString --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, object given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- instance of classWithoutToString --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, object given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- undefined var --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- unset var --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, null given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+
+-- resource --
+
+Warning: timezone_name_from_abbr() expects parameter 3 to be integer, resource given in %s/zend/good/ext/date/tests/timezone_name_from_abbr_variation3.php on line 99
+===DONE===

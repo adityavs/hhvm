@@ -36,10 +36,10 @@ function f() {
   echo "------------------------\n";
   var_dump($t->count(), $u->count());
   echo "------------------------\n";
-  var_dump($t->getIterator() instanceof Iterator);
-  var_dump($u->getIterator() instanceof Iterator);
-  var_dump($t->getIterator() instanceof KeyedIterator);
-  var_dump($u->getIterator() instanceof KeyedIterator);
+  var_dump($t->getIterator() is Iterator);
+  var_dump($u->getIterator() is Iterator);
+  var_dump($t->getIterator() is KeyedIterator);
+  var_dump($u->getIterator() is KeyedIterator);
   echo "------------------------\n";
   foreach ($t->getIterator() as $k => $v) {
     var_dump($k, $v);
@@ -54,4 +54,8 @@ function f() {
   echo "------------------------\n";
   var_dump(clone $t, clone $u);
 }
+
+<<__EntryPoint>>
+function main_823() {
 f();
+}

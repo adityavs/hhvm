@@ -1,0 +1,116 @@
+*** Testing date_format() : usage variation -  unexpected values to first argument $object***
+
+-- int 0 --
+
+Warning: date_format() expects parameter 1 to be object, integer given in %s/date_format_variation1.php on line 99
+
+-- int 1 --
+
+Warning: date_format() expects parameter 1 to be object, integer given in %s/date_format_variation1.php on line 99
+
+-- int 12345 --
+
+Warning: date_format() expects parameter 1 to be object, integer given in %s/date_format_variation1.php on line 99
+
+-- int -12345 --
+
+Warning: date_format() expects parameter 1 to be object, integer given in %s/date_format_variation1.php on line 99
+
+-- float 10.5 --
+
+Warning: date_format() expects parameter 1 to be object, double given in %s/date_format_variation1.php on line 99
+
+-- float -10.5 --
+
+Warning: date_format() expects parameter 1 to be object, double given in %s/date_format_variation1.php on line 99
+
+-- float .5 --
+
+Warning: date_format() expects parameter 1 to be object, double given in %s/date_format_variation1.php on line 99
+
+-- empty array --
+
+Warning: date_format() expects parameter 1 to be object, array given in %s/date_format_variation1.php on line 99
+
+-- int indexed array --
+
+Warning: date_format() expects parameter 1 to be object, array given in %s/date_format_variation1.php on line 99
+
+-- associative array --
+
+Warning: date_format() expects parameter 1 to be object, array given in %s/date_format_variation1.php on line 99
+
+-- nested arrays --
+
+Warning: date_format() expects parameter 1 to be object, array given in %s/date_format_variation1.php on line 99
+
+-- uppercase NULL --
+
+Warning: date_format() expects parameter 1 to be object, null given in %s/date_format_variation1.php on line 99
+
+-- lowercase null --
+
+Warning: date_format() expects parameter 1 to be object, null given in %s/date_format_variation1.php on line 99
+
+-- lowercase true --
+
+Warning: date_format() expects parameter 1 to be object, boolean given in %s/date_format_variation1.php on line 99
+
+-- lowercase false --
+
+Warning: date_format() expects parameter 1 to be object, boolean given in %s/date_format_variation1.php on line 99
+
+-- uppercase TRUE --
+
+Warning: date_format() expects parameter 1 to be object, boolean given in %s/date_format_variation1.php on line 99
+
+-- uppercase FALSE --
+
+Warning: date_format() expects parameter 1 to be object, boolean given in %s/date_format_variation1.php on line 99
+
+-- empty string DQ --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- empty string SQ --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- string DQ --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- string SQ --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- mixed case string --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- heredoc --
+
+Warning: date_format() expects parameter 1 to be object, string given in %s/date_format_variation1.php on line 99
+
+-- instance of classWithToString --
+
+Warning: date_format() expects parameter 1 to be DateTimeInterface, classWithToString given in %s/date_format_variation1.php on line 99
+bool(false)
+
+-- instance of classWithoutToString --
+
+Warning: date_format() expects parameter 1 to be DateTimeInterface, classWithoutToString given in %s/date_format_variation1.php on line 99
+bool(false)
+
+-- undefined var --
+
+Warning: date_format() expects parameter 1 to be object, null given in %s/date_format_variation1.php on line 99
+
+-- unset var --
+
+Warning: date_format() expects parameter 1 to be object, null given in %s/date_format_variation1.php on line 99
+
+-- resource --
+
+Warning: date_format() expects parameter 1 to be object, resource given in %s/date_format_variation1.php on line 99
+===DONE===

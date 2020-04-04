@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Base {
   function heh(D1 $d) {
@@ -18,4 +18,8 @@ function main() {
   var_dump($x->heh($x));
 }
 
+
+<<__EntryPoint>>
+function main_magic_call_014() {
 main();
+}

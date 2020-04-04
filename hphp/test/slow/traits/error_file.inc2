@@ -1,0 +1,6 @@
+<?hh
+
+trait U {
+  function f() { echo $x; }
+  function h() { foo(); }
+}

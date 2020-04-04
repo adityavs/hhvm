@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -31,8 +31,8 @@ AsioExternalThreadEvent::AsioExternalThreadEvent(ObjectData* priv_data)
 }
 
 void AsioExternalThreadEvent::abandon() {
-  assert(m_state.load() == Waiting);
-  assert(m_waitHandle->hasExactlyOneRef());
+  assertx(m_state.load() == Waiting);
+  assertx(m_waitHandle->hasExactlyOneRef());
   m_state.store(Abandoned);
   m_waitHandle->abandon(false);
 }
@@ -43,18 +43,19 @@ bool AsioExternalThreadEvent::cancel() {
     return true;
   }
 
-  assert(expected == Finished);
+  assertx(expected == Finished);
   return false;
 }
 
 void AsioExternalThreadEvent::markAsFinished() {
   uint32_t/*state_t*/ expected(Waiting);
   if (m_state.compare_exchange_strong(expected, Finished)) {
+    m_finishTime = AsioSession::TimePoint::clock::now();
     // transfer ownership
     m_queue->send(m_waitHandle);
   } else {
     // web request died, destroy object
-    assert(expected == Canceled);
+    assertx(expected == Canceled);
     release();
   }
 }

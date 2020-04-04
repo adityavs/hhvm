@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,9 @@
 #ifndef incl_HPHP_TRANSLATOR_INLINE_H_
 #define incl_HPHP_TRANSLATOR_INLINE_H_
 
-#include <boost/noncopyable.hpp>
-
 #include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -36,12 +36,15 @@ inline ActRec* liveFrame() { return vmfp(); }
 inline const Func* liveFunc() { return liveFrame()->m_func; }
 inline const Unit* liveUnit() { return liveFunc()->unit(); }
 inline Class* liveClass() { return liveFunc()->cls(); }
-inline bool liveResumed() { return liveFrame()->resumed(); }
-
+inline ResumeMode liveResumeMode() { return resumeModeFromActRec(liveFrame()); }
+inline bool liveHasThis() { return liveClass() && liveFrame()->hasThis(); }
+inline SrcKey liveSK() {
+  return { liveFunc(), vmpc(), liveResumeMode() };
+}
 inline jit::FPInvOffset liveSpOff() {
-  Cell* fp = reinterpret_cast<Cell*>(vmfp());
-  if (liveFrame()->resumed()) {
-    fp = (Cell*)Stack::resumableStackBase((ActRec*)fp);
+  TypedValue* fp = reinterpret_cast<TypedValue*>(vmfp());
+  if (isResumed(liveFrame())) {
+    fp = (TypedValue*)Stack::resumableStackBase((ActRec*)fp);
   }
   return jit::FPInvOffset{safe_cast<int32_t>(fp - vmsp())};
 }
@@ -53,7 +56,7 @@ namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 inline int cellsToBytes(int nCells) {
-  return safe_cast<int32_t>(nCells * ssize_t(sizeof(Cell)));
+  return safe_cast<int32_t>(nCells * ssize_t(sizeof(TypedValue)));
 }
 
 inline int localOffset(int locId) {

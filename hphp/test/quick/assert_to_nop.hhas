@@ -1,0 +1,19 @@
+.hh_file 1;
+# tests that AssertRATStk is properly replaced with a nop
+
+.main {
+  Int 1
+  NullUninit
+  NullUninit
+  NullUninit
+  Int 2
+  JmpNZ target_label
+  AssertRATStk 3 Cell
+target_label:
+  Int 42
+  FCallFuncD <> 1 1 "" - "" "var_dump"
+  PopC
+  PopC
+  Int 1
+  RetC
+}

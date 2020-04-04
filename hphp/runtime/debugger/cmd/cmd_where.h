@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,27 +18,27 @@
 #define incl_HPHP_EVAL_DEBUGGER_CMD_WHERE_H_
 
 #include "hphp/runtime/debugger/debugger_command.h"
+#include "hphp/runtime/base/req-root.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct CmdWhere : DebuggerCommand {
   CmdWhere() : DebuggerCommand(KindOfWhere) {}
-  explicit CmdWhere(Type type) : DebuggerCommand(type) {}
 
-  virtual void help(DebuggerClient &client);
+  void help(DebuggerClient& client) override;
 
-  virtual bool onServer(DebuggerProxy &proxy);
-  virtual void onClient(DebuggerClient &client);
+  bool onServer(DebuggerProxy& proxy) override;
+  void onClient(DebuggerClient& client) override;
 
   Array fetchStackTrace(DebuggerClient &client); // client side
 
 protected:
-  virtual void sendImpl(DebuggerThriftBuffer &thrift);
-  virtual void recvImpl(DebuggerThriftBuffer &thrift);
+ void sendImpl(DebuggerThriftBuffer& thrift) override;
+ void recvImpl(DebuggerThriftBuffer& thrift) override;
 
 private:
-  Array m_stacktrace;
+  req::root<Array> m_stacktrace;
   bool m_stackArgs{true};
 };
 

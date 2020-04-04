@@ -1,5 +1,6 @@
-<?php
+<?hh
         /* Binary */
+        $test = varray[];
         $test[] = gmp_init("0b10011010010");
         $test[] = gmp_init("0b10011010010", 2);
         $test[] = gmp_init("10011010010");
@@ -24,4 +25,4 @@
         for ($i = 0; $i < count($test); $i++) {
                 printf("%s\n", gmp_strval($test[$i]));
         }
-?>
+

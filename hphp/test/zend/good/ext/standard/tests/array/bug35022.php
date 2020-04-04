@@ -1,12 +1,14 @@
-<?php
-$state = array("one" => 1, "two" => 2, "three" => 3);
-function foo( &$state ) {
-    $contentDict = end( $state );
-    for ( $contentDict = end( $state ); $contentDict !== false; $contentDict = prev( $state ) ) {
-	echo key($state) . " => " . current($state) . "\n";
+<?hh
+
+function foo( inout $state ) {
+    $contentDict = end(inout $state );
+    for ( $contentDict = end(inout $state ); $contentDict !== false; $contentDict = prev(inout $state ) ) {
+    echo key($state) . " => " . current($state) . "\n";
     }
 }
-foo($state);
-reset($state);
+<<__EntryPoint>> function main(): void {
+$state = darray["one" => 1, "two" => 2, "three" => 3];
+foo(inout $state);
+reset(inout $state);
 var_dump( key($state), current($state) );
-?>
+}

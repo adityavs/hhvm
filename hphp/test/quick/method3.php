@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 abstract class A {
   protected abstract function foo();
@@ -16,6 +16,7 @@ class C extends A {
     $b->foo();
   }
 }
-
+<<__EntryPoint>> function main(): void {
 $c = new C;
 $c->foo();
+}

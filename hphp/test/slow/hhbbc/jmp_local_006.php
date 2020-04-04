@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function main(array $x = null) {
   if ($x) {
@@ -9,5 +9,9 @@ function main(array $x = null) {
   }
 }
 
-main(array());
-main(array(1,2,3));
+
+<<__EntryPoint>>
+function main_jmp_local_006() {
+main(varray[]);
+main(varray[1,2,3]);
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -17,7 +17,6 @@
 
 #include "hphp/runtime/base/zend-scanf.h"
 
-#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -157,9 +156,9 @@ static const char *BuildCharSet(CharSet *cset, const char *format) {
     ch = end++;
   }
 
-  cset->chars = (char *)req::malloc(end - format - 1);
+  cset->chars = (char *)req::malloc_noptrs(end - format - 1);
   if (nranges > 0) {
-    cset->ranges = (::Range*)req::malloc(sizeof(::Range) * nranges);
+    cset->ranges = req::make_raw_array<::Range>(nranges);
   } else {
     cset->ranges = nullptr;
   }
@@ -309,7 +308,7 @@ static int ValidateFormat(const char *format, int numVars, int *totalSubs) {
    * a variable is multiply assigned or left unassigned.
    */
   if (numVars > nspace) {
-    nassign = (int*)req::malloc(sizeof(int) * numVars);
+    nassign = (int*)req::malloc_noptrs(sizeof(int) * numVars);
     nspace = numVars;
   }
   for (i = 0; i < nspace; i++) {
@@ -382,7 +381,7 @@ notXpg:
     if (gotXpg) {
 mixedXPG:
       if (nassign != staticAssign) req::free((char *)nassign);
-      throw_invalid_argument
+      raise_invalid_argument_warning
         ("format: cannot mix \"%%\" and \"%%n$\" conversion specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
     }
@@ -436,7 +435,7 @@ xpgCheckDone:
       /* problem - cc                                               */
       /*
         if (flags & SCAN_WIDTH) {
-        throw_invalid_argument
+        raise_invalid_argument_warning
         ("format: Field width may not be specified in %c conversion");
         }
         return SCAN_ERROR_INVALID_FORMAT;
@@ -469,12 +468,12 @@ xpgCheckDone:
       break;
     badSet:
       if (nassign != staticAssign) req::free((char *)nassign);
-      throw_invalid_argument("format: Unmatched [ in format string");
+      raise_invalid_argument_warning("format: Unmatched [ in format string");
       return SCAN_ERROR_INVALID_FORMAT;
 
     default:
       if (nassign != staticAssign) req::free((char *)nassign);
-      throw_invalid_argument("Bad scan conversion character \"%c\"", *ch);
+      raise_invalid_argument_warning("Bad scan conversion character \"%c\"", *ch);
       return SCAN_ERROR_INVALID_FORMAT;
     }
 
@@ -492,12 +491,13 @@ xpgCheckDone:
           nspace += STATIC_LIST_SIZE;
         }
         if (nassign == staticAssign) {
-          nassign = (int*)req::malloc(nspace * sizeof(int));
+          nassign = (int*)req::malloc_noptrs(nspace * sizeof(int));
           for (i = 0; i < STATIC_LIST_SIZE; ++i) {
             nassign[i] = staticAssign[i];
           }
         } else {
-          nassign = (int*)req::realloc((void *)nassign, nspace * sizeof(int));
+          nassign =
+            (int*)req::realloc_noptrs((void *)nassign, nspace * sizeof(int));
         }
         for (i = value; i < nspace; i++) {
           nassign[i] = 0;
@@ -524,7 +524,7 @@ xpgCheckDone:
   for (i = 0; i < numVars; i++) {
     if (nassign[i] > 1) {
       if (nassign != staticAssign) req::free((char *)nassign);
-      throw_invalid_argument
+      raise_invalid_argument_warning
         ("format: Variable is assigned by multiple \"%%n$\" specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
     } else if (!xpgSize && (nassign[i] == 0)) {
@@ -533,7 +533,7 @@ xpgCheckDone:
        * used, and/or numVars != 0), then too many vars were given
        */
       if (nassign != staticAssign) req::free((char *)nassign);
-      throw_invalid_argument
+      raise_invalid_argument_warning
         ("format: Variable is not assigned by any conversion specifiers");
       return SCAN_ERROR_INVALID_FORMAT;
     }
@@ -545,10 +545,10 @@ xpgCheckDone:
 badIndex:
   if (nassign != staticAssign) req::free((char *)nassign);
   if (gotXpg) {
-    throw_invalid_argument
+    raise_invalid_argument_warning
       ("format: \"%%n$\" argument index out of range");
   } else {
-    throw_invalid_argument
+    raise_invalid_argument_warning
       ("format: Different numbers of variable names and field specifiers");
   }
   return SCAN_ERROR_INVALID_FORMAT;

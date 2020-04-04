@@ -1,119 +1,63 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-open Core
+open Hh_prelude
 open Typing_defs
-open Utils
 
 module ExprDepTy = struct
-  module N = Nast
+  module N = Aast
   module Env = Typing_env
+  module TUtils = Typing_utils
 
-  let to_string dt = AbstractKind.to_string (AKdependent dt)
-
-  let new_() =
-    let eid = Ident.tmp() in
-    Reason.ERexpr eid, `expr eid
+  let new_ () =
+    let eid = Ident.tmp () in
+    (Reason.ERexpr eid, DTexpr eid)
 
   let from_cid env reason cid =
     let pos = Reason.to_pos reason in
-    let pos, expr_dep_reason, dep = match cid with
+    let (pos, expr_dep_reason, dep) =
+      match cid with
       | N.CIparent ->
-          (match Env.get_parent env with
-          | _, Tapply ((_, cls), _) ->
-              pos, Reason.ERparent cls, `cls cls
-          | _, _ ->
-              let ereason, dep = new_() in
-              pos, ereason, dep
-          )
+        (match Env.get_parent_id env with
+        | Some cls -> (pos, Reason.ERparent cls, DTcls cls)
+        | None ->
+          let (ereason, dep) = new_ () in
+          (pos, ereason, dep))
       | N.CIself ->
-          (match Env.get_self env with
-          | _, Tclass ((_, cls), _) ->
-              pos, Reason.ERself cls, `cls cls
-          | _, _ ->
-              let ereason, dep = new_() in
-              pos, ereason, dep
-          )
-      | N.CI (p, cls) ->
-          p, Reason.ERclass cls, `cls cls
-      | N.CIstatic ->
-          pos, Reason.ERstatic, `static
-      | N.CIexpr (p, N.This) ->
-          p, Reason.ERstatic, `static
+        (match get_node (Env.get_self env) with
+        | Tclass ((_, cls), _, _) -> (pos, Reason.ERself cls, DTcls cls)
+        | _ ->
+          let (ereason, dep) = new_ () in
+          (pos, ereason, dep))
+      | N.CI (p, cls) -> (p, Reason.ERclass cls, DTcls cls)
+      | N.CIstatic -> (pos, Reason.ERstatic, DTthis)
+      | N.CIexpr (p, N.This) -> (p, Reason.ERstatic, DTthis)
       (* If it is a local variable then we look up the expression id associated
        * with it. If one doesn't exist we generate a new one. We are being
        * conservative here because the new expression id we create isn't
        * added to the local enviornment.
        *)
       | N.CIexpr (p, N.Lvar (_, x)) ->
-          let ereason, dep = match Env.get_local_expr_id env x with
-            | Some eid -> Reason.ERexpr eid, `expr eid
-            | None -> new_() in
-          p, ereason, dep
+        let (ereason, dep) =
+          match Env.get_local_expr_id env x with
+          | Some eid -> (Reason.ERexpr eid, DTexpr eid)
+          | None -> new_ ()
+        in
+        (p, ereason, dep)
       (* If all else fails we generate a new identifier for our expression
        * dependent type.
        *)
       | N.CIexpr (p, _) ->
-          let ereason, dep = new_() in
-          p, ereason, dep in
-    (Reason.Rexpr_dep_type (reason, pos, expr_dep_reason), (dep, []))
-
-  (* Takes the given list of dependent types and applies it to the given
-   * locl ty to create a new locl ty
-   *)
-  let apply dep_tys ty =
-    List.fold_left dep_tys ~f:begin fun ty (r, dep_ty) ->
-      r, Tabstract (AKdependent dep_ty, Some ty)
-    end ~init:ty
-
-  (* We do not want to create a new expression dependent type if the type is
-   * already expression dependent. However if the type is Tunresolved that
-   * contains different expression dependent types then we will want to
-   * generate a new dependent type. For example:
-   *
-   *  if ($cond) {
-   *    $x = new A(); // Dependent type (`cls '\A')
-   *  } else {
-   *    $x = new B(); // Dependent type (`cls '\B')
-   *  }
-   *  $x; // Tunresolved[(`cls '\A', `cls '\B')]
-   *
-   *  // When we call the function below, we need to generate
-   *  // A new expression dependent type since
-   *  // (`cls '\A') <> (\cls '\B')
-   *  $x->expression_dependent_function();
-   *)
-  let rec should_apply ?(seen=ISet.empty) env (_, ty_ as ty) = match ty_ with
-    | Toption ty
-    | Tabstract (
-        (AKgeneric _
-        | AKnewtype _
-        | AKenum _
-        | AKdependent (`this, [])
-        ), Some ty) ->
-        should_apply ~seen env ty
-    | Tabstract (AKdependent _, Some _) ->
-        false
-    | Tvar _ ->
-        let env, seen, ty = Env.expand_type_recorded env seen ty in
-        should_apply ~seen env ty
-    | Tunresolved tyl ->
-        List.exists tyl (should_apply ~seen env)
-    | Tclass ((_, x), _) ->
-        let class_ = Env.get_class env x in
-        Option.value_map class_
-          ~default:false
-          ~f:(fun {tc_final; _} -> not tc_final)
-    | Tanon _ | Tobject | Tmixed | Tprim _ | Tshape _ | Ttuple _
-    | Tarraykind _ | Tfun _ | Tabstract (_, None) | Tany ->
-        false
+        let (ereason, dep) = new_ () in
+        (p, ereason, dep)
+    in
+    (Reason.Rexpr_dep_type (reason, pos, expr_dep_reason), dep)
 
   (****************************************************************************)
   (* A type access "this::T" is translated to "<this>::T" during the
@@ -134,9 +78,57 @@ module ExprDepTy = struct
    * More specific details are explained inline
    *)
   (****************************************************************************)
-  let make env cid cid_ty =
-    if should_apply env cid_ty then
-      apply [from_cid env (fst cid_ty) cid] cid_ty
-    else
-      cid_ty
+  let make env ~cid ty =
+    let (r_dep_ty, dep_ty) = from_cid env (get_reason ty) cid in
+    let apply env ty = (env, mk (r_dep_ty, Tdependent (dep_ty, ty))) in
+    let rec make env ty =
+      let (env, ety) = Env.expand_type env ty in
+      match deref ety with
+      | (_, Tclass (_, Exact, _)) -> (env, ty)
+      | (_, Tclass (((_, x) as c), Nonexact, tyl)) ->
+        let class_ = Env.get_class env x in
+        (* If a class is both final and variant, we must treat it as non-final
+        * since we can't statically guarantee what the runtime type
+        * will be.
+        *)
+        if
+          Option.value_map class_ ~default:false ~f:(fun class_ty ->
+              TUtils.class_is_final_and_not_contravariant class_ty)
+        then
+          (env, ty)
+        else (
+          match dep_ty with
+          | DTcls n when String.equal n x ->
+            (env, mk (r_dep_ty, Tclass (c, Exact, tyl)))
+          | _ -> apply env ty
+        )
+      | (_, Tgeneric s) when DependentKind.is_generic_dep_ty s -> (env, ty)
+      | (_, Tgeneric _) ->
+        let (env, tyl) = Typing_utils.get_concrete_supertypes env ty in
+        let (env, tyl') = List.fold_map tyl ~init:env ~f:make in
+        if tyl_equal tyl tyl' then
+          (env, ty)
+        else
+          apply env ty
+      | (r, Toption ty) ->
+        let (env, ty) = make env ty in
+        (env, mk (r, Toption ty))
+      | (r, Tnewtype (n, p, ty)) ->
+        let (env, ty) = make env ty in
+        (env, mk (r, Tnewtype (n, p, ty)))
+      | (_, Tdependent (_, _)) -> (env, ty)
+      | (r, Tunion tyl) ->
+        let (env, tyl) = List.fold_map tyl ~init:env ~f:make in
+        (env, mk (r, Tunion tyl))
+      | (r, Tintersection tyl) ->
+        let (env, tyl) = List.fold_map tyl ~init:env ~f:make in
+        (env, mk (r, Tintersection tyl))
+      (* TODO(T36532263) check if this is legal *)
+      | ( _,
+          ( Tobject | Tnonnull | Tprim _ | Tshape _ | Ttuple _ | Tdynamic
+          | Tarraykind _ | Tfun _ | Tany _ | Tvar _ | Terr | Tpu _
+          | Tpu_type_access _ ) ) ->
+        (env, ty)
+    in
+    make env ty
 end

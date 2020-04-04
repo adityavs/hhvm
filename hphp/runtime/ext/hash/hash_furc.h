@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,10 +24,10 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 uint32_t furc_hash_internal(const char* const key, const size_t len, const uint32_t m);
+uint32_t furc_maximum_pool_size();
+
 
 ///////////////////////////////////////////////////////////////////////////////
 }
 
 #endif // incl_HPHP_EXT_HASH_FURC_H_
-
-

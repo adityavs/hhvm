@@ -1,10 +1,10 @@
-<?php
+<?hh
 
 /* strings and concat */
 
 class strclass {
-   var $str = "bad";
-   static $statstr = "bad";
+  public $str = "bad";
+  static $statstr = "bad";
 }
 
 $a = "bad";
@@ -49,9 +49,8 @@ echo "\r\n";
 
 
 function foo() {
-   global $a;
-   $a = "good";
-   return $a;
+  $GLOBALS['a'] = 'good';
+  return $GLOBALS['a'];
 }
 
 
@@ -120,7 +119,7 @@ echo ($a=$b) + $a;
 echo "\r\n";
 
 
-$a = array(100,200);
+$a = varray[100,200];
 $i = 0;
 
 echo "17)";
@@ -145,8 +144,8 @@ echo "\r\n";
 
 
 class c {
-   var $val = 10;
-   static $stat = 20;
+  public $val = 10;
+  static $stat = 20;
 }
 
 echo "21)";
@@ -166,5 +165,3 @@ echo "\r\n";
 echo "24)";
 echo ($c->val=300) + $c->val;
 echo "\r\n";
- 
-?>

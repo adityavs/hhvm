@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,6 @@
 #include "hphp/util/logger.h"
 
 #include <folly/Memory.h>
-#include <folly/MoveWrapper.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 
@@ -47,7 +46,7 @@ std::tuple<
   std::unique_ptr<folly::IOBuf>,
   std::unique_ptr<folly::IOBuf>
 > KVParser::readNext() {
-  assert(ready());
+  assertx(ready());
 
   m_phase = Phase::READ_KEY_LENGTH;
   auto key = m_keyBuf.move();
@@ -158,9 +157,9 @@ bool KVParser::parseKeyValueContent(Cursor& cursor,
   std::unique_ptr<IOBuf> buf;
   size_t len = cursor.cloneAtMost(buf, length);
   queue.append(std::move(buf));
-  assert(length >= len);
+  assertx(length >= len);
   length -= len;
-  assert(available >= len);
+  assertx(available >= len);
   available -= len;
   return (length == 0);
 }
@@ -170,7 +169,7 @@ bool KVParser::parseKeyValueContent(Cursor& cursor,
 FastCGISession::FastCGISession(
   folly::EventBase* evBase,
   JobQueueDispatcher<FastCGIWorker>& dispatcher,
-  folly::AsyncSocket::UniquePtr sock,
+  folly::AsyncTransportWrapper::UniquePtr sock,
   const folly::SocketAddress& localAddr,
   const folly::SocketAddress& peerAddr)
   : m_eventBase(evBase)
@@ -218,7 +217,7 @@ void FastCGISession::closeWhenIdle() {
   m_keepConn = false; // will shutdown when request completes
 }
 
-void FastCGISession::dropConnection() {
+void FastCGISession::dropConnection(const std::string& /* errorMsg */) {
   // Nothing else needs to be placed here. Calling closeWithReset() will cause
   // readEOF to be called immediately which will call shutdown().
   //
@@ -227,7 +226,8 @@ void FastCGISession::dropConnection() {
   m_sock->closeWithReset();
 }
 
-void FastCGISession::dumpConnectionState(uint8_t loglevel) { /* nop */ }
+void FastCGISession::dumpConnectionState(uint8_t /*loglevel*/) { /* nop */
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -342,9 +342,8 @@ void FastCGISession::onStdOut(std::unique_ptr<IOBuf> chain) {
   // FastCGITransport doesn't run in the same event base. Calling into internal
   // functions here is unsafe from other threads so we enqueue the work for the
   // event base.
-  folly::MoveWrapper<std::unique_ptr<IOBuf>> chain_wrapper(std::move(chain));
-  m_eventBase->runInEventBaseThread([this, chain_wrapper]() mutable {
-    writeStream(fcgi::STDOUT, std::move(*chain_wrapper));
+  m_eventBase->runInEventBaseThread([this, chain = std::move(chain)]() mutable {
+    writeStream(fcgi::STDOUT, std::move(chain));
   });
 }
 
@@ -677,7 +676,7 @@ void FastCGISession::writeUnknownType(fcgi::Type record_type) {
 
 void FastCGISession::writeStream(fcgi::Type type,
                                  std::unique_ptr<IOBuf> stream_chain) {
-  assert(type == fcgi::STDOUT || type == fcgi::STDERR);
+  assertx(type == fcgi::STDOUT || type == fcgi::STDERR);
   if (stream_chain == nullptr) {
     return; // Nothing to do.
   }
@@ -714,4 +713,3 @@ void FastCGISession::writeStream(fcgi::Type type,
 
 ////////////////////////////////////////////////////////////////////////////////
 }
-

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,6 +17,7 @@
 
 #include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
 
+#include "hphp/runtime/ext/asio/ext_asio.h"
 #include "hphp/runtime/ext/asio/asio-blockable.h"
 #include "hphp/runtime/ext/asio/asio-context.h"
 #include "hphp/runtime/ext/asio/asio-session.h"
@@ -30,15 +31,17 @@ namespace {
   StaticString s_sleep("<sleep>");
 }
 
-void c_SleepWaitHandle::ti_setoncreatecallback(const Variant& callback) {
+void HHVM_STATIC_METHOD(SleepWaitHandle, setOnCreateCallback,
+                        const Variant& callback) {
   AsioSession::Get()->setOnSleepCreate(callback);
 }
 
-void c_SleepWaitHandle::ti_setonsuccesscallback(const Variant& callback) {
+void HHVM_STATIC_METHOD(SleepWaitHandle, setOnSuccessCallback,
+                        const Variant& callback) {
   AsioSession::Get()->setOnSleepSuccess(callback);
 }
 
-Object c_SleepWaitHandle::ti_create(int64_t usecs) {
+Object HHVM_STATIC_METHOD(SleepWaitHandle, create, int64_t usecs) {
   if (UNLIKELY(usecs < 0)) {
     SystemLib::throwInvalidArgumentExceptionObject(
         "Expected usecs to be a non-negative integer");
@@ -70,8 +73,41 @@ void c_SleepWaitHandle::initialize(int64_t usecs) {
   }
 }
 
-void c_SleepWaitHandle::process() {
-  assert(getState() == STATE_WAITING);
+bool c_SleepWaitHandle::cancel(const Object& exception) {
+  if (getState() != STATE_WAITING) {
+    return false;               // already finished
+  }
+
+  if (isInContext()) {
+    unregisterFromContext();
+  }
+
+  auto parentChain = getParentChain();
+  setState(STATE_FAILED);
+  tvWriteObject(exception.get(), &m_resultOrException);
+  parentChain.unblock();
+
+  // this is technically a lie, since sleep failed
+  auto session = AsioSession::Get();
+  if (UNLIKELY(session->hasOnSleepSuccess())) {
+    session->onSleepSuccess(
+      this,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+        m_waketime.time_since_epoch()
+      ).count()
+    );
+  }
+
+  return true;
+}
+
+bool c_SleepWaitHandle::process() {
+  if (getState() == STATE_FAILED) {
+    // sleep handle was cancelled, everything is taken care of
+    return false;
+  }
+
+  assertx(getState() == STATE_WAITING);
 
   if (isInContext()) {
     unregisterFromContext();
@@ -79,13 +115,20 @@ void c_SleepWaitHandle::process() {
 
   auto parentChain = getParentChain();
   setState(STATE_SUCCEEDED);
-  tvWriteNull(&m_resultOrException);
+  tvWriteNull(m_resultOrException);
   parentChain.unblock();
 
   auto session = AsioSession::Get();
   if (UNLIKELY(session->hasOnSleepSuccess())) {
-    session->onSleepSuccess(this);
+    session->onSleepSuccess(
+      this,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+        m_waketime.time_since_epoch()
+      ).count()
+    );
   }
+
+  return true;
 }
 
 String c_SleepWaitHandle::getName() {
@@ -93,9 +136,9 @@ String c_SleepWaitHandle::getName() {
 }
 
 void c_SleepWaitHandle::exitContext(context_idx_t ctx_idx) {
-  assert(AsioSession::Get()->getContext(ctx_idx));
-  assert(getState() == STATE_WAITING);
-  assert(getContextIdx() == ctx_idx);
+  assertx(AsioSession::Get()->getContext(ctx_idx));
+  assertx(getState() == STATE_WAITING);
+  assertx(getContextIdx() == ctx_idx);
 
   // Move us to the parent context.
   setContextIdx(getContextIdx() - 1);
@@ -117,6 +160,17 @@ void c_SleepWaitHandle::registerToContext() {
 void c_SleepWaitHandle::unregisterFromContext() {
   AsioContext *ctx = getContext();
   ctx->unregisterFrom(ctx->getSleepEvents(), m_ctxVecIndex);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void AsioExtension::initSleepWaitHandle() {
+#define SWH_SME(meth) \
+  HHVM_STATIC_MALIAS(HH\\SleepWaitHandle, meth, SleepWaitHandle, meth)
+  SWH_SME(create);
+  SWH_SME(setOnCreateCallback);
+  SWH_SME(setOnSuccessCallback);
+#undef SWH_SWE
 }
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,60 +17,51 @@
 #ifndef incl_HPHP_SERVERSTATS_H_
 #define incl_HPHP_SERVERSTATS_H_
 
-#include <set>
-
-#if defined(__CYGWIN__) && defined(WIN32)
-#undef WIN32
-#endif
-
-#include <curl/curl.h>
-#include <time.h>
-
-#include "hphp/util/health-monitor-types.h"
+#include "hphp/runtime/base/execution-profiler.h"
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/server/writer.h"
+#include "hphp/util/hash-map.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/thread-local.h"
-#include "hphp/runtime/base/shared-string.h"
-#include "hphp/runtime/base/execution-profiler.h"
-#include "hphp/runtime/server/writer.h"
+
+#include <curl/curl.h>
+#include <map>
+#include <time.h>
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class ServerStats {
-public:
+struct ServerStats {
 
   enum class ThreadMode {
-    Idling,
+    Idling = 0,
     Processing,
     Writing,
     PostProcessing
   };
 
 public:
-  static void Log(const std::string &name, int64_t value);
-  static int64_t Get(const std::string &name);
-  static void LogPage(const std::string &url, int code);
+  static void Log(const std::string& name, int64_t value);
+  static int64_t Get(const std::string& name);
+  static void LogPage(const std::string& url, int code);
   static void Reset();
   static void Clear();
-  static void GetKeys(std::string &out, int64_t from, int64_t to);
-  static void Report(std::string &out, Writer::Format format,
-                     int64_t from, int64_t to,
-                     const std::string &agg, const std::string &keys,
-                     const std::string &url, int code,
-                     const std::string &prefix);
+  static std::string GetKeys();
+  static std::string Report(const std::string& keys,
+                            const std::string& prefix);
 
   // thread status functions
   static void LogBytes(int64_t bytes);
-  static void StartRequest(const char *url, const char *clientIP,
-                           const char *vhost);
+  static void StartRequest(const char* url, const char* clientIP,
+                           const char* vhost);
   static void SetThreadMode(ThreadMode mode);
-  static void ReportStatus(std::string &out, Writer::Format format);
-
-  static void SetServerHealthLevel(HealthLevel new_health_level);
+  static ThreadMode GetThreadMode();
+  static const char* ThreadModeString(ThreadMode mode);
+  static std::string ReportStatus(Writer::Format format);
 
   // io status functions
-  static void SetThreadIOStatusAddress(const char *name);
-  static void SetThreadIOStatus(const char *name, const char *addr,
+  static void SetThreadIOStatus(const char* name, const char* addr,
                                 int64_t usWallTime = -1);
   static Array GetThreadIOStatuses();
   static void StartNetworkProfile();
@@ -91,91 +82,81 @@ private:
 
     PRECISION = 1000
   };
+  using KeyMap = hphp_fast_string_map<int>;
+  using CounterMap = hphp_fast_string_map<int64_t>;
 
   static Mutex s_lock;
   static std::vector<ServerStats*> s_loggers;
-  static DECLARE_THREAD_LOCAL_NO_CHECK(ServerStats, s_logger);
+  static THREAD_LOCAL_NO_CHECK(ServerStats, s_logger);
 
-  typedef hphp_shared_string_map<int64_t> CounterMap;
-
-  struct PageStats {
-    std::string m_url; // which page
-    int m_code;        // response code
-    int m_hit;         // page hits
-    CounterMap m_values; // name value pairs
-  };
-  typedef hphp_shared_string_map<PageStats> PageStatsMap;
   struct TimeSlot {
-    int64_t m_time;
-    PageStatsMap m_pages;
+    uint32_t m_time{0};
+    uint32_t m_hits{0};
+    CounterMap m_values;
+    void clear() {
+      m_time = 0;
+      m_hits = 0;
+      m_values.clear();
+    }
+    bool empty() const {
+      return m_hits == 0;
+    }
   };
 
-  static void Merge(CounterMap &dest, const CounterMap &src);
-  static void Merge(PageStatsMap &dest, const PageStatsMap &src);
-  static void Merge(std::list<TimeSlot*> &dest,
-                    const std::list<TimeSlot*> &src);
-  static void Filter(std::list<TimeSlot*> &slots, const std::string &keys,
-                     const std::string &url, int code,
-                     std::map<std::string, int> &wantedKeys);
-  static void Aggregate(std::list<TimeSlot*> &slots, const std::string &agg,
-                        std::map<std::string, int> &wantedKeys);
+  static uint32_t curr() {
+    auto const now = static_cast<uint64_t>(time(nullptr));
+    return now / RuntimeOption::StatsSlotDuration;
+  }
 
-  static void CollectSlots(std::list<TimeSlot*> &slots, int64_t from, int64_t to);
-  static void FreeSlots(std::list<TimeSlot*> &slots);
+  static void Merge(CounterMap& dest, const CounterMap& src,
+                    const KeyMap& wanted);
+  static void Merge(TimeSlot& dest, const TimeSlot& src,
+                    const KeyMap& wanted);
+  static KeyMap CompileKeys(const std::string& keys);
+  static std::string Report(const TimeSlot& s, const std::string& prefix);
 
-  static void GetAllKeys(std::set<std::string> &allKeys,
-                         const std::list<TimeSlot*> &slots);
-  static void Report(std::string &out, Writer::Format format,
-                     const std::list<TimeSlot*> &slots,
-                     const std::string &prefix);
-  static void ReportSlots(Writer* writer, const std::list<TimeSlot*> &slots);
+  template<typename F> static void VisitAllSlots(F fun) {
+    Lock lock(s_lock, false);
+    for (auto& l : s_loggers) {
+      Lock _(l->m_lock, false);
+      for (auto& slot : l->m_slots) {
+        fun(slot);
+      }
+    }
+  }
 
   Mutex m_lock;
   std::vector<TimeSlot> m_slots;
-  int64_t m_last; // previous timepoint
-  int64_t m_min;  // earliest timepoint
-  int64_t m_max;  // latest timepoint
-  CounterMap m_values;  // current page's name value pairs
+  CounterMap m_values;                  // current page's name value pairs
 
-  // general health-level of local server
-  static HealthLevel m_ServerHealthLevel;
-
-  void log(const std::string &name, int64_t value);
-  int64_t get(const std::string &name);
-  void logPage(const std::string &url, int code);
+  void log(const std::string& name, int64_t value);
+  int64_t get(const std::string& name);
+  void logPage(const std::string& url, int code);
   void reset();
-  void clear();
-  void collect(std::list<TimeSlot*> &slots, int64_t from, int64_t to);
 
   /**
    * Live status, instead of historical statistics.
    */
   void logBytes(int64_t bytes);
-  void startRequest(const char *url, const char *clientIP, const char *vhost);
-  void setThreadMode(ThreadMode mode);
+  void startRequest(const char* url, const char* clientIP, const char* vhost);
+  void setThreadMode(ThreadMode mode) { m_threadStatus.m_mode = mode; }
 
-  void setThreadIOStatusAddress(const char *name);
-  void setThreadIOStatus(const char *name, const char *addr,
+  void setThreadIOStatus(const char* name, const char* addr,
                          int64_t usWallTime = -1);
   Array getThreadIOStatuses();
 
-  class IOStatus {
-  public:
-    IOStatus() : count(0), wall_time(0) {}
-
-    int64_t count;
-    int64_t wall_time; // micro-seconds
+  struct IOStatus {
+    int64_t count{0};
+    int64_t wall_time{0}; // micro-seconds
   };
   // keys: "url==>name" and "name==>address"
-  typedef hphp_string_map<IOStatus> IOStatusMap;
+  using IOStatusMap = hphp_fast_string_map<IOStatus>;
 
-  class ThreadStatus {
-  public:
+  struct ThreadStatus {
     ThreadStatus();
 
     pthread_t m_threadId;
     pid_t m_threadPid;
-
     MemoryManager* m_mm;
 
     // total traffic
@@ -193,12 +174,11 @@ private:
     // If an io is in process, the time that it started.
     timespec m_ioStart;
 
-    char m_ioName[512];
-    char m_ioLogicalName[512];
-    char m_ioAddr[512];
-    char m_url[1024];
-    char m_clientIP[256];
-    char m_vhost[256];
+    char m_ioName[64];
+    char m_ioAddr[64];
+    char m_clientIP[64];
+    char m_vhost[64];
+    char m_url[512];
 
     IOStatusMap m_ioStatuses;
   };
@@ -211,34 +191,32 @@ private:
 /**
  * Taking server stats at different time point of execution.
  */
-class ServerStatsHelper {
-public:
+struct ServerStatsHelper {
   enum {
     TRACK_MEMORY = 0x00000001,
     TRACK_HWINST = 0x00000002,
   };
-  explicit ServerStatsHelper(const char *section, uint32_t track = 0);
+  explicit ServerStatsHelper(const char* section, uint32_t track = 0);
   ~ServerStatsHelper();
 
 private:
-  const char *m_section;
+  const char* m_section;
   timespec m_wallStart;
   timespec m_cpuStart;
   int64_t m_instStart;
   uint32_t m_track;
 
-  void logTime(const std::string &prefix, const timespec &start,
-               const timespec &end);
-  void logTime(const std::string &prefix, const int64_t &start,
-               const int64_t &end);
+  void logTime(const std::string& prefix, const timespec& start,
+               const timespec& end);
+  void logTime(const std::string& prefix, const int64_t& start,
+               const int64_t& end);
 };
 
 /**
  * Recording I/O status in a scoped manner.
  */
-class IOStatusHelper {
-public:
-  explicit IOStatusHelper(const char *name, const char *address = nullptr,
+struct IOStatusHelper {
+  explicit IOStatusHelper(const char* name, const char* address = nullptr,
                           int port = 0);
   ~IOStatusHelper();
 
@@ -249,12 +227,12 @@ private:
 /**
  * For profiling CURL calls.
  */
-void set_curl_statuses(CURL *cp, const char *url);
+void set_curl_statuses(CURL *cp, const char* url);
 
 /**
  * For profiling mutexes.
  */
-void server_stats_log_mutex(const std::string &stack, int64_t elapsed_us);
+void server_stats_log_mutex(const std::string& stack, int64_t elapsed_us);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

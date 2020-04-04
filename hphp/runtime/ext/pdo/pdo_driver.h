@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,10 +24,10 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class PDOConnection;
-class PDODriver;
-class PDOResource;
-class PDOStatement;
+struct PDOConnection;
+struct PDODriver;
+struct PDOResource;
+struct PDOStatement;
 
 using sp_PDOConnection = std::shared_ptr<PDOConnection>;
 using sp_PDOStatement = req::ptr<PDOStatement>;
@@ -89,19 +89,20 @@ enum PDOFetchType {
   PDO_FETCH_NAMED,  /* like PDO_FETCH_ASSOC, but can handle duplicate names */
   PDO_FETCH_KEY_PAIR,  /* fetch into an array where the 1st column is a key
                           and all subsequent columns are values */
-  PDO_FETCH__MAX    /* must be last */
+  PDO_FETCH__MAX,    /* must be after all modes, and before flags */
+
+  PDO_FETCH_FLAGS      = 0xFFFF0000, /* fetchAll() modes or'd to
+                                            PDO_FETCH_XYZ */
+  PDO_FETCH_GROUP      = 0x00010000, /* fetch into groups */
+  PDO_FETCH_UNIQUE     = 0x00030000, /* fetch into groups assuming
+                                            first col is unique */
+  PDO_FETCH_CLASSTYPE  = 0x00040000, /* fetch class gets its class
+                                            name from 1st column */
+  PDO_FETCH_SERIALIZE  = 0x00080000, /* fetch class instances by
+                                            calling serialize */
+  PDO_FETCH_PROPS_LATE = 0x00100000, /* fetch props after calling ctor */
 };
 
-#define PDO_FETCH_FLAGS      0xFFFF0000  /* fetchAll() modes or'd to
-                                            PDO_FETCH_XYZ */
-#define PDO_FETCH_GROUP      0x00010000  /* fetch into groups */
-#define PDO_FETCH_UNIQUE     0x00030000  /* fetch into groups assuming
-                                            first col is unique */
-#define PDO_FETCH_CLASSTYPE  0x00040000  /* fetch class gets its class
-                                            name from 1st column */
-#define PDO_FETCH_SERIALIZE  0x00080000  /* fetch class instances by
-                                            calling serialize */
-#define PDO_FETCH_PROPS_LATE 0x00100000  /* fetch props after calling ctor */
 
 /* fetch orientation for scrollable cursors */
 enum PDOFetchOrientation {
@@ -174,8 +175,24 @@ defined by SQL-92.
 */
 
 using PDOErrorType = char[6]; /* SQLSTATE */
-
 #define PDO_ERR_NONE  "00000"
+static_assert(sizeof(PDO_ERR_NONE) <= sizeof(PDOErrorType),
+              "PDO_ERR_NONE should actually fit into PDOErrorType");
+
+inline void setPDOErrorNone(PDOErrorType& err) {
+  memcpy(err, PDO_ERR_NONE, strlen(PDO_ERR_NONE) + 1);
+}
+inline void setPDOError(PDOErrorType& err, const char* val) {
+  auto const len = strlen(val);
+  if (len >= sizeof(PDOErrorType)) {
+    raise_notice("PDO Driver error too long, truncated");
+    memcpy(err, val, sizeof(PDOErrorType) - 1);
+    err[sizeof(PDOErrorType) - 1] = 0;
+  } else {
+    memcpy(err, val, len + 1);
+  }
+}
+
 
 enum PDOErrorMode {
   PDO_ERRMODE_SILENT,    /* just set error codes */
@@ -247,7 +264,6 @@ private:
  * A connection to a database.
  */
 struct PDOConnection : std::enable_shared_from_this<PDOConnection> {
-
   enum SupportedMethod {
     MethodCloser,
     MethodPreparer,
@@ -263,14 +279,12 @@ struct PDOConnection : std::enable_shared_from_this<PDOConnection> {
     MethodCheckLiveness
   };
 
-
   /////////////////////////////////////////////////////////////////////////////
 
   PDOConnection() : m_bits{0} {}
 
   virtual ~PDOConnection() {}
   virtual bool create(const Array& options) = 0;
-
 
   /////////////////////////////////////////////////////////////////////////////
   // Virtual DB methods.
@@ -347,11 +361,9 @@ struct PDOConnection : std::enable_shared_from_this<PDOConnection> {
    */
   virtual bool checkLiveness();
 
-
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
 
-public:
   // Credentials.
   std::string username;
   std::string password;
@@ -407,6 +419,23 @@ public:
   std::string def_stmt_clsname;
 
   PDOFetchType default_fetch_type{PDO_FETCH_USE_DEFAULT};
+
+protected:
+  /* For the convenience of drivers, this function will parse a data source
+   * string, of the form "name=value; name2=value2" and populate variables
+   * according to the data you pass in and array of pdo_data_src_parser
+   * structures */
+  struct pdo_data_src_parser {
+    const char *optname;
+    char *optval;
+    int freeme;
+  };
+
+  int parseDataSource(const char *data_source,
+                      int data_source_len,
+                      struct pdo_data_src_parser *parsed,
+                      int nparams,
+                      folly::StringPiece separators = ";");
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -416,7 +445,7 @@ public:
  */
 struct PDOResource : SweepableResourceData {
   explicit PDOResource(sp_PDOConnection conn) : m_conn(conn) {
-    assert(m_conn);
+    assertx(m_conn);
   }
   virtual ~PDOResource() {}
 
@@ -448,8 +477,7 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 
 /* describes a column */
-class PDOColumn : public ResourceData {
-public:
+struct PDOColumn : ResourceData {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(PDOColumn);
   PDOColumn();
   ~PDOColumn();
@@ -469,8 +497,7 @@ public:
 ///////////////////////////////////////////////////////////////////////////////
 
 /* describes a bound parameter */
-class PDOBoundParam : public SweepableResourceData {
-public:
+struct PDOBoundParam final : SweepableResourceData {
   DECLARE_RESOURCE_ALLOCATION(PDOBoundParam);
   PDOBoundParam();
   ~PDOBoundParam();
@@ -484,17 +511,13 @@ public:
                               know the index *yet* */
   String name;
 
-  int64_t max_value_len;     /* as a hint for pre-allocation */
-
   Variant parameter;       /* the variable itself */
   PDOParamType param_type; /* desired or suggested type */
 
-  Variant driver_params;   /* optional parameter(s) for the driver */
-
   PDOStatement *stmt;      /* for convenience in dtor */
-  bool is_param;           /* parameter or column ? */
 
-  void *driver_data;
+  void *driver_ext_data;   /* must not be request-heap ptr */
+  TYPE_SCAN_IGNORE_FIELD(driver_ext_data);
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -678,8 +701,8 @@ void pdo_raise_impl_error(sp_PDOResource rsrc, sp_PDOStatement stmt,
                           const char *sqlstate, const char *supp);
 void pdo_raise_impl_error(sp_PDOResource rsrc, PDOStatement* stmt,
                           const char *sqlstate, const char *supp);
-void throw_pdo_exception(const Variant& code, const Variant& info,
-  ATTRIBUTE_PRINTF_STRING const char *fmt, ...) ATTRIBUTE_PRINTF(3,4);
+void throw_pdo_exception(const Variant& info,
+  ATTRIBUTE_PRINTF_STRING const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

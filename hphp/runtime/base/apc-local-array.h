@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/apc-array.h"
+#include "hphp/runtime/base/tv-val.h"
 
 namespace HPHP {
 
@@ -31,7 +32,6 @@ namespace HPHP {
 struct Variant;
 struct TypedValue;
 struct StringData;
-struct MArrayIter;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -40,53 +40,44 @@ struct MArrayIter;
  * via APC. It has a pointer to the APCArray that it represents and it may
  * cache values locally depending on the type accessed and/or the operation.
  */
-struct APCLocalArray : private ArrayData {
-  template<class... Args> static APCLocalArray* Make(Args&&...);
+struct APCLocalArray final : ArrayData,
+                             type_scan::MarkCollectable<APCLocalArray> {
+  static APCLocalArray* Make(const APCArray*);
 
   static size_t Vsize(const ArrayData*);
-  static const Variant& GetValueRef(const ArrayData* ad, ssize_t pos);
   static bool ExistsInt(const ArrayData* ad, int64_t k);
   static bool ExistsStr(const ArrayData* ad, const StringData* k);
-  static ArrayData* LvalInt(ArrayData*, int64_t k, Variant *&ret,
-                            bool copy);
-  static ArrayData* LvalStr(ArrayData*, StringData* k, Variant *&ret,
-                            bool copy);
-  static ArrayData* LvalNew(ArrayData*, Variant *&ret, bool copy);
-  static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
-  static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
-  static ArrayData* SetRefStr(ArrayData*, StringData* k, Variant& v,
-                              bool copy);
-  static constexpr auto AddInt = &SetInt;
-  static constexpr auto AddStr = &SetStr;
-  static ArrayData *RemoveInt(ArrayData* ad, int64_t k, bool copy);
-  static ArrayData *RemoveStr(ArrayData* ad, const StringData* k, bool copy);
+  static arr_lval LvalInt(ArrayData*, int64_t k, bool copy);
+  static arr_lval LvalStr(ArrayData*, StringData* k, bool copy);
+  static ArrayData* SetInt(ArrayData*, int64_t k, TypedValue v);
+  static ArrayData* SetIntMove(ArrayData*, int64_t k, TypedValue v);
+  static ArrayData* SetStr(ArrayData*, StringData* k, TypedValue v);
+  static ArrayData* SetStrMove(ArrayData*, StringData* k, TypedValue v);
+  static ArrayData *RemoveInt(ArrayData* ad, int64_t k);
+  static ArrayData *RemoveStr(ArrayData* ad, const StringData* k);
   static ArrayData* Copy(const ArrayData*);
-  static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* Append(ArrayData* a, const Variant& v, bool copy);
-  static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
-  static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
+  static ArrayData* Append(ArrayData* a, TypedValue v);
   static ArrayData* PlusEq(ArrayData*, const ArrayData *elems);
   static ArrayData* Merge(ArrayData*, const ArrayData *elems);
-  static ArrayData* Prepend(ArrayData*, const Variant& v, bool copy);
-  static const TypedValue* NvGetInt(const ArrayData*, int64_t k);
-  static const TypedValue* NvGetStr(const ArrayData*, const StringData* k);
-  static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
+  static ArrayData* Prepend(ArrayData*, TypedValue v);
+  static tv_rval NvGetInt(const ArrayData*, int64_t k);
+  static tv_rval NvGetStr(const ArrayData*, const StringData* k);
+  static ssize_t NvGetIntPos(const ArrayData* ad, int64_t k);
+  static ssize_t NvGetStrPos(const ArrayData* ad, const StringData* k);
+  static TypedValue GetPosKey(const ArrayData*, ssize_t pos);
+  static TypedValue GetPosVal(const ArrayData*, ssize_t pos);
   static bool IsVectorData(const ArrayData* ad);
   static ssize_t IterBegin(const ArrayData*);
   static ssize_t IterLast(const ArrayData*);
   static ssize_t IterEnd(const ArrayData*);
   static ssize_t IterAdvance(const ArrayData*, ssize_t prev);
   static ssize_t IterRewind(const ArrayData*, ssize_t prev);
-  static bool ValidMArrayIter(const ArrayData*, const MArrayIter& fp);
-  static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
   static ArrayData* CopyStatic(const ArrayData*);
   static constexpr auto Pop = &ArrayCommon::Pop;
   static constexpr auto Dequeue = &ArrayCommon::Dequeue;
   static void Renumber(ArrayData*);
   static void OnSetEvalScalar(ArrayData*);
   static void Release(ArrayData*);
-  static ArrayData* Escalate(const ArrayData*);
   static ArrayData* EscalateForSort(ArrayData*, SortFunction);
   static void Ksort(ArrayData*, int, bool);
   static void Sort(ArrayData*, int, bool);
@@ -94,6 +85,15 @@ struct APCLocalArray : private ArrayData {
   static bool Uksort(ArrayData*, const Variant&);
   static bool Usort(ArrayData*, const Variant&);
   static bool Uasort(ArrayData*, const Variant&);
+  static ArrayData* ToPHPArray(ArrayData* ad, bool) {
+    return ad;
+  }
+  static constexpr auto ToPHPArrayIntishCast = &ToPHPArray;
+  static constexpr auto ToVec = &ArrayCommon::ToVec;
+  static constexpr auto ToDict = &ArrayCommon::ToDict;
+  static constexpr auto ToKeyset = &ArrayCommon::ToKeyset;
+  static constexpr auto ToVArray = &ArrayCommon::ToVArray;
+  static constexpr auto ToDArray = &ArrayCommon::ToDArray;
 
 public:
   using ArrayData::decRefCount;
@@ -103,7 +103,7 @@ public:
   using ArrayData::incRefCount;
 
   ssize_t iterAdvanceImpl(ssize_t prev) const {
-    assert(prev >= 0 && prev < m_size);
+    assertx(prev >= 0 && prev < m_size);
     ssize_t next = prev + 1;
     return next < m_size ? next : m_size;
   }
@@ -115,10 +115,17 @@ public:
   // Pre: ad->isApcArray()
   static APCLocalArray* asApcArray(ArrayData*);
   static const APCLocalArray* asApcArray(const ArrayData*);
+  static ArrayData* Escalate(const ArrayData*);
+
+  void scan(type_scan::Scanner& scanner) const;
+  size_t heapSize() const;
 
 private:
-  explicit APCLocalArray(const APCArray* source);
-  ~APCLocalArray();
+  // Return a reference to the value at a given position.
+  static tv_rval RvalPos(const ArrayData* ad, ssize_t pos);
+
+  explicit APCLocalArray(const APCArray* source, size_t heapSize);
+  ~APCLocalArray() = delete;
 
   static bool checkInvariants(const ArrayData*);
   ssize_t getIndex(int64_t k) const;
@@ -126,21 +133,10 @@ private:
   ArrayData* loadElems() const;
   Variant getKey(ssize_t pos) const;
   void sweep();
-
-public:
-  void reap();
-  template<class F> void scan(F& mark) const {
-    //mark(m_arr);
-    if (m_localCache) {
-      for (unsigned i = 0, n = m_arr->capacity(); i < n; ++i) {
-        mark(m_localCache[i]);
-      }
-    }
-  }
+  TypedValue* localCache() const;
 
 private:
   const APCArray* m_arr;
-  mutable TypedValue* m_localCache;
   unsigned m_sweep_index;
   friend struct MemoryManager; // access to m_sweep_index
 };

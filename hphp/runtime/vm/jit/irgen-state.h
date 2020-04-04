@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,8 +13,8 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#ifndef incl_HPHP_JIT_IRGEN_STATE_H_
-#define incl_HPHP_JIT_IRGEN_STATE_H_
+
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -24,25 +24,22 @@
 #include <functional>
 
 #include "hphp/runtime/vm/jit/bc-marker.h"
+#include "hphp/runtime/vm/jit/inline-state.h"
 #include "hphp/runtime/vm/jit/ir-builder.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
+#include "hphp/runtime/vm/jit/irgen-iter-spec.h"
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/types.h"
 
 namespace HPHP { namespace jit {
 
 struct NormalizedInstruction;
 struct SSATmp;
+struct TranslateRetryContext;
+
+namespace irgen {
 
 //////////////////////////////////////////////////////////////////////
-
-struct ReturnTarget {
-  // Block that will contain the InlineReturn and serve as a branch target for
-  // returning to the caller
-  Block* target;
-  // If the inlined region has multiple returns and will require a merge into
-  // the returnStub and target blocks
-  bool needsMerge;
-};
 
 /*
  * IR-Generation State.
@@ -55,48 +52,32 @@ struct ReturnTarget {
  * required to determine high-level compilation strategy.
  */
 struct IRGS {
-  explicit IRGS(TransContext ctx, TransFlags);
+  explicit IRGS(IRUnit& unit, const RegionDesc* region, int32_t budgetBCInstrs,
+                TranslateRetryContext* retryContext,
+                bool prologueSetup = false);
 
-  /*
-   * TODO: refactor this code eventually so IRGS doesn't own its IRUnit (or its
-   * IRBuilder).  The IRUnit should be the result of running the code in the ht
-   * module.
-   */
   TransContext context;
   TransFlags transFlags;
-  IRUnit unit;
+  const RegionDesc* region;
+  IRUnit& unit;
   std::unique_ptr<IRBuilder> irb;
 
   /*
    * Tracks information about the current bytecode offset and which function we
-   * are in. We push and pop as we deal with inlined calls.
+   * are in.
    */
-  std::vector<SrcKey> bcStateStack;
+  SrcKey bcState;
 
   /*
-   * The current inlining level.  0 means we're not inlining.
+   * Tracks information about the state of inlining.
    */
-  uint16_t inlineLevel{0};
-
-  /*
-   * Tracks the branch target for all inlined blocks return to caller. The
-   * target block will Phi the return values in the case of multiple returns
-   * and contain the InlineReturn
-   */
-  std::vector<ReturnTarget> inlineReturnTarget;
+  InlineState inlineState;
 
   /*
    * The id of the profiling translation for the code we're currently
    * generating, if there was one, otherwise kInvalidTransID.
    */
   TransID profTransID{kInvalidTransID};
-
-  /*
-   * Some information is only passed through the nearly-dead
-   * NormalizedInstruction structure.  Don't add new uses since we're gradually
-   * removing this (the long, ugly name is deliberate).
-   */
-  const NormalizedInstruction* currentNormalizedInstruction{nullptr};
 
   /*
    * True if we're on the first HHBC instruction that will be executed
@@ -108,19 +89,33 @@ struct IRGS {
   bool firstBcInst{true};
 
   /*
-   * True if we're on the last HHBC instruction that will be emitted
-   * for this region.
+   * True if we are just forming a region. Used to pessimize return values of
+   * function calls that may have been inferred based on specialized type
+   * information that won't be available when the region is translated.
    */
-  bool lastBcInst{false};
+  bool formingRegion{false};
 
   /*
-   * The function to use to create catch blocks when instructions that can
-   * throw are created with no catch block.  The default (when this function is
-   * null) is to spill the stack and then leave.  We allow a non-default
-   * basically for an minstr use case.  This is reset every time we
-   * prepareForNextHHBC.
+   * Profile-weight factor, to be multiplied by the region blocks'
+   * profile-translation counters in PGO mode.
    */
-  std::function<Block* ()> catchCreator;
+  double profFactor{1};
+
+  /*
+   * The remaining bytecode instruction budget for this region translation.
+   */
+  int32_t budgetBCInstrs{0};
+
+  /*
+   * Context for translation retries.
+   */
+  TranslateRetryContext* retryContext;
+
+  /*
+   * Used to reuse blocks of code between specialized IterInits and IterNexts.
+   * See irgen-iter-spec for details.
+   */
+  jit::fast_map<Block*, std::unique_ptr<SpecializedIterator>> iters;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -132,6 +127,4 @@ std::string show(const IRGS&);
 
 //////////////////////////////////////////////////////////////////////
 
-}}
-
-#endif
+}}}

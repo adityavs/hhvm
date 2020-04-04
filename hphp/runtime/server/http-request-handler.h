@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,11 +27,11 @@
 
 namespace HPHP {
 
-class SourceRootInfo;
-class RequestURI;
+struct SourceRootInfo;
+struct RequestURI;
 
 namespace ServiceData {
-class ExportedTimeSeries;
+struct ExportedTimeSeries;
 }
 
 /*
@@ -42,8 +42,7 @@ void setProxyOriginPercentage(const std::string& origin, int percentage);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class HttpRequestHandler : public RequestHandler {
-public:
+struct HttpRequestHandler : RequestHandler {
   static AccessLog &GetAccessLog() { return s_accessLog; }
 
 public:
@@ -64,16 +63,17 @@ private:
   ServiceData::ExportedTimeSeries* m_requestTimedOutOnQueue;
   folly::Optional<SourceRootInfo> m_sourceRootInfo;
 
+  bool handleFileRequest(Transport *transport, const String& translated,
+                         const std::string& path, const char* ext);
   bool handleProxyRequest(Transport *transport, bool force);
   void sendStaticContent(Transport *transport, const char *data, int len,
                          time_t mtime, bool compressed,
                          const std::string &cmd,
                          const char *ext);
   bool executePHPRequest(Transport *transport, RequestURI &reqURI,
-                         SourceRootInfo &sourceRootInfo,
-                         bool cacheableDynamicContent);
+                         SourceRootInfo &sourceRootInfo);
 
-  static DECLARE_THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
+  static THREAD_LOCAL(AccessLog::ThreadData, s_accessLogThreadData);
   static AccessLog s_accessLog;
 
   static AccessLog::ThreadData* getAccessLogThreadData() {

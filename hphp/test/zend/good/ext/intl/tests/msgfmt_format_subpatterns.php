@@ -1,9 +1,10 @@
-<?php
+<?hh
 
 /*
  * Format a number using misc locales/patterns.
  */
 
+include_once( 'ut_common.inc' );
 
 function ut_main()
 {
@@ -28,12 +29,12 @@ $pattern=<<<_MSG_
 _MSG_;
 
 
-$args = array(
-      array('female', 0,  'Alice', 'Bob'),
-      array('male',   1,  'Alice', 'Bob'),
-      array('none',   2,  'Alice', 'Bob'),
-      array('female', 27, 'Alice', 'Bob'),
-);
+$args = varray[
+      varray['female', 0,  'Alice', 'Bob'],
+      varray['male',   1,  'Alice', 'Bob'],
+      varray['none',   2,  'Alice', 'Bob'],
+      varray['female', 27, 'Alice', 'Bob'],
+];
 
 $str_res = '';
 
@@ -49,9 +50,9 @@ $str_res = '';
     return $str_res;
 }
 
-include_once( 'ut_common.inc' );
+<<__EntryPoint>>
+function main_entry(): void {
 
-// Run the test
-ut_run();
-
-?>
+  // Run the test
+  ut_run();
+}

@@ -1,11 +1,11 @@
-<?php
+<?hh
 
 class X {
   public $real = 1;
   function __get($name) {
  echo 'get:';
  var_dump($name);
- return 'abc';
+ return 42;
  }
   function __set($name, $val) {
  echo 'set:';
@@ -18,4 +18,8 @@ function test($x) {
   $x->real++;
   var_dump($x);
 }
+
+<<__EntryPoint>>
+function main_761() {
 test(new X);
+}

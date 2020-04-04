@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function foo($x) {
   $x = $x + 1;
@@ -9,5 +9,6 @@ function main() {
   $y = foo(1);
   return $y;
 }
-
+<<__EntryPoint>> function main_entry(): void {
 var_dump(main());
+}

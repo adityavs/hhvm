@@ -1,4 +1,6 @@
-<?php
-if (!file_exists("./runtime/ext_zend_compat/dso_test/dso_test.so")) {
+<?hh
+<<__EntryPoint>> function main(): void {
+if (!file_exists("./test/dso_test/dso_test.so")) {
   echo "skip";
+}
 }

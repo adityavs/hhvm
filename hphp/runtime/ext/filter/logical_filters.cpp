@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,15 +17,15 @@
 
 #include "hphp/runtime/ext/filter/logical_filters.h"
 
-#include <arpa/inet.h>
 #include <pcre.h>
+
+#include <folly/portability/Sockets.h>
 
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/zend-functions.h"
-#include "hphp/runtime/base/zend-php-config.h"
 #include "hphp/runtime/base/zend-url.h"
 #include "hphp/runtime/ext/filter/ext_filter.h"
 #include "hphp/runtime/ext/filter/sanitizing_filters.h"
@@ -75,7 +75,7 @@ static int php_filter_parse_int(const char *str, unsigned int str_len,
   }
 
   if ((end - str > MAX_LENGTH_OF_LONG - 1) /* number too long */
-   || (SIZEOF_LONG == 4 && (end - str == MAX_LENGTH_OF_LONG - 1) &&
+   || (sizeof(long) == 4 && (end - str == MAX_LENGTH_OF_LONG - 1) &&
        *str > '2')) {
     /* overflow */
     return -1;
@@ -184,12 +184,12 @@ Variant php_filter_int(PHP_INPUT_FILTER_PARAM_DECL) {
     if (allow_hex && (*p == 'x' || *p == 'X')) {
       p++; len--;
       if (php_filter_parse_hex(p, len, &ctx_value) < 0) {
-        assert(ctx_value == 0);
+        assertx(ctx_value == 0);
         error = 1;
       }
     } else if (allow_octal) {
       if (php_filter_parse_octal(p, len, &ctx_value) < 0) {
-        assert(ctx_value == 0);
+        assertx(ctx_value == 0);
         error = 1;
       }
     } else if (len != 0) {
@@ -197,7 +197,7 @@ Variant php_filter_int(PHP_INPUT_FILTER_PARAM_DECL) {
     }
   } else {
     if (php_filter_parse_int(p, len, &ctx_value) < 0) {
-      assert(ctx_value == 0);
+      assertx(ctx_value == 0);
       error = 1;
     }
   }
@@ -356,7 +356,7 @@ Variant php_filter_float(PHP_INPUT_FILTER_PARAM_DECL) {
     return (double)lval;
   } else if (isDoubleType(dt)) {
     if ((!dval && p.size() > 1 && strpbrk(p.data(), "123456789")) ||
-         !zend_finite(dval)) {
+         !std::isfinite(dval)) {
       goto error;
     }
     return dval;
@@ -631,6 +631,7 @@ Variant php_filter_validate_ip(PHP_INPUT_FILTER_PARAM_DECL) {
       if (flags & k_FILTER_FLAG_NO_PRIV_RANGE) {
         if (
           (ip[0] == 10) ||
+          (ip[0] == 169 && ip[1] == 254) ||
           (ip[0] == 172 && (ip[1] >= 16 && ip[1] <= 31)) ||
           (ip[0] == 192 && ip[1] == 168)
         ) {
@@ -641,10 +642,18 @@ Variant php_filter_validate_ip(PHP_INPUT_FILTER_PARAM_DECL) {
       if (flags & k_FILTER_FLAG_NO_RES_RANGE) {
         if (
           (ip[0] == 0) ||
-          (ip[0] == 100 && (ip[1] >= 64 || ip[1] <= 127)) ||
+          (ip[0] == 10) ||
+          (ip[0] == 100 && (ip[1] >= 64 && ip[1] <= 127)) ||
+          (ip[0] == 127) ||
           (ip[0] == 169 && ip[1] == 254) ||
+          (ip[0] == 172 && (ip[1] >= 16 && ip[1] <= 31)) ||
+          (ip[0] == 192 && ip[1] == 0 && ip[2] == 0) ||
           (ip[0] == 192 && ip[1] == 0 && ip[2] == 2) ||
-          (ip[0] == 127 && ip[1] == 0 && ip[2] == 0 && ip[3] == 1) ||
+          (ip[0] == 192 && ip[1] == 88 && ip[2] == 99) ||
+          (ip[0] == 192 && ip[1] == 168) ||
+          (ip[0] == 198 && (ip[1] == 18 || ip[1] == 19)) ||
+          (ip[0] == 198 && ip[1] == 51 && ip[2] == 100) ||
+          (ip[0] == 203 && ip[1] == 0 && ip[2] == 113) ||
           (ip[0] >= 224 && ip[0] <= 255)
         ) {
           RETURN_VALIDATION_FAILED
@@ -771,18 +780,6 @@ Variant php_filter_validate_mac(PHP_INPUT_FILTER_PARAM_DECL) {
     }
   }
   return value;
-}
-
-Variant php_filter_callback(PHP_INPUT_FILTER_PARAM_DECL) {
-  if (!is_callable(option_array)) {
-    raise_warning("First argument is expected to be a valid callback");
-    return init_null();
-  }
-  Variant reffable = value;
-  return vm_call_user_func(
-    option_array,
-    PackedArrayInit(1).appendRef(reffable).toArray()
-  );
 }
 
 }

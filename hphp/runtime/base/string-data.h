@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,19 +24,20 @@
 #include "hphp/util/hash.h"
 #include "hphp/util/word-mem.h"
 
-#include "hphp/runtime/base/cap-code.h"
 #include "hphp/runtime/base/countable.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/exceptions.h"
 #include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/string-data-macros.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-class APCString;
-class Array;
-class String;
+struct APCString;
+struct Array;
+struct String;
+struct APCHandle;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -59,7 +60,7 @@ enum CopyStringMode { CopyString };
  * StringDatas can also be allocated in multiple ways.  Normally, they
  * are created through one of the Make overloads, which drops them in
  * the request-local heap.  They can also be low-malloced (for static
- * strings), or malloc'd (MakeMalloc) for APC shared or uncounted strings.
+ * strings), or uncounted-malloced for APC shared or uncounted strings.
  *
  * Here's a breakdown of string modes, and which configurations are
  * allowed in which allocation mode:
@@ -69,17 +70,22 @@ enum CopyStringMode { CopyString };
  *   Flat   |   X    |     X    |    X
  *   Proxy  |        |          |    X
  */
-struct StringData {
-  friend class APCString;
-  friend StringData* allocFlatSmallImpl(size_t len);
-  friend StringData* allocFlatSlowImpl(size_t len);
+struct StringData final : MaybeCountable,
+                          type_scan::MarkCollectable<StringData> {
+  friend struct APCString;
+  friend StringData* allocFlat(size_t len);
 
   /*
    * Max length of a string, not counting the terminal 0.
    *
-   * This is smaller than MAX_INT, and we want a CapCode to precisely encode it.
+   * This is smaller than MAX_INT, and it plus StringData overhead should
+   * exactly equal a size class.
    */
-  static constexpr uint32_t MaxSize = 0x7ff00000; // 11 bits of 1's
+#ifdef NO_M_DATA
+  static constexpr uint32_t MaxSize = 0x80000000U - 16 - 1;
+#else
+  static constexpr uint32_t MaxSize = 0x80000000U - 24 - 1;
+#endif
 
   /*
    * Creates an empty request-local string with an unspecified amount of
@@ -93,8 +99,8 @@ struct StringData {
    *
    * Most strings are created this way.
    */
-  static StringData* Make(const char* data);
-  static StringData* Make(const std::string& data);
+  static StringData* Make(folly::StringPiece);
+
   static StringData* Make(const char* data, CopyStringMode);
   static StringData* Make(const char* data, size_t len, CopyStringMode);
   static StringData* Make(const StringData* s, CopyStringMode);
@@ -149,7 +155,7 @@ struct StringData {
   /*
    * Same as MakeStatic but the string allocated will *not* be in the static
    * string table, will not be in low-memory, and should be deleted using
-   * destructUncounted once the root goes out of scope.
+   * ReleaseUncounted once the root goes out of scope.
    */
   static StringData* MakeUncounted(folly::StringPiece);
 
@@ -160,10 +166,19 @@ struct StringData {
   static StringData* MakeEmpty();
 
   /*
+   * return estimated capacity for a string of the given size, due to
+   * size-class rounding.
+   */
+  static size_t estimateCap(size_t size);
+
+  /*
    * Offset accessors for the JIT compiler.
    */
+#ifndef NO_M_DATA
   static constexpr ptrdiff_t dataOff() { return offsetof(StringData, m_data); }
+#endif
   static constexpr ptrdiff_t sizeOff() { return offsetof(StringData, m_len); }
+  static constexpr ptrdiff_t hashOff() { return offsetof(StringData, m_hash); }
 
   /*
    * Proxy StringData's have a sweep list running through them for
@@ -188,16 +203,27 @@ struct StringData {
 
   /*
    * StringData objects allocated with MakeUncounted should be freed
-   * using this function.
+   * using this function. It will remove a reference via
+   * uncountedDecRef, and if necessary destroy the StringData and
+   * return true.
    */
-  void destructUncounted();
+  static void ReleaseUncounted(const StringData*);
+
+  /*
+   * root is the address of the top-level APCHandle which contains this string
+   * register {allocation, root} with APCGCManager
+   */
+  void registerUncountedAllocation(APCHandle* rootAPCHandle);
 
   /*
    * Reference-counting related.
    */
-  IMPLEMENT_COUNTABLE_METHODS_WITH_STATIC
+  ALWAYS_INLINE void decRefAndRelease() {
+    assertx(kindIsValid());
+    if (decReleaseCheck()) release();
+  }
 
-  bool kindIsValid() const { return m_hdr.kind == HeaderKind::String; }
+  bool kindIsValid() const { return m_kind == HeaderKind::String; }
 
   /*
    * Append the supplied range to this string.  If there is not sufficient
@@ -278,10 +304,17 @@ struct StringData {
   void checkStack() const;
 
   /*
-   * Access to the string's data as a character array.
+   * Access to the string's data as a null-terminated character array.
    *
-   * Please try to prefer slice() in new code, instead of assuming
-   * this is null terminated.
+   * Please try to prefer slice() in new code.
+   *
+   * The following extensions depend on the null terminator for correctness,
+   * and the lack of implicit copying (not perfect for Strings, but
+   * best-effort):
+   *
+   * - libsodium
+   * - mcrypt
+   * - openssl
    */
   const char* data() const;
 
@@ -305,7 +338,7 @@ struct StringData {
 
   /*
    * Return the capacity of this string's buffer, not including the space
-   * for the null terminator.
+   * for the null terminator. Always 0 for static/uncounted strings.
    */
   uint32_t capacity() const;
 
@@ -401,6 +434,8 @@ struct StringData {
    */
   strhash_t hash() const;
   NEVER_INLINE strhash_t hashHelper() const;
+  static strhash_t hash(const char* s, size_t len);
+  static strhash_t hash_unsafe(const char* s, size_t len);
 
   /*
    * Equality comparison, in the sense of php's string == operator.
@@ -432,6 +467,15 @@ struct StringData {
   int compare(const StringData* v2) const;
 
   /*
+   * Create a sub-string from start with specified length.
+   *
+   * If the start is outside the bounds of the string, or the length is
+   * negative, the empty string is returned.  The range [start, start+length]
+   * gets clamped to [start, size()].
+   */
+  StringData* substr(int start, int length = StringData::MaxSize);
+
+  /*
    * Debug dumping of a StringData to stdout.
    */
   void dump() const;
@@ -442,7 +486,17 @@ struct StringData {
                    - sizeof(StringData)
     );
   }
+#ifdef NO_M_DATA
+  static constexpr bool isProxy() { return false; }
+#else
   bool isProxy() const;
+#endif
+
+  bool isImmutable() const;
+
+  bool checkSane() const;
+
+  void unProxy();
 
 private:
   struct Proxy {
@@ -451,8 +505,8 @@ private:
   };
 
 private:
-  static StringData* MakeShared(folly::StringPiece sl, bool trueStatic);
-  static StringData* MakeProxySlowPath(const APCString*);
+  template<bool trueStatic>
+  static StringData* MakeShared(folly::StringPiece sl);
 
   StringData(const StringData&) = delete;
   StringData& operator=(const StringData&) = delete;
@@ -464,29 +518,32 @@ private:
   const Proxy* proxy() const;
   Proxy* proxy();
 
+#ifdef NO_M_DATA
+  static constexpr bool isFlat() { return true; }
+#else
   bool isFlat() const;
-  bool isImmutable() const;
+#endif
 
-  void releaseDataSlowPath();
+  void releaseProxy();
   int numericCompare(const StringData *v2) const;
   StringData* escalate(size_t cap);
   void enlist();
   void delist();
   void incrementHelper();
-  bool checkSane() const;
   void preCompute();
-
-private:
-  char* m_data;
 
   // We have the next fields blocked into qword-size unions so
   // StringData initialization can do fewer stores to initialize the
   // fields.  (gcc does not combine the stores itself.)
-  HeaderWord<CapCode> m_hdr;
+private:
+#ifndef NO_M_DATA
+  // TODO(5601154): Add KindOfApcString and remove StringData m_data field.
+  char* m_data;
+#endif
   union {
     struct {
       uint32_t m_len;
-      mutable strhash_t m_hash;   // precompute hash codes for static strings
+      mutable int32_t m_hash;           // precomputed for persistent strings
     };
     uint64_t m_lenAndHash;
   };
@@ -495,10 +552,42 @@ private:
 //////////////////////////////////////////////////////////////////////
 
 /*
- * A reasonable length to reserve for small strings.  This is the
- * default reserve size for StringData::Make(), also.
+ * The allocation overhead of a StringData: the struct plus the null byte
  */
-constexpr uint32_t SmallStringReserve = 64 - sizeof(StringData) - 1;
+auto constexpr kStringOverhead = sizeof(StringData) + 1;
+static_assert(StringData::MaxSize + kStringOverhead == kSizeIndex2Size[103],
+              "max allocation size is a valid size class");
+
+/*
+ * A reasonable length to reserve for small strings.  This is also the
+ * default reserve size for StringData::Make().
+ */
+constexpr uint32_t SmallStringReserve = 64 - kStringOverhead;
+
+/* this only exists so that clang won't warn on the subtraction */
+inline constexpr uint32_t sizeClassParams2StringCapacity(
+  size_t lg_grp,
+  size_t lg_delta,
+  size_t ndelta
+) {
+  return ((size_t{1} << lg_grp) + (ndelta << lg_delta)) > kStringOverhead
+      && ((size_t{1} << lg_grp) + (ndelta << lg_delta))
+        <= StringData::MaxSize + kStringOverhead
+    ? ((size_t{1} << lg_grp) + (ndelta << lg_delta)) - kStringOverhead
+    : 0;
+}
+
+alignas(64) constexpr uint32_t kSizeIndex2StringCapacity[] = {
+#define SIZE_CLASS(index, lg_grp, lg_delta, ndelta, lg_delta_lookup, ncontig) \
+  sizeClassParams2StringCapacity(lg_grp, lg_delta, ndelta),
+  SIZE_CLASSES
+#undef SIZE_CLASS
+};
+
+/*
+ * Call this if we tried to make a string longer than StringData::MaxSize
+ */
+void raiseStringLengthExceededError(size_t len);
 
 /*
  * DecRef a string s, calling release if its reference count goes to
@@ -509,17 +598,19 @@ void decRefStr(StringData* s);
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Function objects the forward to the StringData member functions of
+ * Function objects that forward to the StringData member functions of
  * the same name.
  */
 struct string_data_hash;
 struct string_data_same;
 struct string_data_isame;
+struct string_data_lt;
+struct string_data_lti;
 
 //////////////////////////////////////////////////////////////////////
 
 extern std::aligned_storage<
-  sizeof(StringData) + 1,
+  kStringOverhead,
   alignof(StringData)
 >::type s_theEmptyString;
 
@@ -538,7 +629,8 @@ ALWAYS_INLINE StringData* staticEmptyString() {
 }
 
 namespace folly {
-template<> struct FormatValue<const HPHP::StringData*> {
+template<> class FormatValue<const HPHP::StringData*> {
+ public:
   explicit FormatValue(const HPHP::StringData* str) : m_val(str) {}
 
   template<typename Callback>
@@ -551,7 +643,8 @@ template<> struct FormatValue<const HPHP::StringData*> {
   const HPHP::StringData* m_val;
 };
 
-template<> struct FormatValue<HPHP::StringData*> {
+template<> class FormatValue<HPHP::StringData*> {
+ public:
   explicit FormatValue(const HPHP::StringData* str) : m_val(str) {}
 
   template<typename Callback>

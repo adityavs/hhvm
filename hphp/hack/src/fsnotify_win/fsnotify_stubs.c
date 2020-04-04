@@ -2,9 +2,8 @@
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  */
 
@@ -101,16 +100,12 @@ static value parse_events(struct events *events)
     wpath = caml_copy_string(events->wpath);
     for (;;) {
       // Forcefully null terminate the filename.
-      wchar_t oldMem = fileInfo->FileName[fileInfo->FileNameLength];
-      fileInfo->FileName[fileInfo->FileNameLength] = L'\0';
       char* modifiedFilename =
-        (char*)malloc(sizeof(wchar_t) * fileInfo->FileNameLength);
-      size_t filenameLen =
-        wcstombs_s(NULL, modifiedFilename,
-                   sizeof(wchar_t) * fileInfo->FileNameLength,
-                   fileInfo->FileName,
-                   (sizeof(wchar_t) * fileInfo->FileNameLength) - 1);
-      fileInfo->FileName[fileInfo->FileNameLength] = oldMem;
+        (char*)malloc(fileInfo->FileNameLength);
+      wcstombs_s(NULL, modifiedFilename,
+                 fileInfo->FileNameLength,
+                 fileInfo->FileName,
+                 fileInfo->FileNameLength / sizeof (wchar_t));
       // Allocate 'Fsnotify.events'
       ev = caml_alloc_tuple(2);
       Store_field(ev, 0, caml_copy_string(modifiedFilename));

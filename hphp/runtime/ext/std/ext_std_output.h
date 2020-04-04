@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -39,7 +39,7 @@ bool HHVM_FUNCTION(ob_start, const Variant& output_callback = uninit_null(),
                              int chunk_size = 0,
                              int flags = k_PHP_OUTPUT_HANDLER_STDFLAGS);
 void HHVM_FUNCTION(ob_clean);
-void HHVM_FUNCTION(ob_flush);
+bool HHVM_FUNCTION(ob_flush);
 bool HHVM_FUNCTION(ob_end_clean);
 bool HHVM_FUNCTION(ob_end_flush);
 void HHVM_FUNCTION(flush);
@@ -48,12 +48,9 @@ Variant HHVM_FUNCTION(ob_get_clean);
 Variant HHVM_FUNCTION(ob_get_flush);
 int64_t HHVM_FUNCTION(ob_get_length);
 int64_t HHVM_FUNCTION(ob_get_level);
-Array HHVM_FUNCTION(ob_get_status, bool full_status = false);
+Variant HHVM_FUNCTION(ob_get_status, bool full_status = false);
 void HHVM_FUNCTION(ob_implicit_flush, bool flag = true);
 Array HHVM_FUNCTION(ob_list_handlers);
-bool HHVM_FUNCTION(output_add_rewrite_var, const String& name,
-                                           const String& value);
-bool HHVM_FUNCTION(output_reset_rewrite_vars);
 
 void HHVM_FUNCTION(hphp_crash_log, const String& name, const String& value);
 

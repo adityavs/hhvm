@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,8 @@ namespace HPHP {
 bool TypeAliasReq::compat(const TypeAlias& alias) const {
   return (alias.type == AnnotType::Mixed && type == AnnotType::Mixed) ||
          (alias.type == type && alias.nullable == nullable &&
-          Unit::lookupClass(alias.value) == klass);
+          Unit::lookupClass(alias.value) == klass &&
+          Unit::lookupRecordDesc(alias.value) == rec);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

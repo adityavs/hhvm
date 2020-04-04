@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   private $c = 1;
@@ -9,32 +9,29 @@ class A {
     };
     $a();
 
-    $a = static function () {
-      var_dump($this);
-    };
-    $a();
+
+
+
+
   }
 
   static function c() {
     $a = function () {
-      var_dump($this);
+      echo "c::\$a\n";
     };
     $a();
 
     $a = static function () {
-      var_dump($this);
+      echo "static c::\$a\n";
     };
     $a();
   }
-
   static function d() {
-    var_dump(array_map(function($a) { return $a; }, array(1,2,3)));
+    var_dump(array_map(function($a) { return $a; }, varray[1,2,3]));
   }
 }
-
+<<__EntryPoint>> function main(): void {
 (new A)->b();
-A::b();
-(new A)->c();
 A::c();
-(new A)->d();
 A::d();
+}

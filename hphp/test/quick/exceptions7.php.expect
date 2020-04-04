@@ -22,24 +22,6 @@ bool(true)
 caught call user func 2
 Closure! wooooo
 caught closure 1
-magic call! string(12) "i_dont_exist"
-array(5) {
-  [0]=>
-  string(4) "frap"
-  [1]=>
-  NULL
-  [2]=>
-  array(1) {
-    [0]=>
-    string(8) "claptrap"
-  }
-  [3]=>
-  NULL
-  [4]=>
-  &bool(true)
-}
-
-caught magic call 1
 ----HANDLER----
 string(12) "Blark::sfrap"
 string(5) "Blark"
@@ -58,25 +40,9 @@ NULL
 bool(true)
 ---------------
 caught static call 2
-magic call! string(19) "i_dont_exist_either"
-array(5) {
-  [0]=>
-  string(12) "Blark::sfrap"
-  [1]=>
-  string(5) "Blark"
-  [2]=>
-  array(0) {
-  }
-  [3]=>
-  NULL
-  [4]=>
-  &bool(true)
-}
-
-caught magic call 2
 ----HANDLER----
 string(11) "Blark::frap"
-object(Blark)#11 (0) {
+object(Blark) (0) {
 }
 array(0) {
 }
@@ -86,7 +52,7 @@ bool(true)
 caught non-static call 1
 ----HANDLER----
 string(11) "Blark::frap"
-object(Blark)#11 (0) {
+object(Blark) (0) {
 }
 array(0) {
 }
@@ -94,23 +60,6 @@ NULL
 bool(true)
 ---------------
 caught non-static call 2
-magic call! string(19) "i_dont_exist_either"
-array(5) {
-  [0]=>
-  string(11) "Blark::frap"
-  [1]=>
-  object(Blark)#11 (0) {
-  }
-  [2]=>
-  array(0) {
-  }
-  [3]=>
-  NULL
-  [4]=>
-  &bool(true)
-}
-
-caught magic call 3
 ----HANDLER----
 string(7) "handler"
 NULL
@@ -127,7 +76,7 @@ array(5) {
   [3]=>
   NULL
   [4]=>
-  &bool(true)
+  bool(true)
 }
 NULL
 bool(true)
@@ -140,7 +89,7 @@ array(5) {
   [0]=>
   string(17) "MagicCall::__call"
   [1]=>
-  object(MagicCall)#7 (0) {
+  object(MagicCall) (0) {
   }
   [2]=>
   array(2) {
@@ -155,7 +104,7 @@ array(5) {
   [3]=>
   NULL
   [4]=>
-  &bool(true)
+  bool(true)
 }
 NULL
 bool(true)
@@ -163,7 +112,7 @@ bool(true)
 caught __call 1
 ----HANDLER----
 string(17) "MagicCall::__call"
-object(MagicCall)#7 (0) {
+object(MagicCall) (0) {
 }
 array(2) {
   [0]=>

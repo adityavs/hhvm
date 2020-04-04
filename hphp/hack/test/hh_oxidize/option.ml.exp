@@ -1,0 +1,12 @@
+use ocamlrep_derive::OcamlRep;
+use serde::Deserialize;
+use serde::Serialize;
+
+#[allow(unused_imports)]
+use crate::*;
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, OcamlRep, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum Option<A> {
+    None,
+    Some(A),
+}

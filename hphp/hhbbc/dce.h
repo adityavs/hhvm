@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,6 +29,7 @@ struct State;
 struct Context;
 struct Bytecode;
 struct FuncAnalysis;
+struct CollectedInfo;
 namespace php { struct Block; }
 
 //////////////////////////////////////////////////////////////////////
@@ -36,24 +37,16 @@ namespace php { struct Block; }
 /*
  * Perform DCE on a single basic block.
  */
-void local_dce(const Index&, const FuncAnalysis&, borrowed_ptr<php::Block>,
-  const State&);
+void local_dce(const Index&, const FuncAnalysis&, CollectedInfo& collect,
+               BlockId bid, const State&);
 
 /*
  * Eliminate dead code in a function, across basic blocks, based on
  * results from a previous analyze_func call.
- */
-void global_dce(const Index&, const FuncAnalysis&);
-
-/*
- * Assist in removing blocks that aren't reachable by removing
- * conditional jumps that are never taken.  Conditional jumps that are
- * always taken are turned into unconditional jumps in first_pass.
  *
- * If options.RemoveDeadBlocks is off, this function just replaces
- * blocks we believe are unreachable with fatal opcodes.
+ * Returns true if we should re-run the optimizer.
  */
-void remove_unreachable_blocks(const Index&, const FuncAnalysis&);
+bool global_dce(const Index&, const FuncAnalysis&);
 
 //////////////////////////////////////////////////////////////////////
 

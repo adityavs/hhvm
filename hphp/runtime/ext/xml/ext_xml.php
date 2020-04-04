@@ -1,4 +1,4 @@
-<?hh
+<?hh // partial
 
 /**
  * xml_parser_create() creates a new XML parser and returns a resource handle
@@ -67,8 +67,10 @@ function xml_parse(resource $parser, string $data, bool $is_final = true): int;
 <<__Native>>
 function xml_parse_into_struct(resource $parser,
                                string $data,
-                               mixed &$values,
-                               mixed &$index = null): int;
+                               <<__OutOnly("KindOfArray")>>
+                               inout mixed $values,
+                               <<__OutOnly("KindOfArray")>>
+                               inout mixed $index): int;
 
 /**
  * xml_parser_create_ns() creates a new XML parser with XML namespace support
@@ -323,7 +325,7 @@ function xml_set_notation_decl_handler(resource $parser, mixed $handler): bool;
  *
  */
 <<__Native>>
-function xml_set_object(resource $parser, mixed &$object): bool;
+function xml_set_object(resource $parser, mixed $object): bool;
 
 /**
  * Gets the current byte index of the given XML parser.
@@ -401,7 +403,7 @@ function xml_error_string(int $code): string;
  * @return string - Returns the ISO-8859-1 translation of data.
  *
  */
-<<__Native>>
+<<__Native, __IsFoldable>>
 function utf8_decode(string $data): string;
 
 /**
@@ -421,5 +423,5 @@ function utf8_decode(string $data): string;
  * @return string - Returns the UTF-8 translation of data.
  *
  */
-<<__Native>>
+<<__Native, __IsFoldable>>
 function utf8_encode(string $data): string;

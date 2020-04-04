@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,148 +16,177 @@
 
 #include "hphp/runtime/vm/jit/type-specialization.h"
 
+#include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/vm/class.h"
+#include "hphp/runtime/vm/record.h"
 
 namespace HPHP { namespace jit {
+
+///////////////////////////////////////////////////////////////////////////////
+
+namespace {
+// Ideally, we would intersect RATs here, but doing so is expensive and rarely
+// ends up being useful. Instead, we use a heuristic which tends to select the
+// more constrained type, and fall back to id to ensure commutativity.
+const RepoAuthType::Array* chooseRATArray(const RepoAuthType::Array* lhs,
+                                          const RepoAuthType::Array* rhs) {
+  auto const lhs_size_known = lhs->tag() == RepoAuthType::Array::Tag::Packed;
+  auto const rhs_size_known = rhs->tag() == RepoAuthType::Array::Tag::Packed;
+  if (lhs_size_known != rhs_size_known) return lhs_size_known ? lhs : rhs;
+  return lhs->id() < rhs->id() ? lhs : rhs;
+}
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // ArraySpec.
 
-const ArraySpec ArraySpec::Top;
-const ArraySpec ArraySpec::Bottom(ArraySpec::BottomTag{});
-
 bool ArraySpec::operator<=(const ArraySpec& rhs) const {
+  assertx(checkInvariants());
+  assertx(rhs.checkInvariants());
   auto const& lhs = *this;
 
-  if (lhs == Bottom || rhs == Top) return true;
-  if (lhs == Top || rhs == Bottom) return false;
+  if (lhs == Bottom() || rhs == Top()) return true;
+  if (lhs == Top() || rhs == Bottom()) return false;
 
   // It's possible to subtype RAT::Array types, but it's potentially O(n), so
-  // we just don't do it.
-  return (!rhs.kind()  || lhs.kind()  == rhs.kind()) &&
-         (!rhs.type()  || lhs.type()  == rhs.type()) &&
-         (!rhs.shape() || lhs.shape() == rhs.shape());
+  // we just don't do it. It's okay for <= to return false negative results.
+  if ((rhs.m_sort & HasKind) &&
+      !((lhs.m_sort & HasKind) && lhs.m_kind == rhs.m_kind)) {
+    return false;
+  }
+  if ((rhs.m_sort & HasType) &&
+      !((lhs.m_sort & HasType) && lhs.m_ptr == rhs.m_ptr)) {
+    return false;
+  }
+  if (rhs.dvarray() && !lhs.dvarray()) return false;
+  if (rhs.vanilla() && !lhs.vanilla()) return false;
+  return true;
 }
 
 ArraySpec ArraySpec::operator|(const ArraySpec& rhs) const {
+  assertx(checkInvariants());
+  assertx(rhs.checkInvariants());
   auto const& lhs = *this;
 
   if (lhs <= rhs) return rhs;
   if (rhs <= lhs) return lhs;
 
-  // Take the union componentwise.  Components union trivially (i.e., to
-  // "unspecialized") unless they are equal.
-  auto new_kind = lhs.kind() == rhs.kind() ? lhs.kind() : folly::none;
-  auto new_type = lhs.type() == rhs.type() ? lhs.type() : nullptr;
-
-  // If the shapes were nontrivial and equal, the specs would be equal.
-  assertx(!lhs.shape() || lhs.shape() != rhs.shape());
-
-  // Nontrivial kind /and/ type unions would imply equal kinds and types.
-  assertx(!new_kind || !new_type);
-
-  if (new_kind) return ArraySpec(*new_kind);
-  if (new_type) return ArraySpec(new_type);
-  return Top;
+  // Operate on the raw fields; kind() masks the kind based on the vanilla bit,
+  // but we still want to propagate the value in case we later get that bit.
+  //
+  // Note that each bit in m_sort represents some fact we know about the type.
+  // To union the types, we must intersect (and thus lose) some of these facts.
+  auto result = lhs;
+  result.m_sort &= rhs.m_sort;
+  if (lhs.m_kind != rhs.m_kind) {
+    result.m_sort &= ~HasKind;
+    result.m_kind = ArrayData::ArrayKind{};
+  }
+  if (lhs.m_ptr != rhs.m_ptr) {
+    result.m_sort &= ~HasType;
+    result.m_ptr = 0;
+  }
+  assertx(result.checkInvariants());
+  return result;
 }
 
 ArraySpec ArraySpec::operator&(const ArraySpec& rhs) const {
+  assertx(checkInvariants());
+  assertx(rhs.checkInvariants());
   auto const& lhs = *this;
 
   if (lhs <= rhs) return lhs;
   if (rhs <= lhs) return rhs;
 
-  // Take the intersection componentwise.  If one component is unspecialized,
-  // it behaves like Top, and the intersection is the other component (the
-  // Bottom case is handled by the subtype checks above).  Otherwise, they
-  // intersect to either component if they are equal, else to Bottom.
-#define NEW_COMPONENT(name, defval)                   \
-  (lhs.name() && !rhs.name() ? lhs.name() :           \
-   rhs.name() && !lhs.name() ? rhs.name() :           \
-   lhs.name() == rhs.name()  ? lhs.name() : (defval))
+  // Operate on the raw fields; kind() masks the kind based on the vanilla bit,
+  // but we still want to propagate the value in case we later get that bit.
+  //
+  // Note that each bit in m_sort represents some fact we know about the type.
+  // To intersect the types, we may union (and thus gain) some of these facts.
+  auto result = lhs;
+  result.m_sort |= rhs.m_sort;
 
-  // If the default value is returned, it might mean either Bottom or Top, so
-  // we need more checks.
-  auto new_kind  = NEW_COMPONENT(kind,  folly::none);
-  auto new_type  = NEW_COMPONENT(type,  nullptr);
-  auto new_shape = NEW_COMPONENT(shape, nullptr);
-
-#undef NEW_COMPONENT
-
-  if ((!new_kind  && lhs.kind()) ||
-      (!new_shape && lhs.shape())) {
-    // If there's no new_x, but lhs.x() is nontrivial, then rhs.x() is not
-    // equal to it and also nontrivial.  The intersection is thus Bottom.
-    //
-    // Note that we ignore this check for type(), because we don't subtype RAT
-    // types precisely.
-    return Bottom;
+  // If both types have a kind and they differ, the intersection must be empty.
+  if (rhs.m_sort & HasKind) {
+    if ((lhs.m_sort & HasKind) && lhs.m_kind != rhs.m_kind) {
+      return Bottom();
+    }
+    result.m_kind = rhs.m_kind;
   }
 
-  if (new_shape && new_kind == ArrayData::kStructKind) {
-    // We could potentially be dropping a type, but that's okay.
-    return ArraySpec(new_shape);
+  // If both types have an RAT and they differ, keep the "better" one.
+  if (rhs.m_sort & HasType) {
+    if ((lhs.m_sort & HasType) && lhs.m_ptr != rhs.m_ptr) {
+      auto const rat = chooseRATArray(lhs.getRawType(), rhs.getRawType());
+      result.m_ptr = reinterpret_cast<uintptr_t>(rat);
+    } else {
+      result.m_ptr = rhs.m_ptr;
+    }
   }
 
-  if (new_kind && new_type) {
-    return ArraySpec(*new_kind, new_type);
-  } else if (new_kind) {
-    return ArraySpec(*new_kind);
-  } else if (new_type) {
-    return ArraySpec(new_type);
-  }
+  result.checkInvariants();
+  return result;
+}
 
-  return Top;
+std::string ArraySpec::toString() const {
+  std::string result;
+  auto const init = (m_sort & IsVanilla) ? "=" : "={";
+  if (m_sort & HasKind) {
+    auto const kind = ArrayData::ArrayKind(m_kind);
+    result += folly::to<std::string>(init, ArrayData::kindToString(kind));
+  }
+  if (m_sort & HasType) {
+    auto const type = reinterpret_cast<const RepoAuthType::Array*>(m_ptr);
+    auto const sign = result.empty() ? init : ":";
+    result += folly::to<std::string>(sign, show(*type));
+  }
+  if ((m_sort & IsVanilla) && result.empty()) {
+    result += "=Vanilla";
+  } else if (!(m_sort & IsVanilla) && !result.empty()) {
+    result += "|Bespoke}";
+  }
+  if (m_sort & IsDVArray) {
+    result += ":DV";
+  }
+  return result;
+}
+
+bool ArraySpec::checkInvariants() const {
+  if ((*this == Top()) || (*this == Bottom())) return true;
+  assertx(m_sort != IsTop);
+  assertx(!(m_sort & IsBottom));
+  if (m_sort & HasKind) {
+    assertx(isArrayKind(HeaderKind(m_kind)));
+    assertx(m_kind != ArrayData::kVecKind &&
+            m_kind != ArrayData::kDictKind &&
+            m_kind != ArrayData::kKeysetKind);
+  } else {
+    assertx(m_kind == ArrayData::ArrayKind{});
+  }
+  if (m_sort & HasType) {
+    assertx(m_ptr != 0);
+  } else {
+    assertx(m_ptr == 0);
+  }
+  return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// ClassSpec.
+// ClsRecSpec.
 
-const ClassSpec ClassSpec::Top;
-const ClassSpec ClassSpec::Bottom(ClassSpec::BottomTag{});
-
-bool ClassSpec::operator<=(const ClassSpec& rhs) const {
-  auto const& lhs = *this;
-
-  if (lhs == rhs) return true;
-  if (lhs == Bottom || rhs == Top) return true;
-  if (lhs == Top || rhs == Bottom) return false;
-
-  return !rhs.exact() && lhs.cls()->classof(rhs.cls());
-}
-
-ClassSpec ClassSpec::operator|(const ClassSpec& rhs) const {
-  auto const& lhs = *this;
-
-  if (lhs <= rhs) return rhs;
-  if (rhs <= lhs) return lhs;
-
-  assertx(lhs.cls() && rhs.cls());
-
-  // We're unwilling to unify with interfaces, so just return Top.
-  if (!isNormalClass(lhs.cls()) || !isNormalClass(rhs.cls())) {
-    return Top;
-  }
-
-  // Unify to a common ancestor if possible.
-  if (auto cls = lhs.cls()->commonAncestor(rhs.cls())) {
-    return ClassSpec(cls, ClassSpec::SubTag{});
-  }
-
-  return Top;
-}
-
+template<>
 ClassSpec ClassSpec::operator&(const ClassSpec& rhs) const {
   auto const& lhs = *this;
 
   if (lhs <= rhs) return lhs;
   if (rhs <= lhs) return rhs;
 
-  assertx(lhs.cls() && rhs.cls());
+  assertx(lhs.typeCns() && rhs.typeCns());
 
   // If neither class is an interface, their intersection is trivial.
-  if (isNormalClass(lhs.cls()) && isNormalClass(rhs.cls())) {
-    return Bottom;
+  if (isNormalClass(lhs.typeCns()) && isNormalClass(rhs.typeCns())) {
+    return Bottom();
   }
 
   // If either is an interface, we'd need to explore all implementing classes
@@ -166,15 +195,26 @@ ClassSpec ClassSpec::operator&(const ClassSpec& rhs) const {
   // class better than an interface, because it might influence important
   // things like method dispatch or property accesses better than an interface
   // type could.
-  if (isNormalClass(lhs.cls())) return lhs;
-  if (isNormalClass(rhs.cls())) return rhs;
+  if (isNormalClass(lhs.typeCns())) return lhs;
+  if (isNormalClass(rhs.typeCns())) return rhs;
 
   // If they are both interfaces, we have to pick one arbitrarily, but we must
   // do so in a way that is stable regardless of which one was passed as lhs or
   // rhs (to guarantee that operator& is commutative).  We use the class name
   // in this case to ensure that the ordering is dependent only on the source
   // program (Class* or something like that seems less desirable).
-  return lhs.cls()->name()->compare(rhs.cls()->name()) < 0 ? lhs : rhs;
+  return lhs.typeCns()->name()->compare(rhs.typeCns()->name()) < 0 ? lhs : rhs;
+}
+
+template<>
+RecordSpec RecordSpec::operator&(const RecordSpec& rhs) const {
+  auto const& lhs = *this;
+
+  if (lhs <= rhs) return lhs;
+  if (rhs <= lhs) return rhs;
+
+  assertx(lhs.typeCns() && rhs.typeCns());
+  return Bottom();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

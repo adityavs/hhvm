@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -45,7 +45,7 @@ const StaticString
   s_r("r");
 
 Array Directory::getMetaData() {
-  return make_map_array(
+  return make_darray(
     s_wrapper_type, s_plainfile, // PHP5 compatibility
     s_stream_type,  s_dir,
     s_mode,         s_r,
@@ -58,6 +58,10 @@ Array Directory::getMetaData() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
+PlainDirectory::PlainDirectory(int fd) {
+  m_dir = ::fdopendir(fd);
+}
 
 PlainDirectory::PlainDirectory(const String& path) {
   m_dir = ::opendir(path.data());
@@ -75,6 +79,8 @@ void PlainDirectory::close() {
 }
 
 Variant PlainDirectory::read() {
+  if (!m_dir) return false;
+
   struct dirent entry;
   struct dirent *result;
   int ret = readdir_r(m_dir, &entry, &result);
@@ -85,6 +91,8 @@ Variant PlainDirectory::read() {
 }
 
 void PlainDirectory::rewind() {
+  if (!m_dir) return;
+
   ::rewinddir(m_dir);
 }
 
@@ -98,13 +106,13 @@ Variant ArrayDirectory::read() {
   }
 
   auto ret = m_it.second();
-  assert(ret.isString());
+  assertx(ret.isString());
   ++m_it;
   return Variant(HHVM_FN(basename)(ret.toString()));
 }
 
 void ArrayDirectory::rewind() {
-  m_it.setPos(0);
+  m_it.rewind();
 }
 
 bool ArrayDirectory::isEof() const {
@@ -117,12 +125,12 @@ String ArrayDirectory::path() {
   }
 
   auto entry = m_it.second();
-  assert(entry.isString());
+  assertx(entry.isString());
   return HHVM_FN(dirname)(entry.toString());
 }
 
 CachedDirectory::CachedDirectory(const String& path) {
-  assert(File::IsVirtualDirectory(path));
+  assertx(File::IsVirtualDirectory(path));
   m_files = StaticContentCache::TheFileCache->readDirectory(path.c_str());
 }
 

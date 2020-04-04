@@ -1,2 +1,3 @@
-<?php
+<?hh
 function id($x,,) { }
+

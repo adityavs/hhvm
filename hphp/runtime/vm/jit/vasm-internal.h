@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -41,21 +41,35 @@ struct Venv {
    * Patch data collected at emit-time for post-processing.
    */
   struct LabelPatch { CodeAddress instr; Vlabel target; };
+  struct AddrPatch { CodeAddress instr; Vaddr target; };
   struct SvcReqPatch { CodeAddress jmp, jcc; Vinstr svcreq; };
+  struct VaddrBind { Vaddr vaddr; Vlabel target; };
 
-  Venv(const Vunit& unit, Vtext& text) : unit(unit), text(text) {}
+  Venv(Vunit& unit, Vtext& text, CGMeta& meta);
 
-  const Vunit& unit;
+  void record_inline_stack(TCA);
+
+  Vunit& unit;
   Vtext& text;
+  CGMeta& meta;
 
   CodeBlock* cb;
 
   Vlabel current{0};
   Vlabel next{0};
 
+  uint32_t pending_frames{0}; // unpushed inlined frames
+  int frame{-1};
+  CodeAddress framestart;
+  const IRInstruction* origin;
+
   jit::vector<CodeAddress> addrs;
-  jit::vector<LabelPatch> jmps, jccs, bccs;
+  jit::vector<CodeAddress> vaddrs;
+  jit::vector<VaddrBind> pending_vaddrs;
+  jit::vector<AddrPatch> leas;
+  jit::vector<LabelPatch> jmps, jccs;
   jit::vector<LabelPatch> catches;
+  jit::vector<std::pair<TCA,IStack>> stacks;
 
   /*
    * Stubs that need to be emitted and patched into service request callsites.
@@ -101,7 +115,17 @@ struct Venv {
  * };
  */
 template<class Vemit>
-void vasm_emit(const Vunit& u, Vtext& text, AsmInfo* asm_info);
+void vasm_emit(Vunit& u, Vtext& text, CGMeta& fixups,
+               AsmInfo* asm_info);
+
+///////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Allocate memory to hold the given value and return a pointer to it.  If a
+ * previous translation allocated the same literal, a pointer to that may be
+ * returned instead.
+ */
+const uint64_t* alloc_literal(Venv& env, uint64_t val);
 
 ///////////////////////////////////////////////////////////////////////////////
 }}

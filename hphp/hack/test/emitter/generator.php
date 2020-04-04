@@ -24,7 +24,7 @@ function broken_keygen(): Generator<string, int, void> {
 function zero(): int { return 0; }
 function yield_val(): Generator<int, int, int> {
   $i = 2;
-  $welp = array();
+  $welp = darray[];
   while ($i != 16) {
     $welp[zero()] = yield $i*$i;
     $x = $welp[0];
@@ -47,7 +47,6 @@ function test(): void {
   }
 
   $k = yield_val();
-  $k->next();
   while ($k->valid()) {
     $i = $k->current();
     echo $i, "\n";

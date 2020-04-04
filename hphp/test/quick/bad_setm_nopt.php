@@ -1,10 +1,12 @@
-<?php
+<?hh
 
 function test($a, $b, $c, $d, $e) {
-  $k = array();
+  $k = darray[];
   foreach ($a as $id) {
-    $k[$id] = foo($id, $b, $c, $d, $e);
-    $k[$id] = foo($k[$id], $b);
+    try { $k[$id] = foo($id, $b, $c, $d, $e); }
+    catch (Exception $e) { echo $e->getMessage()."\n"; }
+    try { $k[$id] = foo($k[$id], $b); }
+    catch (Exception $e) { echo $e->getMessage()."\n"; }
   }
 }
 
@@ -12,8 +14,6 @@ function foo($a, $b) {
   return $a ?: $b;
 }
 
-function main() {
-  test(array(array('foo'), array('bar'), array('baz')), null, 1, 2, 3);
+<<__EntryPoint>> function main(): void {
+  test(varray[varray['foo'], varray['bar'], varray['baz']], null, 1, 2, 3);
 }
-
-main();

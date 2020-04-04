@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -63,7 +63,7 @@ struct IndexedStringMap {
    * builder below.
    */
   void create(const Builder& b) {
-    assert(!size() && "IndexedStringMap::create called more than once");
+    assertx(!size() && "IndexedStringMap::create called more than once");
     setSize(b.size());
     m_map.init(b.size(), size() * sizeof(T));
     if (!b.size()) {
@@ -109,7 +109,7 @@ struct IndexedStringMap {
   // Lookup entries by index.  Index must be in range or you get
   // undefined behavior.
   T& operator[](Index index) {
-    assert(index < size());
+    assertx(index < size());
     return mutableAccessList()[index];
   }
   const T& operator[](Index index) const {
@@ -124,6 +124,14 @@ struct IndexedStringMap {
     return offsetof(IndexedStringMap, m_map) +
       FixedStringMap<Index,CaseSensitive,Index>::tableOff();
   }
+  static constexpr ptrdiff_t sizeOff() {
+    return offsetof(IndexedStringMap, m_map) +
+      FixedStringMap<Index,CaseSensitive,Index>::sizeOff();
+  }
+  static constexpr size_t sizeSize() {
+    return FixedStringMap<Index,CaseSensitive,Index>::sizeSize();
+  }
+
 private:
   uint32_t byteSize() const { return size() * sizeof(T); }
   void setSize(Index size) { m_map.extra() = size; }
@@ -138,7 +146,8 @@ private:
  * up, and then pass it to IndexedStringMap::create.
  */
 template<class T, bool CaseSensitive, class Index, Index InvalidIndex>
-class IndexedStringMap<T,CaseSensitive,Index,InvalidIndex>::Builder {
+struct IndexedStringMap<T,CaseSensitive,Index,InvalidIndex>::Builder {
+private:
   using EqObject = typename std::conditional<
     CaseSensitive,
     string_data_same,
@@ -167,9 +176,13 @@ public:
   const_iterator begin() const { return m_map.begin(); }
   const_iterator end()   const { return m_map.end(); }
 
+  auto& ordered_range() const { return m_list; }
+
+  bool contains(const StringData* key) const { return m_map.count(key); }
+
   T& operator[](Index idx) {
-    assert(idx >= 0);
-    assert(size_t(idx) < m_list.size());
+    assertx(idx >= 0);
+    assertx(size_t(idx) < m_list.size());
     return m_list[idx];
   }
 
@@ -183,7 +196,7 @@ public:
    */
   void add(const StringData* name, const T& t) {
     if (m_list.size() >= size_t(std::numeric_limits<Index>::max())) {
-      assert(false && "IndexedStringMap::Builder overflowed");
+      assertx(false && "IndexedStringMap::Builder overflowed");
       abort();
     }
 
@@ -207,15 +220,16 @@ public:
    */
 
   // Deserialization version.
-  template<class SerDe>
-  typename std::enable_if<SerDe::deserializing>::type serde(SerDe& sd) {
+  template<class SerDe, class F>
+  typename std::enable_if<SerDe::deserializing>::type serde(SerDe& sd,
+                                                            F lambda) {
     uint32_t size;
     sd(size);
     for (uint32_t i = 0; i < size; ++i) {
-      const StringData* name;
       T t;
-      sd(name)(t);
+      sd(t);
 
+      auto name = lambda(t);
       if (name) {
         add(name, t);
       } else {
@@ -225,23 +239,21 @@ public:
   }
 
   // Serialization version.
-  template<class SerDe>
-  typename std::enable_if<!SerDe::deserializing>::type serde(SerDe& sd) {
-    std::vector<const StringData*> names(m_list.size());
-    for (typename Map::const_iterator it = m_map.begin();
-        it != m_map.end();
-        ++it) {
-      names[it->second] = it->first;
-    }
-
+  template<class SerDe, class F>
+  typename std::enable_if<!SerDe::deserializing>::type serde(SerDe& sd,
+                                                             F lambda) {
     sd(uint32_t(m_list.size()));
     for (uint32_t i = 0; i < m_list.size(); ++i) {
-      sd(names[i])(m_list[i]);
+      sd(m_list[i]);
     }
   }
 
+  const std::vector<T>& list() const {
+    return m_list;
+  }
+
 private:
-  friend class IndexedStringMap;
+  friend struct IndexedStringMap;
   std::vector<T> m_list;
   Map m_map;
 };

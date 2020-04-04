@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,23 +21,6 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-template<class SerDe>
-void EHEntEmitter::serde(SerDe& sd) {
-  sd(m_type)
-    (m_base)
-    (m_past)
-    (m_iterId)
-    (m_fault)
-    (m_itRef)
-    (m_parentIndex)
-    ;
-  if (m_type == EHEnt::Type::Catch) {
-    sd(m_catches);
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
 inline UnitEmitter& FuncEmitter::ue() const {
   return m_ue;
 }
@@ -51,8 +34,12 @@ inline int FuncEmitter::sn() const {
 }
 
 inline Id FuncEmitter::id() const {
-  assert(m_pce == nullptr);
+  assertx(m_pce == nullptr);
   return m_id;
+}
+
+inline bool FuncEmitter::useGlobalIds() const {
+  return m_ue.useGlobalIds();
 }
 
 inline void FuncEmitter::setIds(int sn, Id id) {
@@ -67,6 +54,11 @@ inline Id FuncEmitter::numLocals() const {
   return m_numLocals;
 }
 
+inline Id FuncEmitter::numNamedLocals() const {
+  // Don't use m_numUnnamedLocals here, it isn't serialized to the repo
+  return m_localNames.size();
+}
+
 inline Id FuncEmitter::numIterators() const {
   return m_numIterators;
 }
@@ -76,7 +68,7 @@ inline Id FuncEmitter::numLiveIterators() const {
 }
 
 inline void FuncEmitter::setNumIterators(Id numIterators) {
-  assert(m_numIterators == 0);
+  assertx(m_numIterators == 0);
   m_numIterators = numIterators;
 }
 
@@ -85,23 +77,18 @@ inline void FuncEmitter::setNumLiveIterators(Id id) {
 }
 
 inline bool FuncEmitter::hasVar(const StringData* name) const {
-  assert(name != nullptr);
-  return m_localNames.find(name) != m_localNames.end();
+  assertx(name != nullptr);
+  return m_localNames.contains(name);
 }
 
 inline Id FuncEmitter::lookupVarId(const StringData* name) const {
-  assert(hasVar(name));
+  assertx(hasVar(name));
   return m_localNames.find(name)->second;
-}
-
-inline void FuncEmitter::freeUnnamedLocal(Id id) {
-  assert(m_activeUnnamedLocals > 0);
-  --m_activeUnnamedLocals;
 }
 
 inline void FuncEmitter::freeIterator(Id id) {
   --m_nextFreeIterator;
-  assert(id == m_nextFreeIterator);
+  assertx(id == m_nextFreeIterator);
 }
 
 inline void FuncEmitter::appendParam(const StringData* name,
@@ -142,4 +129,5 @@ inline void FuncEmitter::setLocation(int l1, int l2) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+
 }

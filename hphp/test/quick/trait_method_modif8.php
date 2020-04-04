@@ -1,4 +1,4 @@
-<?php
+<?hh
 class Foo {
   function f() {
     echo "Foo\n";
@@ -12,5 +12,6 @@ trait T {
 class Bar extends Foo {
   use T;
 }
-
+<<__EntryPoint>> function main(): void {
 Bar::f();
+}

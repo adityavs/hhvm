@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -16,10 +16,11 @@
 */
 
 #include "hphp/runtime/ext/ipc/ext_ipc.h"
+
+#include "hphp/runtime/ext/posix/ext_posix.h"
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/system/constants.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/alloc.h"
 #include <folly/String.h>
@@ -33,12 +34,7 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 
-#ifdef __CYGWIN__
-/* These is missing from cygwin ipc headers. */
-#define MSG_EXCEPT 02000
-#endif
-
-#if defined(__APPLE__) || defined(__CYGWIN__)
+#if defined(__APPLE__)
 /* OS X defines msgbuf, but it is defined with extra fields and some weird
  * types. It turns out that the actual msgsnd() and msgrcv() calls work fine
  * with the same structure that other OSes use. This is weird, but this is also
@@ -55,10 +51,15 @@ using HPHP::ScopedMem;
 
 namespace HPHP {
 
-static class SysvmsgExtension final : public Extension {
-public:
+static struct SysvmsgExtension final : Extension {
   SysvmsgExtension() : Extension("sysvmsg", NO_EXTENSION_VERSION_YET) {}
   void moduleInit() override {
+    HHVM_RC_INT(MSG_IPC_NOWAIT, k_MSG_IPC_NOWAIT);
+    HHVM_RC_INT(MSG_EAGAIN,     EAGAIN);
+    HHVM_RC_INT(MSG_ENOMSG,     ENOMSG);
+    HHVM_RC_INT(MSG_NOERROR,    k_MSG_NOERROR);
+    HHVM_RC_INT(MSG_EXCEPT,     k_MSG_EXCEPT);
+
     HHVM_FE(ftok);
     HHVM_FE(msg_get_queue);
     HHVM_FE(msg_queue_exists);
@@ -72,8 +73,7 @@ public:
   }
 } s_sysvmsg_extension;
 
-static class SysvsemExtension final : public Extension {
-public:
+static struct SysvsemExtension final : Extension {
   SysvsemExtension() : Extension("sysvsem", NO_EXTENSION_VERSION_YET) {}
   void moduleInit() override {
     HHVM_FE(sem_acquire);
@@ -85,8 +85,7 @@ public:
   }
 } s_sysvsem_extension;
 
-static class SysvshmExtension final : public Extension {
-public:
+static struct SysvshmExtension final : Extension {
   SysvshmExtension() : Extension("sysvshm", NO_EXTENSION_VERSION_YET) {}
   void moduleInit() override {
     HHVM_FE(shm_attach);
@@ -121,8 +120,7 @@ int64_t HHVM_FUNCTION(ftok,
 ///////////////////////////////////////////////////////////////////////////////
 // message queue
 
-class MessageQueue : public ResourceData {
-public:
+struct MessageQueue : ResourceData {
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(MessageQueue)
 
   int64_t key;
@@ -195,11 +193,11 @@ bool HHVM_FUNCTION(msg_set_queue,
     value = data[s_msg_perm_uid];
     if (!value.isNull()) stat.msg_perm.uid = value.toInt64();
     value = data[s_msg_perm_gid];
-    if (!value.isNull()) stat.msg_perm.uid = value.toInt64();
+    if (!value.isNull()) stat.msg_perm.gid = value.toInt64();
     value = data[s_msg_perm_mode];
-    if (!value.isNull()) stat.msg_perm.uid = value.toInt64();
+    if (!value.isNull()) stat.msg_perm.mode = value.toInt64();
     value = data[s_msg_qbytes];
-    if (!value.isNull()) stat.msg_perm.uid = value.toInt64();
+    if (!value.isNull()) stat.msg_qbytes = value.toInt64();
 
     return msgctl(q->id, IPC_SET, &stat) == 0;
   }
@@ -238,9 +236,9 @@ bool HHVM_FUNCTION(msg_send,
                    const Resource& queue,
                    int64_t msgtype,
                    const Variant& message,
-                   bool serialize /* = true */,
-                   bool blocking /* = true */,
-                   VRefParam errorcode /* = null */) {
+                   bool serialize,
+                   bool blocking,
+                   Variant& errorcode) {
   auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
@@ -265,7 +263,7 @@ bool HHVM_FUNCTION(msg_send,
     int err = errno;
     raise_warning("Unable to send message: %s",
                     folly::errnoStr(err).c_str());
-    errorcode.assignIfRef(err);
+    errorcode = err;
     return false;
   }
   return true;
@@ -274,11 +272,12 @@ bool HHVM_FUNCTION(msg_send,
 bool HHVM_FUNCTION(msg_receive,
                    const Resource& queue,
                    int64_t desiredmsgtype,
-                   VRefParam msgtype,
-                   int64_t maxsize, VRefParam message,
-                   bool unserialize /* = true */,
-                   int64_t flags /* = 0 */,
-                   VRefParam errorcode /* = null */) {
+                   int64_t& msgtype,
+                   int64_t maxsize,
+                   Variant& message,
+                   bool unserialize,
+                   int64_t flags,
+                   Variant& errorcode) {
   auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
@@ -304,18 +303,18 @@ bool HHVM_FUNCTION(msg_receive,
 
   int result = msgrcv(q->id, buffer, maxsize, desiredmsgtype, realflags);
   if (result < 0) {
-    errorcode.assignIfRef(errno);
+    errorcode = errno;
     return false;
   }
 
-  msgtype.assignIfRef((int)buffer->mtype);
+  msgtype = buffer->mtype;
   if (unserialize) {
     const char *bufText = (const char *)buffer->mtext;
     uint32_t bufLen = strlen(bufText);
     VariableUnserializer vu(bufText, bufLen,
                             VariableUnserializer::Type::Serialize);
     try {
-      message.assignIfRef(vu.unserialize());
+      message = vu.unserialize();
     } catch (ResourceExceededException&) {
       throw;
     } catch (Exception&) {
@@ -323,7 +322,7 @@ bool HHVM_FUNCTION(msg_receive,
       return false;
     }
   } else {
-    message.assignIfRef(String((const char *)buffer->mtext));
+    message = String((const char *)buffer->mtext);
   }
 
   return true;
@@ -361,6 +360,7 @@ union semun {
 struct Semaphore : SweepableResourceData {
   int key;          // For error reporting.
   int semid;        // Returned by semget()
+  int64_t pid;      // Used to only release semaphore on creating process.
   int count;        // Acquire count for auto-release.
   int auto_release; // flag that says to auto-release.
 
@@ -368,7 +368,7 @@ struct Semaphore : SweepableResourceData {
   // overriding ResourceData
   const String& o_getClassNameHook() const override { return classnameof(); }
 
-  bool op(bool acquire) {
+  bool op(bool acquire, bool nowait = false) {
     struct sembuf sop;
 
     if (!acquire && count == 0) {
@@ -379,13 +379,15 @@ struct Semaphore : SweepableResourceData {
 
     sop.sem_num = SYSVSEM_SEM;
     sop.sem_op  = acquire ? -1 : 1;
-    sop.sem_flg = SEM_UNDO;
+    sop.sem_flg = SEM_UNDO | (nowait ? IPC_NOWAIT : 0);
 
-    while (semop(semid, &sop, 1) == -1) {
+    if (semop(semid, &sop, 1) == -1) {
       if (errno != EINTR) {
-        raise_warning("failed to %s key 0x%x: %s",
-                        acquire ? "acquire" : "release",
-                        key, folly::errnoStr(errno).c_str());
+        if (errno != EAGAIN) {
+          raise_warning("failed to %s key 0x%x: %s",
+                          acquire ? "acquire" : "release",
+                          key, folly::errnoStr(errno).c_str());
+        }
         return false;
       }
     }
@@ -394,12 +396,21 @@ struct Semaphore : SweepableResourceData {
     return true;
   }
 
-  ~Semaphore() {
+  ~Semaphore() override {
     /*
      * if count == -1, semaphore has been removed
      * Need better way to handle this
      */
     if (count == -1 || !auto_release) {
+      return;
+    }
+
+    /*
+     * Some resources only need to be cleaned up in the process that created
+     * them.  Semaphores are one such resource.  The fork manpage reads: "The
+     * child does not inherit semaphore adjustments from its parent"
+     */
+    if (pid != f_posix_getpid()) {
       return;
     }
 
@@ -427,8 +438,9 @@ struct Semaphore : SweepableResourceData {
 IMPLEMENT_RESOURCE_ALLOCATION(Semaphore)
 
 bool HHVM_FUNCTION(sem_acquire,
-                   const Resource& sem_identifier) {
-  return cast<Semaphore>(sem_identifier)->op(true);
+                   const Resource& sem_identifier,
+                   bool nowait /* = false */) {
+  return cast<Semaphore>(sem_identifier)->op(true, nowait);
 }
 
 bool HHVM_FUNCTION(sem_release,
@@ -522,6 +534,7 @@ Variant HHVM_FUNCTION(sem_get,
   auto sem_ptr = req::make<Semaphore>();
   sem_ptr->key   = key;
   sem_ptr->semid = semid;
+  sem_ptr->pid = f_posix_getpid();
   sem_ptr->count = 0;
   sem_ptr->auto_release = auto_release;
   return Resource(sem_ptr);
@@ -576,8 +589,7 @@ typedef struct {
   long total;
 } sysvshm_chunk_head;
 
-class sysvshm_shm {
-public:
+struct sysvshm_shm {
   key_t key;               /* Key set by user */
   long id;                 /* Returned by shmget. */
   sysvshm_chunk_head *ptr; /* memoryaddress of shared memory */
@@ -587,8 +599,7 @@ public:
   }
 };
 
-class shm_set : public std::set<sysvshm_shm*> {
-public:
+struct shm_set : std::set<sysvshm_shm*> {
   ~shm_set() {
     for (auto iter = begin(); iter != end(); ++iter) {
       delete *iter;
@@ -653,7 +664,7 @@ static int put_shm_data(sysvshm_chunk_head *ptr, long key, char *data,
   }
 
   if (ptr->free < total_size) {
-    return -1; /* not enough memeory */
+    return -1; /* not enough memory */
   }
 
   shm_var = (sysvshm_chunk *) ((char *) ptr + ptr->end);
@@ -745,12 +756,7 @@ bool HHVM_FUNCTION(shm_remove,
 
   if (shmctl(shm_list_ptr->id, IPC_RMID,NULL) < 0) {
     raise_warning(
-#ifdef __CYGWIN__
-      // key is a long long int in cygwin
-      "failed for key 0x%lld, id %" PRId64 ": %s",
-#else
       "failed for key 0x%x, id %" PRId64 ": %s",
-#endif
       shm_list_ptr->key, shm_identifier, folly::errnoStr(errno).c_str()
     );
     return false;
@@ -777,7 +783,11 @@ Variant HHVM_FUNCTION(shm_get_var,
 
   sysvshm_chunk *shm_var =
     (sysvshm_chunk*)((char *)shm_list_ptr->ptr + shm_varpos);
-  return unserialize_from_buffer(&shm_var->mem, shm_var->length);
+  return unserialize_from_buffer(
+    &shm_var->mem,
+    shm_var->length,
+    VariableUnserializer::Type::Serialize
+  );
 }
 
 bool HHVM_FUNCTION(shm_has_var,

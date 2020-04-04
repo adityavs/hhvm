@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -37,8 +37,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // light-weight process
 
-class LightProcess {
-public:
+struct LightProcess {
   LightProcess();
   ~LightProcess();
 
@@ -50,6 +49,7 @@ public:
                          bool trackProcessTimes,
                          const std::vector<int> &inherited_fds);
   static void ChangeUser(const std::string &username);
+  static void ChangeUser(int afdt, const std::string &username);
 
   typedef std::function<void(pid_t)> LostChildHandler;
   static void SetLostChildHandler(const LostChildHandler& handler);
@@ -80,6 +80,17 @@ public:
   static pid_t waitpid(pid_t pid, int *stat_loc, int options, int timeout = 0);
 
   static pid_t pcntl_waitpid(pid_t pid, int *stat_loc, int options);
+
+  /**
+   * When running a CLI server, the requests executed on behalf of local
+   * processes will delegate to a light process pool run by the client.
+   */
+  static int createDelegate();
+
+  static std::unique_ptr<LightProcess> setThreadLocalAfdtOverride(int fd);
+  static std::unique_ptr<LightProcess> setThreadLocalAfdtOverride(
+    std::unique_ptr<LightProcess> p
+  );
 
 private:
   static void SigChldHandler(int sig, siginfo_t* info, void* ctx);

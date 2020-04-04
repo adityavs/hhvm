@@ -1,4 +1,4 @@
-<?php
+<?hh
 /* Prototype: bool copy ( string $source, string $dest );
    Description: Makes a copy of the file source to dest.
      Returns TRUE on success or FALSE on failure.
@@ -7,16 +7,16 @@
 /* Test copy() function: In creation of destination file names containing numerics/strings 
      and checking the existence and size of destination files
 */
-
+<<__EntryPoint>> function main(): void {
 echo "*** Test copy() function: destination file names containing numerics/strings ***\n";
-$file_path = dirname(__FILE__);
+$file_path = getenv('HPHP_TEST_TMPDIR') ?? dirname(__FILE__);
 $src_file_name = $file_path."/copy_variation1.tmp";
 $file_handle = fopen($src_file_name, "w");
 fwrite( $file_handle, str_repeat(b"Hello2World...\n", 100) );
 fclose($file_handle);
 
 /* array of destination file names */
-$dest_files = array(
+$dest_files = varray[
 
   /* File names containing numerics, strings */
   "copy.tmp",  //regular file name
@@ -28,7 +28,7 @@ $dest_files = array(
   "123copy_variation1.tmp",  //file name containing numeric & string
   "copy_variation.tmp123",  //file name containing string & numeric
   chr(99).chr(111).chr(112).chr(121).chr(49).".tmp"  //file name containing ASCII values
-);
+];
 
 echo "Size of the source file before copy operation => ";
 var_dump( filesize("$src_file_name") );
@@ -65,9 +65,6 @@ foreach($dest_files as $dest_file) {
 }
 
 echo "*** Done ***\n";
-?>
-
-<?php error_reporting(0); ?>
-<?php
+error_reporting(0);
 unlink(dirname(__FILE__)."/copy_variation1.tmp");
-?>
+}

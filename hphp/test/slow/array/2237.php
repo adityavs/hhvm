@@ -1,3 +1,7 @@
-<?php
+<?hh
 
-echo array(), "\n";
+
+<<__EntryPoint>>
+function main_2237() {
+echo varray[], "\n";
+}

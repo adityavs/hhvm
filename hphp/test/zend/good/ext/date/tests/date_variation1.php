@@ -1,4 +1,4 @@
-<?php
+<?hh
 /* Prototype  : string date  ( string $format  [, int $timestamp  ] )
  * Description: Format a local time/date.
  * Source code: ext/date/php_date.c
@@ -31,14 +31,14 @@ hello world
 EOT;
 
 // add arrays
-$index_array = array (1, 2, 3);
-$assoc_array = array ('one' => 1, 'two' => 2);
+$index_array = varray [1, 2, 3];
+$assoc_array = darray ['one' => 1, 'two' => 2];
 
 // resource
 $file_handle = fopen(__FILE__, 'r');
 
 //array of values to iterate over
-$inputs = array(
+$inputs = darray[
 
       // int data
       'int 0' => 0,
@@ -52,10 +52,10 @@ $inputs = array(
       'float .5' => .5,
 
       // array data
-      'empty array' => array(),
+      'empty array' => varray[],
       'int indexed array' => $index_array,
       'associative array' => $assoc_array,
-      'nested arrays' => array('foo', $index_array, $assoc_array),
+      'nested arrays' => varray['foo', $index_array, $assoc_array],
 
       // null data
       'uppercase NULL' => NULL,
@@ -89,17 +89,16 @@ $inputs = array(
       
       // resource 
       'resource' => $file_handle
-);
+];
 
 $timestamp = mktime(10, 44, 30, 2, 27, 2009);
 
 foreach($inputs as $variation =>$format) {
       echo "\n-- $variation --\n";
-      var_dump( date($format, $timestamp) );
+      try { var_dump( date($format, $timestamp) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 };
 
 // closing the resource
 fclose( $file_handle );
 
-?>
-===DONE===
+echo "===DONE===\n";

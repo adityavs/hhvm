@@ -1,17 +1,17 @@
-<?hh
+<?hh // partial
 
 /**
- * Removing optional field allows to omit it even when fields are only
+ * Removing optional field allows omitting it even when fields are only
  * partially known.
  */
 type s = shape('x' => int);
 
 type t = shape(
   'x' => int,
-  'z' => ?bool,
+  ?'z' => bool,
 );
 
 function test(s $s): t {
-  Shapes::removeKey($s, 'z');
+  Shapes::removeKey(inout $s, 'z');
   return $s;
 }

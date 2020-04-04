@@ -1,4 +1,2 @@
-File "naming_fail_test9.php", line 9, characters 10-11:
-The variable $e is defined (Naming[2007])
-File "naming_fail_test9.php", line 7, characters 25-26:
-But in a different scope
+File "naming_fail_test9.php", line 10, characters 10-11:
+Variable $e is undefined, or not always defined (did you mean $_ instead?) (Naming[2050])

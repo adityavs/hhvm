@@ -1,9 +1,10 @@
-<?php
+<?hh
 
 /*
  * Format a number using misc locales/patterns.
  */
 
+include_once( 'ut_common.inc' );
 
 function ut_main()
 {
@@ -28,12 +29,12 @@ $pattern=<<<_MSG_
 _MSG_;
 
 
-$args = array(
-      array('gender_of_host' => 'female', 'num_guests' => 0, 'host' => 'Alice', 'guest' => 'Bob'),
-      array('gender_of_host' => 'male', 'num_guests' => 1, 'host' => 'Alice', 'guest' => 'Bob'),
-      array('gender_of_host' => 'none', 'num_guests' => 2, 'host' => 'Alice', 'guest' => 'Bob'),
-      array('gender_of_host' => 'female', 'num_guests' => 27, 'host' => 'Alice', 'guest' => 'Bob'),
-);
+$args = varray[
+      darray['gender_of_host' => 'female', 'num_guests' => 0, 'host' => 'Alice', 'guest' => 'Bob'],
+      darray['gender_of_host' => 'male', 'num_guests' => 1, 'host' => 'Alice', 'guest' => 'Bob'],
+      darray['gender_of_host' => 'none', 'num_guests' => 2, 'host' => 'Alice', 'guest' => 'Bob'],
+      darray['gender_of_host' => 'female', 'num_guests' => 27, 'host' => 'Alice', 'guest' => 'Bob'],
+];
 
 $str_res = '';
 
@@ -49,9 +50,9 @@ $str_res = '';
     return $str_res;
 }
 
-include_once( 'ut_common.inc' );
+<<__EntryPoint>>
+function main_entry(): void {
 
-// Run the test
-ut_run();
-
-?>
+  // Run the test
+  ut_run();
+}

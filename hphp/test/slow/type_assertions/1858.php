@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function block() {
 }
@@ -12,5 +12,9 @@ function g($x) {
   block();
   var_dump($x[0]);
 }
-f(array(10));
-g(array(10));
+
+<<__EntryPoint>>
+function main_1858() {
+f(varray[10]);
+g(varray[10]);
+}

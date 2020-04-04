@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,9 +25,10 @@
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/vm/repo.h"
 
-#include "hphp/hhbbc/hhbbc.h"
+#include "hphp/hhbbc/options.h"
 #include "hphp/hhbbc/type-system.h"
 
 namespace HPHP { namespace HHBBC {
@@ -36,7 +37,7 @@ namespace HPHP { namespace HHBBC {
 
 /*
  * When constant-evaluating certain operations, it's possible they
- * will return non-static objects, or throw exceptions (e.g. cellAdd()
+ * will return non-static objects, or throw exceptions (e.g. tvAdd()
  * with an array and an int).
  *
  * This routine converts these things back to types.  In the case of
@@ -45,33 +46,17 @@ namespace HPHP { namespace HHBBC {
 template<class Pred>
 folly::Optional<Type> eval_cell(Pred p) {
   try {
-    g_context->setThrowAllErrors(true);
-    SCOPE_EXIT { g_context->setThrowAllErrors(false); };
+    assert(!RuntimeOption::EvalJit);
+    ThrowAllErrorsSetter taes;
 
-    Cell c = p();
+    TypedValue c = p();
     if (isRefcountedType(c.m_type)) {
-      switch (c.m_type) {
-      case KindOfString:
-        {
-          if (c.m_data.pstr->size() > Repo::get().stringLengthLimit()) {
-            tvDecRef(&c);
-            return TStr;
-          }
-          auto const sstr = makeStaticString(c.m_data.pstr);
-          tvDecRef(&c);
-          c = make_tv<KindOfStaticString>(sstr);
-        }
-        break;
-      case KindOfArray:
-        {
-          auto const sarr = ArrayData::GetScalarArray(c.m_data.parr);
-          tvDecRef(&c);
-          c = make_tv<KindOfArray>(sarr);
-        }
-        break;
-      default:
-        always_assert(0 && "Impossible constant evaluation occurred");
+      if (c.m_type == KindOfString &&
+          c.m_data.pstr->size() > Repo::get().stringLengthLimit()) {
+        tvDecRefCountable(&c);
+        return TStr;
       }
+      tvAsVariant(&c).setEvalScalar();
     }
 
     /*
@@ -81,18 +66,30 @@ folly::Optional<Type> eval_cell(Pred p) {
      * to actually make these into non-reference-counted SStr or
      * SArrs.  If we leave the bytecode alone, though, it generally
      * won't actually be static at runtime.
-     *
-     * TODO(#3696042): loosen_statics here should ideally not give up
-     * on the array or string value, just its staticness.
      */
     auto const t = from_cell(c);
-    return options.ConstantProp ? t : loosen_statics(t);
+    return options.ConstantProp ? t : loosen_staticness(t);
   } catch (const Object&) {
     return folly::none;
   } catch (const std::exception&) {
     return folly::none;
   } catch (...) {
     always_assert_flog(0, "a non-std::exception was thrown in eval_cell");
+  }
+}
+
+template<typename Pred>
+folly::Optional<typename std::result_of<Pred()>::type>
+eval_cell_value(Pred p) {
+  try {
+    ThrowAllErrorsSetter taes;
+    return p();
+  } catch (const Object&) {
+    return folly::none;
+  } catch (const std::exception&) {
+    return folly::none;
+  } catch (...) {
+    always_assert_flog(0, "a non-std::exception was thrown in eval_cell_value");
   }
 }
 

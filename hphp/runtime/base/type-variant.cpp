@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,27 +16,33 @@
 
 #include "hphp/runtime/base/type-variant.h"
 
-#include "hphp/parser/hphp.tab.hpp"
-
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/collections.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/double-to-int64.h"
 #include "hphp/runtime/base/dummy-resource.h"
-#include "hphp/runtime/base/externals.h"
+#include "hphp/runtime/base/req-root.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/tv-arith.h"
+#include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-string.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/packed-array.h"
+#include "hphp/runtime/base/set-array.h"
+#include "hphp/runtime/base/array-init.h"
 
 #include "hphp/runtime/ext/std/ext_std_variable.h"
+#include "hphp/runtime/vm/class-meth-data-ref.h"
+#include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/system/systemlib.h"
 
 #include "hphp/util/abi-cxx.h"
 #include "hphp/util/logger.h"
+#include "hphp/util/low-ptr.h"
 
 #include <limits>
 #include <utility>
@@ -44,125 +50,109 @@
 
 namespace HPHP {
 
-const Variant null_variant;                         // uninitialized variant
-const Variant init_null_variant((Variant::NullInit())); // php null
-const VarNR null_varNR;
-const VarNR true_varNR(true);
-const VarNR false_varNR(false);
-const VarNR INF_varNR(std::numeric_limits<double>::infinity());
-const VarNR NEGINF_varNR(std::numeric_limits<double>::infinity());
-const VarNR NAN_varNR(std::numeric_limits<double>::quiet_NaN());
-const Variant empty_string_variant_ref(staticEmptyString(),
-                                       Variant::StaticStrInit{});
+using BlackHoleStorage = std::aligned_storage<
+  sizeof(req::root<Variant>),
+  alignof(req::root<Variant>)
+>::type;
 
-///////////////////////////////////////////////////////////////////////////////
-// static strings
-
-const StaticString
-  s_scalar("scalar"),
-  s_1("1");
+static RDS_LOCAL(BlackHoleStorage, bhStorage);
 
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant::Variant(StringData *v) noexcept {
   if (v) {
     m_data.pstr = v;
-    if (v->isStatic()) {
-      m_type = KindOfStaticString;
+    if (!v->isRefCounted()) {
+      m_type = KindOfPersistentString;
     } else {
       m_type = KindOfString;
-      v->incRefCount();
+      v->rawIncRefCount();
     }
   } else {
     m_type = KindOfNull;
   }
 }
 
+namespace {
+ALWAYS_INLINE
+void implCopyConstruct(TypedValue tv, Variant& v) {
+  tvDup(tvToInit(tv), v.asTypedValue());
+}
+}
+
 // the version of the high frequency function that is not inlined
 NEVER_INLINE
 Variant::Variant(const Variant& v) noexcept {
-  constructValHelper(v);
+  implCopyConstruct(*v.asTypedValue(), *this);
 }
 
-/*
- * The destruct functions below all arbitrarily take RefData* as an
- * example of a refcounted object, then just cast to the proper type.
- * This is safe because we have compile time assertions that guarantee that
- * the _count field will always be exactly FAST_REFCOUNT_OFFSET bytes from
- * the beginning of the object for the StringData, ArrayData, ObjectData,
- * ResourceHdr, and RefData classes.
- */
+NEVER_INLINE
+Variant::Variant(const_variant_ref v) noexcept {
+  implCopyConstruct(*v.rval(), *this);
+}
 
-static_assert(typeToDestrIdx(KindOfString) == 1, "String destruct index");
-static_assert(typeToDestrIdx(KindOfArray)  == 2,  "Array destruct index");
-static_assert(typeToDestrIdx(KindOfObject) == 3, "Object destruct index");
-static_assert(typeToDestrIdx(KindOfResource) == 4,
-              "Resource destruct index");
-static_assert(typeToDestrIdx(KindOfRef)    == 5,    "Ref destruct index");
+namespace {
 
-static_assert(kDestrTableSize == 6,
+void objReleaseWrapper(ObjectData* obj) noexcept {
+  auto const cls = obj->getVMClass();
+  cls->releaseFunc()(obj, cls);
+}
+
+}
+
+static_assert(typeToDestrIdx(KindOfDArray)   == 0, "Array destruct index");
+static_assert(typeToDestrIdx(KindOfVArray)   == 1, "Array destruct index");
+static_assert(typeToDestrIdx(KindOfArray)    == 2, "Array destruct index");
+static_assert(typeToDestrIdx(KindOfKeyset)   == 3, "Keyset destruct index");
+static_assert(typeToDestrIdx(KindOfDict)     == 4, "Dict destruct index");
+static_assert(typeToDestrIdx(KindOfVec)      == 5, "Vec destruct index");
+static_assert(typeToDestrIdx(KindOfRecord)   == 6, "Record destruct index");
+static_assert(typeToDestrIdx(KindOfString)   == 7, "String destruct index");
+static_assert(typeToDestrIdx(KindOfObject)   == 9, "Object destruct index");
+static_assert(typeToDestrIdx(KindOfResource) == 10, "Resource destruct index");
+#ifndef USE_LOWPTR
+static_assert(typeToDestrIdx(KindOfClsMeth)  == 11, "ClsMeth destruct index");
+#endif
+
+static_assert(kDestrTableSize == (use_lowptr ? 11 : 12),
               "size of g_destructors[] must be kDestrTableSize");
 
 RawDestructor g_destructors[] = {
-  nullptr,
-  (RawDestructor)getMethodPtr(&StringData::release),
-  (RawDestructor)getMethodPtr(&ArrayData::release),
-  (RawDestructor)getMethodPtr(&ObjectData::release), // may replace at runtime
-  (RawDestructor)getMethodPtr(&ResourceHdr::release),
-  (RawDestructor)getMethodPtr(&RefData::release),
+  (RawDestructor)getMethodPtr(&ArrayData::release),   // KindOfDArray
+  (RawDestructor)getMethodPtr(&ArrayData::release),   // KindOfVArray
+  (RawDestructor)getMethodPtr(&ArrayData::release),   // KindOfArray
+  (RawDestructor)&SetArray::Release,                  // KindOfKeyset
+  (RawDestructor)&MixedArray::Release,                // KindOfDict
+  (RawDestructor)&PackedArray::Release,               // KindOfVec
+  (RawDestructor)getMethodPtr(&RecordData::release),  // KindOfRecord
+  (RawDestructor)getMethodPtr(&StringData::release),  // KindOfString
+  nullptr, // hole
+  (RawDestructor)&objReleaseWrapper,                  // KindOfObject
+  (RawDestructor)getMethodPtr(&ResourceHdr::release), // KindOfResource
+#ifndef USE_LOWPTR
+  (RawDestructor)&ClsMethDataRef::Release,            // KindOfClsMeth
+#endif
 };
-
-void tweak_variant_dtors() {
-  if (RuntimeOption::EnableObjDestructCall) return;
-  g_destructors[typeToDestrIdx(KindOfObject)] =
-    (RawDestructor)getMethodPtr(&ObjectData::releaseNoObjDestructCheck);
-}
-
-Variant::~Variant() noexcept {
-  tvRefcountedDecRef(asTypedValue());
-  if (debug) {
-    memset(this, kTVTrashFill2, sizeof(*this));
-  }
-}
-
-void tvDecRefHelper(DataType type, uint64_t datum) noexcept {
-  assert(type == KindOfString || type == KindOfArray ||
-         type == KindOfObject || type == KindOfResource ||
-         type == KindOfRef);
-  TypedValue tmp;
-  tmp.m_type = type;
-  tmp.m_data.num = datum;
-  if (TV_GENERIC_DISPATCH(tmp, decReleaseCheck)) {
-    g_destructors[typeToDestrIdx(type)]((void*)datum);
-  }
-}
-
-Variant &Variant::assign(const Variant& v) noexcept {
-  AssignValHelper(this, &v);
-  return *this;
-}
-
-Variant& Variant::assignRef(Variant& v) noexcept {
-  assignRefHelper(v);
-  return *this;
-}
-
-Variant& Variant::setWithRef(const Variant& v) noexcept {
-  setWithRefHelper(v, isRefcountedType(m_type));
-  return *this;
-}
 
 #define IMPLEMENT_SET(argType, setOp)                     \
   void Variant::set(argType v) noexcept {                 \
     if (isPrimitive()) {                                  \
       setOp;                                              \
-    } else if (m_type == KindOfRef) {                     \
-      m_data.pref->var()->set(v);                         \
     } else {                                              \
-      auto const d = m_data.num;                          \
-      auto const t = m_type;                              \
+      auto const old = *asTypedValue();                   \
       setOp;                                              \
-      tvDecRefHelper(t, d);                               \
+      tvDecRefCountable(old);                             \
+    }                                                     \
+  }                                                       \
+  void variant_ref::set(argType v) noexcept {             \
+    Value& m_data = val(m_val);                           \
+    DataType& m_type = type(m_val);                       \
+    if (isPrimitive()) {                                  \
+      setOp;                                              \
+    } else {                                              \
+      auto const old = m_val.tv();                        \
+      setOp;                                              \
+      tvDecRefCountable(old);                             \
     }                                                     \
   }
 
@@ -172,30 +162,41 @@ IMPLEMENT_SET(int64_t, m_type = KindOfInt64; m_data.num = v)
 IMPLEMENT_SET(double, m_type = KindOfDouble; m_data.dbl = v)
 IMPLEMENT_SET(const StaticString&,
               StringData* s = v.get();
-              assert(s);
-              m_type = KindOfStaticString;
+              assertx(s);
+              m_type = KindOfPersistentString;
               m_data.pstr = s)
 
 #undef IMPLEMENT_SET
 
 #define IMPLEMENT_PTR_SET(ptr, member, dtype)                           \
   void Variant::set(ptr *v) noexcept {                                  \
-    Variant *self = m_type == KindOfRef ? m_data.pref->var() : this;    \
     if (UNLIKELY(!v)) {                                                 \
-      self->setNull();                                                  \
+      this->setNull();                                                  \
     } else {                                                            \
       v->incRefCount();                                                 \
-      auto const d = self->m_data.num;                                  \
-      auto const t = self->m_type;                                      \
-      self->m_type = dtype;                                             \
-      self->m_data.member = v;                                          \
-      tvRefcountedDecRefHelper(t, d);                                   \
+      const TypedValue old = *this->asTypedValue();                     \
+      this->m_type = dtype;                                             \
+      this->m_data.member = v;                                          \
+      tvDecRefGen(old);                                                 \
+    }                                                                   \
+  }                                                                     \
+  void variant_ref::set(ptr *v) noexcept {                              \
+    if (UNLIKELY(!v)) {                                                 \
+      this->setNull();                                                  \
+    } else {                                                            \
+      v->incRefCount();                                                 \
+      const TypedValue old = this->m_val.tv();                          \
+      type(this->m_val) = dtype;                                        \
+      val(this->m_val).member = v;                                      \
+      tvDecRefGen(old);                                                 \
     }                                                                   \
   }
 
 IMPLEMENT_PTR_SET(StringData, pstr,
-                           v->isStatic() ? KindOfStaticString : KindOfString);
-IMPLEMENT_PTR_SET(ArrayData, parr, KindOfArray)
+                  v->isRefCounted() ? KindOfString : KindOfPersistentString);
+IMPLEMENT_PTR_SET(ArrayData, parr,
+                  v->isRefCounted() ?
+                  v->toDataType() : v->toPersistentDataType());
 IMPLEMENT_PTR_SET(ObjectData, pobj, KindOfObject)
 IMPLEMENT_PTR_SET(ResourceHdr, pres, KindOfResource)
 
@@ -203,29 +204,35 @@ IMPLEMENT_PTR_SET(ResourceHdr, pres, KindOfResource)
 
 #define IMPLEMENT_STEAL(ptr, member, dtype)                             \
   void Variant::steal(ptr* v) noexcept {                                \
-    Variant* self = (m_type == KindOfRef) ? m_data.pref->var() : this;  \
     if (UNLIKELY(!v)) {                                                 \
-      self->setNull();                                                  \
+      this->setNull();                                                  \
     } else {                                                            \
-      auto const d = self->m_data.num;                                  \
-      auto const t = self->m_type;                                      \
-      self->m_type = dtype;                                             \
-      self->m_data.member = v;                                          \
-      tvRefcountedDecRefHelper(t, d);                                   \
+      const TypedValue old = *this->asTypedValue();                     \
+      this->m_type = dtype;                                             \
+      this->m_data.member = v;                                          \
+      tvDecRefGen(old);                                                 \
+    }                                                                   \
+  }                                                                     \
+  void variant_ref::steal(ptr* v) noexcept {                            \
+    if (UNLIKELY(!v)) {                                                 \
+      this->setNull();                                                  \
+    } else {                                                            \
+      const TypedValue old = this->m_val.tv();                          \
+      type(this->m_val) = dtype;                                        \
+      val(this->m_val).member = v;                                      \
+      tvDecRefGen(old);                                                 \
     }                                                                   \
   }
 
 IMPLEMENT_STEAL(StringData, pstr,
-                v->isStatic() ? KindOfStaticString : KindOfString)
-IMPLEMENT_STEAL(ArrayData, parr, KindOfArray)
+                v->isRefCounted() ? KindOfString : KindOfPersistentString)
+IMPLEMENT_STEAL(ArrayData, parr,
+                v->isRefCounted() ?
+                v->toDataType() : v->toPersistentDataType());
 IMPLEMENT_STEAL(ObjectData, pobj, KindOfObject)
 IMPLEMENT_STEAL(ResourceHdr, pres, KindOfResource)
 
 #undef IMPLEMENT_STEAL
-
-int Variant::getRefCount() const noexcept {
-  return isRefcountedType(m_type) ? tvGetCount(asTypedValue()) : 1;
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // informational
@@ -243,9 +250,24 @@ DataType Variant::toNumeric(int64_t &ival, double &dval,
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
+    case KindOfRecord:
     case KindOfResource:
+    case KindOfFunc:
+    case KindOfClass:
+    case KindOfClsMeth:
       return m_type;
 
     case KindOfInt64:
@@ -256,15 +278,9 @@ DataType Variant::toNumeric(int64_t &ival, double &dval,
       dval = m_data.dbl;
       return KindOfDouble;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       return checkString ? m_data.pstr->toNumeric(ival, dval) : m_type;
-
-    case KindOfRef:
-      return m_data.pref->var()->toNumeric(ival, dval, checkString);
-
-    case KindOfClass:
-      break;
   }
   not_reached();
 }
@@ -273,32 +289,92 @@ bool Variant::isScalar() const noexcept {
   switch (getType()) {
     case KindOfUninit:
     case KindOfNull:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
     case KindOfResource:
+    case KindOfClsMeth:
+    case KindOfRecord:
       return false;
 
     case KindOfBoolean:
     case KindOfInt64:
     case KindOfDouble:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
-      return true;
-
-    case KindOfRef:
-      always_assert(false && "isScalar() called on a boxed value");
-
+    case KindOfFunc:
     case KindOfClass:
-      break;
+      return true;
   }
   not_reached();
+}
+
+static bool isAllowedAsConstantValueImpl(TypedValue tv) {
+  switch (tv.m_type) {
+    case KindOfNull:
+    case KindOfBoolean:
+    case KindOfInt64:
+    case KindOfDouble:
+    case KindOfPersistentString:
+    case KindOfString:
+    case KindOfPersistentVec:
+    case KindOfPersistentDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentDArray:
+    case KindOfPersistentVArray:
+    case KindOfPersistentArray:
+    case KindOfResource:
+    case KindOfFunc:
+    case KindOfClsMeth:
+      return true;
+
+    case KindOfDArray:
+    case KindOfVArray:
+    case KindOfVec:
+    case KindOfDict:
+    case KindOfArray: {
+      if (tv.m_data.parr->isGlobalsArrayKind()) return false;
+
+      bool allowed = true;
+      IterateV(
+        tv.m_data.parr,
+        [&] (TypedValue v) {
+          if (!isAllowedAsConstantValueImpl(v)) allowed = false;
+          return !allowed;
+        }
+      );
+      return allowed;
+    }
+
+    case KindOfUninit:
+    case KindOfObject:
+    case KindOfClass:
+    case KindOfRecord:
+      return false;
+  }
+  not_reached();
+}
+
+bool Variant::isAllowedAsConstantValue() const {
+  return isAllowedAsConstantValueImpl(*this);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 inline DataType Variant::convertToNumeric(int64_t *lval, double *dval) const {
   StringData *s = getStringData();
-  assert(s);
+  assertx(s);
   return s->isNumericWithVal(*lval, *dval, 1);
 }
 
@@ -306,147 +382,113 @@ inline DataType Variant::convertToNumeric(int64_t *lval, double *dval) const {
 // type conversions
 
 bool Variant::toBooleanHelper() const {
-  assert(m_type > KindOfInt64);
   switch (m_type) {
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
-    case KindOfInt64:         return m_data.num;
+    case KindOfInt64:         assertx(false); return m_data.num;
     case KindOfDouble:        return m_data.dbl != 0;
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:        return m_data.pstr->toBoolean();
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:         return !m_data.parr->empty();
     case KindOfObject:        return m_data.pobj->toBoolean();
     case KindOfResource:      return m_data.pres->data()->o_toBoolean();
-    case KindOfRef:           return m_data.pref->var()->toBoolean();
-    case KindOfClass:         break;
+    case KindOfFunc:
+    case KindOfClass:
+    case KindOfClsMeth:       return true;
+    case KindOfRecord:
+      raise_convert_record_to_type("bool");
+      return false;
   }
   not_reached();
 }
 
 int64_t Variant::toInt64Helper(int base /* = 10 */) const {
-  assert(m_type > KindOfInt64);
   switch (m_type) {
     case KindOfUninit:
     case KindOfNull:
     case KindOfBoolean:
-    case KindOfInt64:         return m_data.num;
-    case KindOfDouble:        return HPHP::toInt64(m_data.dbl);
-    case KindOfStaticString:
+    case KindOfInt64:         assertx(false); return m_data.num;
+    case KindOfDouble:        return double_to_int64(m_data.dbl);
+    case KindOfPersistentString:
     case KindOfString:        return m_data.pstr->toInt64(base);
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentArray:
     case KindOfArray:         return m_data.parr->empty() ? 0 : 1;
     case KindOfObject:        return m_data.pobj->toInt64();
     case KindOfResource:      return m_data.pres->data()->o_toInt64();
-    case KindOfRef:           return m_data.pref->var()->toInt64(base);
-    case KindOfClass:         break;
-  }
-  not_reached();
-}
-
-double Variant::toDoubleHelper() const {
-  switch (m_type) {
-    case KindOfUninit:
-    case KindOfNull:          return 0.0;
-    case KindOfBoolean:
-    case KindOfInt64:         return (double)toInt64();
-    case KindOfDouble:        return m_data.dbl;
-    case KindOfStaticString:
-    case KindOfString:        return m_data.pstr->toDouble();
-    case KindOfArray:         return (double)toInt64();
-    case KindOfObject:        return m_data.pobj->toDouble();
-    case KindOfResource:      return m_data.pres->data()->o_toDouble();
-    case KindOfRef:           return m_data.pref->var()->toDouble();
-    case KindOfClass:         break;
-  }
-  not_reached();
-}
-
-String Variant::toStringHelper() const {
-  switch (m_type) {
-    case KindOfUninit:
-    case KindOfNull:
-      return empty_string();
-
-    case KindOfBoolean:
-      return m_data.num ? static_cast<String>(s_1)
-                        : empty_string();
-
-    case KindOfInt64:
-      return m_data.num;
-
-    case KindOfDouble:
-      return m_data.dbl;
-
-    case KindOfStaticString:
-    case KindOfString:
-      assert(false); // Should be done in caller
-      return String{m_data.pstr};
-
-    case KindOfArray:
-      raise_notice("Array to string conversion");
-      return array_string;
-
-    case KindOfObject:
-      return m_data.pobj->invokeToString();
-
-    case KindOfResource:
-      return m_data.pres->data()->o_toString();
-
-    case KindOfRef:
-      return m_data.pref->var()->toString();
-
+    case KindOfFunc:
+      return funcToInt64Helper(m_data.pfunc);
     case KindOfClass:
-      break;
+      return classToStringHelper(m_data.pclass)->toInt64();
+    case KindOfClsMeth:
+      raiseClsMethConvertWarningHelper("int");
+      return 1;
+    case KindOfRecord:
+      raise_convert_record_to_type("int");
+      return 0;
   }
   not_reached();
 }
 
-Array Variant::toArrayHelper() const {
+Array Variant::toPHPArrayHelper() const {
   switch (m_type) {
     case KindOfUninit:
     case KindOfNull:          return empty_array();
-    case KindOfBoolean:       return Array::Create(*this);
-    case KindOfInt64:         return Array::Create(m_data.num);
-    case KindOfDouble:        return Array::Create(*this);
-    case KindOfStaticString:
-    case KindOfString:        return Array::Create(Variant{m_data.pstr});
+    case KindOfBoolean:       return make_packed_array(*this);
+    case KindOfInt64:         return make_packed_array(m_data.num);
+    case KindOfDouble:        return make_packed_array(*this);
+    case KindOfPersistentString:
+      return make_packed_array(Variant{m_data.pstr, PersistentStrInit{}});
+    case KindOfString:
+      return make_packed_array(Variant{m_data.pstr});
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:        return ArrNR{m_data.parr}.asArray().toPHPArray();
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:         return Array(m_data.parr);
     case KindOfObject:        return m_data.pobj->toArray();
     case KindOfResource:      return m_data.pres->data()->o_toArray();
-    case KindOfRef:           return m_data.pref->var()->toArray();
-    case KindOfClass:         break;
-  }
-  not_reached();
-}
-
-Object Variant::toObjectHelper() const {
-  switch (m_type) {
-    case KindOfUninit:
-    case KindOfNull:
-      return SystemLib::AllocStdClassObject();
-
-    case KindOfBoolean:
-    case KindOfInt64:
-    case KindOfDouble:
-    case KindOfStaticString:
-    case KindOfString:
-    case KindOfResource: {
-      auto obj = SystemLib::AllocStdClassObject();
-      obj->o_set(s_scalar, *this, false);
-      return obj;
-    }
-
-    case KindOfArray:
-      return ObjectData::FromArray(m_data.parr);
-
-    case KindOfObject:
-      return Object{m_data.pobj};
-
-    case KindOfRef:
-      return m_data.pref->var()->toObject();
-
+    case KindOfFunc:
+      return make_packed_array(Variant{funcToStringHelper(m_data.pfunc),
+                                       PersistentStrInit{}});
     case KindOfClass:
-      break;
+      return make_packed_array(Variant{classToStringHelper(m_data.pclass),
+                                       PersistentStrInit{}});
+    case KindOfClsMeth:
+      raiseClsMethConvertWarningHelper("array");
+      return make_packed_array(
+        m_data.pclsmeth->getClsStr(), m_data.pclsmeth->getFuncStr());
+    case KindOfRecord:
+      raise_convert_record_to_type("array");
+      return empty_array();
   }
   not_reached();
 }
@@ -458,133 +500,140 @@ Resource Variant::toResourceHelper() const {
     case KindOfBoolean:
     case KindOfInt64:
     case KindOfDouble:
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
+    case KindOfFunc:
+    case KindOfClass:
+    case KindOfClsMeth:
+    case KindOfRecord:
       return Resource(req::make<DummyResource>());
 
     case KindOfResource:
       return Resource{m_data.pres};
-
-    case KindOfRef:
-      return m_data.pref->var()->toResource();
-
-    case KindOfClass:
-      break;
   }
   not_reached();
 }
 
-VarNR Variant::toKey() const {
-  if (m_type == KindOfString || m_type == KindOfStaticString) {
-    int64_t n;
-    if (m_data.pstr->isStrictlyInteger(n)) {
-      return VarNR(n);
-    } else {
-      return VarNR(m_data.pstr);
-    }
-  }
-  switch (m_type) {
-    case KindOfUninit:
-    case KindOfNull:
-      return VarNR(staticEmptyString());
+req::root<Variant>* blackHolePtr() {
+  void* p = bhStorage.get();
+  return reinterpret_cast<req::root<Variant>*>(p);
+}
 
-    case KindOfBoolean:
-    case KindOfInt64:
-      return VarNR(m_data.num);
+void initBlackHole() {
+  new (blackHolePtr()) req::root<Variant>();
+}
 
-    case KindOfDouble:
-    case KindOfResource:
-      return VarNR(toInt64());
-
-    case KindOfStaticString:
-    case KindOfString:
-    case KindOfArray:
-    case KindOfObject:
-      throw_bad_type_exception("Invalid type used as key");
-      return null_varNR;
-
-    case KindOfRef:
-      return m_data.pref->var()->toKey();
-
-    case KindOfClass:
-      break;
-  }
-  not_reached();
+void clearBlackHole() {
+  using req::root;
+  blackHolePtr()->~root<Variant>();
 }
 
 Variant& lvalBlackHole() {
-  auto& bh = get_env_constants()->lvalProxy;
-  bh = uninit_null();
-  return bh;
+  blackHolePtr()->unset();
+  blackHolePtr()->setNull();
+  return *blackHolePtr();
 }
 
 void Variant::setEvalScalar() {
+  assertx(tvIsPlausible(*this));
+
+  auto const do_array = [this]{
+    if (!m_data.parr->isStatic()) {
+      ArrayData::GetScalarArray(&m_data.parr);
+      assertx(m_data.parr->isStatic());
+    }
+  };
+
   switch (m_type) {
-    DT_UNCOUNTED_CASE:
+    case KindOfUninit:
+    case KindOfNull:
+    case KindOfBoolean:
+    case KindOfInt64:
+    case KindOfDouble:
       return;
 
-    case KindOfString: {
-      StringData *pstr = m_data.pstr;
+    case KindOfString:
+      m_type = KindOfPersistentString;
+    case KindOfPersistentString: {
+      auto pstr = m_data.pstr;
       if (!pstr->isStatic()) {
         StringData *sd = makeStaticString(pstr);
         decRefStr(pstr);
         m_data.pstr = sd;
-        assert(m_data.pstr->isStatic());
-        m_type = KindOfStaticString;
+        assertx(m_data.pstr->isStatic());
       }
       return;
     }
 
-    case KindOfArray: {
-      ArrayData *parr = m_data.parr;
-      if (!parr->isStatic()) {
-        ArrayData *ad = ArrayData::GetScalarArray(parr);
-        decRefArr(parr);
-        m_data.parr = ad;
-        assert(m_data.parr->isStatic());
-      }
+    case KindOfVec:
+      m_type = KindOfPersistentVec;
+    case KindOfPersistentVec:
+      do_array();
       return;
-    }
+
+    case KindOfDict:
+      m_type = KindOfPersistentDict;
+    case KindOfPersistentDict:
+      do_array();
+      return;
+
+    case KindOfKeyset:
+      m_type = KindOfPersistentKeyset;
+    case KindOfPersistentKeyset:
+      do_array();
+      return;
+
+    case KindOfDArray:
+      m_type = KindOfPersistentDArray;
+    case KindOfPersistentDArray:
+      do_array();
+      return;
+
+    case KindOfVArray:
+      m_type = KindOfPersistentVArray;
+    case KindOfPersistentVArray:
+      do_array();
+      return;
+
+    case KindOfArray:
+      m_type = KindOfPersistentArray;
+    case KindOfPersistentArray:
+      do_array();
+      return;
 
     case KindOfObject:
     case KindOfResource:
-    case KindOfRef:
+    case KindOfFunc:
     case KindOfClass:
       break;
+
+    case KindOfRecord:
+      raise_error(Strings::RECORD_NOT_SUPPORTED);
+
+    case KindOfClsMeth:
+      raiseClsMethToVecWarningHelper();
+      auto const clsMeth = m_data.pclsmeth;
+      m_data.parr = clsMethToVecHelper(clsMeth).detach();
+      m_type = RuntimeOption::EvalHackArrDVArrs ?
+               KindOfPersistentVec : KindOfPersistentArray;
+      decRefClsMeth(clsMeth);
+      do_array();
+      return;
   }
   not_reached();
-}
-
-VarNR::VarNR(const String& v) {
-  init(KindOfString);
-  StringData *s = v.get();
-  if (s) {
-    m_data.pstr = s;
-  } else {
-    m_type = KindOfNull;
-  }
-}
-
-VarNR::VarNR(const Array& v) {
-  init(KindOfArray);
-  ArrayData *a = v.get();
-  if (a) {
-    m_data.parr = a;
-  } else {
-    m_type = KindOfNull;
-  }
-}
-
-VarNR::VarNR(const Object& v) {
-  init(KindOfObject);
-  ObjectData *o = v.get();
-  if (o) {
-    m_data.pobj = o;
-  } else {
-    m_type = KindOfNull;
-  }
 }
 
 VarNR::VarNR(StringData *v) {
@@ -597,11 +646,11 @@ VarNR::VarNR(StringData *v) {
 }
 
 VarNR::VarNR(ArrayData *v) {
-  init(KindOfArray);
   if (v) {
+    init(v->toDataType());
     m_data.parr = v;
   } else {
-    m_type = KindOfNull;
+    init(KindOfNull);
   }
 }
 

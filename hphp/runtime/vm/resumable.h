@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,47 +17,97 @@
 #ifndef incl_HPHP_RUNTIME_VM_RESUMABLE_H_
 #define incl_HPHP_RUNTIME_VM_RESUMABLE_H_
 
+#include <folly/Optional.h>
+
+#include "hphp/runtime/vm/act-rec.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/native-data.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/jit/types.h"
+#include "hphp/util/alloc.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
 /**
+ * Indicates how a function got resumed.
+ */
+enum class ResumeMode : uint8_t {
+  // The function was regularly called and its frame is located on the stack.
+  // This is the only valid mode for regular (non-async, non-generator)
+  // functions. Async functions are executed in this mode (also called eager
+  // execution) until reaching the first blocking await statement. Generators
+  // and async generators run in this mode only during argument type enforcement
+  // and suspend their execution immediately afterwards using the CreateCont
+  // opcode.
+  None = 0,
+
+  // Execution of the function was resumed by the asio scheduler upon completion
+  // of the awaited WaitHandle. Frame of the function is stored on the heap
+  // colocated with the Resumable structure. Valid only for async functions and
+  // async generators. An AsyncGeneratorWaitHandle is associated with async
+  // generators.
+  Async = 1,
+
+  // Execution of the function was resumed by generator iteration (e.g. by
+  // calling next() or send()). Frame of the function is stored on the heap
+  // colocated with the Resumable structure. Valid only for generators and
+  // async generators. Async generators are considered to be eagerly executed
+  // in this mode and don't have any associated AsyncGeneratorWaitHandle.
+  GenIter = 2,
+};
+
+char* resumeModeShortName(ResumeMode resumeMode);
+folly::Optional<ResumeMode> nameToResumeMode(const std::string& name);
+
+ALWAYS_INLINE bool isResumed(const ActRec* ar) {
+  assertx(ar && ar->func()->validate());
+  // VM stack does not have resumed ActRecs.
+  if (LIKELY(isValidVMStackAddress(ar))) return false;
+  // Native stack may have fake ActRecs, which are not resumed.
+  if (UNLIKELY(((uintptr_t)ar - s_stackLimit) < s_stackSize)) return false;
+  // All ActRecs on the heap must be resumed.
+  return true;
+}
+
+ResumeMode resumeModeFromActRecImpl(ActRec* ar);
+ALWAYS_INLINE ResumeMode resumeModeFromActRec(ActRec* ar) {
+  if (LIKELY(!isResumed(ar))) return ResumeMode::None;
+  return resumeModeFromActRecImpl(ar);
+}
+
+/**
  * Header of the resumable frame used by async functions:
  *
- *         Header*     -> +-------------------------+ low address
- *                        | ResumableNode           |
- *                        +-------------------------+
- *                        | Function locals and     |
- *                        | iterators               |
- *         Resumable*  -> +-------------------------+
- *                        | ActRec in Resumable     |
- *                        +-------------------------+
- *                        | Rest of Resumable       |
- *         ObjectData* -> +-------------------------+
- *                        | Parent object           |
- *                        +-------------------------+ high address
+ *     NativeNode* -> +--------------------------------+ low address
+ *                    | kind=AsyncFuncFrame            |
+ *                    +--------------------------------+
+ *                    | Function locals and iterators  |
+ *     Resumable*  -> +--------------------------------+
+ *                    | ActRec in Resumable            |
+ *                    +--------------------------------+
+ *                    | Rest of Resumable              |
+ *     ObjectData* -> +--------------------------------+
+ *                    | c_AsyncFuncWaitHandle          |
+ *                    +--------------------------------+ high address
  *
  * Header of the native frame used by generators:
  *
- *         Header*     -> +-------------------------+ low address
- *                        | NativeNode              |
- *                        +-------------------------+
- *                        | Function locals and     |
- *                        | iterators               |
- *     BaseGenerator*  -> +-------------------------+
- *     < NativeData >     | ActRec in Resumable     |
- *                        +-------------------------+
- *                        | Rest of Resumable       |
- *                        +-------------------------+
- *                        | Rest of Generator Data  |
- *         ObjectData* -> +-------------------------+
- *                        | Parent object           |
- *                        +-------------------------+ high address
+ *     NativeNode* -> +--------------------------------+ low address
+ *                    | kind=NativeData                |
+ *                    +--------------------------------+
+ *                    | Function locals and iterators  |
+ * BaseGenerator*  -> +--------------------------------+
+ * < NativeData >     | ActRec in Resumable            |
+ *                    +--------------------------------+
+ *                    | Rest of Resumable              |
+ *                    +--------------------------------+
+ *                    | Rest of [Async]Generator       |
+ *     ObjectData* -> +--------------------------------+
+ *                    | Parent object                  |
+ *                    +--------------------------------+ high address
  */
 struct alignas(16) Resumable {
   // This function is used only by AFWH, temporary till AFWH is converted to HNI
@@ -73,8 +123,8 @@ struct alignas(16) Resumable {
   static constexpr ptrdiff_t resumeAddrOff() {
     return offsetof(Resumable, m_resumeAddr);
   }
-  static constexpr ptrdiff_t resumeOffsetOff() {
-    return offsetof(Resumable, m_resumeOffset);
+  static constexpr ptrdiff_t suspendOffsetOff() {
+    return offsetof(Resumable, m_suspendOffset);
   }
   static constexpr ptrdiff_t dataOff() {
     return sizeof(Resumable);
@@ -86,28 +136,26 @@ struct alignas(16) Resumable {
   // This function is temporary till we move AFWH to HNI
   static Resumable* Create(size_t frameSize, size_t totalSize) {
     // Allocate memory.
-    auto node = reinterpret_cast<ResumableNode*>(MM().objMalloc(totalSize));
+    (void)type_scan::getIndexForMalloc<ActRec>();
+    auto node = new (tl_heap->objMalloc(totalSize))
+                NativeNode(HeaderKind::AsyncFuncFrame,
+                           sizeof(NativeNode) + frameSize + sizeof(Resumable));
     auto frame = reinterpret_cast<char*>(node + 1);
-    auto resumable = reinterpret_cast<Resumable*>(frame + frameSize);
-
-    node->framesize = frameSize;
-    node->hdr.kind = HeaderKind::ResumableFrame;
-
-    return resumable;
+    return reinterpret_cast<Resumable*>(frame + frameSize);
   }
 
   template<bool clone,
            bool mayUseVV = true>
   void initialize(const ActRec* fp, jit::TCA resumeAddr,
-                  Offset resumeOffset, size_t frameSize, size_t totalSize) {
-    assert(fp);
-    assert(fp->resumed() == clone);
+                  Offset suspendOffset, size_t frameSize, size_t totalSize) {
+    assertx(fp);
+    assertx(isResumed(fp) == clone);
     auto const func = fp->func();
-    assert(func);
-    assert(func->isResumable());
-    assert(func->contains(resumeOffset));
+    assertx(func);
+    assertx(func->isResumable());
+    assertx(func->contains(suspendOffset));
     // Check memory alignment
-    assert((((uintptr_t) actRec()) & (sizeof(Cell) - 1)) == 0);
+    assertx((((uintptr_t) actRec()) & (sizeof(TypedValue) - 1)) == 0);
 
     if (!clone) {
       // Copy ActRec, locals and iterators
@@ -115,11 +163,8 @@ struct alignas(16) Resumable {
       auto dst = reinterpret_cast<char*>(actRec()) - frameSize;
       wordcpy(dst, src, frameSize + sizeof(ActRec));
 
-      // Set resumed flag.
-      actRec()->setResumed();
-
       // Suspend VarEnv if needed
-      assert(mayUseVV || !(func->attrs() & AttrMayUseVV));
+      assertx(mayUseVV || !(func->attrs() & AttrMayUseVV));
       if (mayUseVV &&
           UNLIKELY(func->attrs() & AttrMayUseVV) &&
           UNLIKELY(fp->hasVarEnv())) {
@@ -138,28 +183,55 @@ struct alignas(16) Resumable {
 
     // Populate Resumable.
     m_resumeAddr = resumeAddr;
-    m_offsetAndSize = (totalSize << 32 | resumeOffset);
+    m_offsetAndSize = (totalSize << 32 | suspendOffset);
   }
 
   template<class T> static void Destroy(size_t size, T* obj) {
     auto const base = reinterpret_cast<char*>(obj + 1) - size;
     obj->~T();
-    MM().objFree(base, size);
+    tl_heap->objFree(base, size);
   }
 
   ActRec* actRec() { return &m_actRec; }
   const ActRec* actRec() const { return &m_actRec; }
   jit::TCA resumeAddr() const { return m_resumeAddr; }
-  Offset resumeOffset() const {
-    assert(m_actRec.func()->contains(m_resumeOffset));
-    return m_resumeOffset;
+  Offset suspendOffset() const {
+    assertx(m_actRec.func()->contains(m_suspendOffset));
+    return m_suspendOffset;
+  }
+  Offset resumeFromAwaitOffset() const {
+    assertx(m_actRec.func()->contains(m_suspendOffset));
+    auto const suspendPC = m_actRec.func()->unit()->at(m_suspendOffset);
+    assertx(peek_op(suspendPC) == OpAwait || peek_op(suspendPC) == OpAwaitAll);
+    auto const resumeOffset = m_suspendOffset + instrLen(suspendPC);
+    assertx(m_actRec.func()->contains(resumeOffset));
+    return resumeOffset;
+  }
+  Offset resumeFromYieldOffset() const {
+    assertx(m_actRec.func()->contains(m_suspendOffset));
+    // TODO(alexeyt) remove `yield from` and the need for this complexity
+    auto const pc = m_actRec.func()->unit()->at(m_suspendOffset);
+    auto pc2 = pc;
+    auto const suspendedOp = decode_op(pc2);
+    Offset resumeOffset = kInvalidOffset;
+    if (suspendedOp == OpYieldFromDelegate) {
+      decode_iva(pc2);
+      resumeOffset = m_suspendOffset + decode_ba(pc2);
+    } else {
+      assertx(suspendedOp == OpCreateCont ||
+              suspendedOp == OpYield ||
+              suspendedOp == OpYieldK);
+      resumeOffset = m_suspendOffset + instrLen(pc);
+    }
+    assertx(m_actRec.func()->contains(resumeOffset));
+    return resumeOffset;
   }
   size_t size() const { return m_size; }
 
-  void setResumeAddr(jit::TCA resumeAddr, Offset resumeOffset) {
-    assert(m_actRec.func()->contains(resumeOffset));
+  void setResumeAddr(jit::TCA resumeAddr, Offset suspendOffset) {
+    assertx(m_actRec.func()->contains(suspendOffset));
     m_resumeAddr = resumeAddr;
-    m_resumeOffset = resumeOffset;
+    m_suspendOffset = suspendOffset;
   }
 
 private:
@@ -172,7 +244,7 @@ private:
   // Resume offset: bytecode offset from start of Unit's bytecode.
   union {
     struct {
-      Offset m_resumeOffset;
+      Offset m_suspendOffset;
 
       // Size of the memory block that includes this resumable.
       int32_t m_size;

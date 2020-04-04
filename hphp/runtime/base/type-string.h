@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,16 +14,15 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef incl_HPHP_STRING_H_
-#define incl_HPHP_STRING_H_
+#ifndef incl_HPHP_TYPE_STRING_H_
+#define incl_HPHP_TYPE_STRING_H_
 
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/static-string-table.h"
 #include "hphp/runtime/base/string-data.h"
 #include "hphp/runtime/base/typed-value.h"
+
 #include "hphp/util/assertions.h"
-#include "hphp/util/hash-map-typedefs.h"
-#include "hphp/util/functional.h"
 
 #include <algorithm>
 
@@ -31,10 +30,12 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-class Array;
-class VarNR;
-class VariableSerializer;
-class VariableUnserializer;
+// Forward declare to avoid including tv-conversions.h and creating a cycle.
+StringData* tvCastToStringData(TypedValue tv);
+
+struct VarNR;
+struct VariableSerializer;
+struct VariableUnserializer;
 
 // reserve space for buffer that will be filled in by client.
 enum ReserveStringMode { ReserveString };
@@ -53,7 +54,8 @@ constexpr int kMinShrinkThreshold = 1024;
 
 //////////////////////////////////////////////////////////////////////
 
-// Built strings will have their reference counts pre-initialized to 1.
+// Built strings will be uncounted, or will have their reference counts
+// pre-initialized to 1.
 StringData* buildStringData(int     n);
 StringData* buildStringData(int64_t n);
 StringData* buildStringData(double  n);
@@ -66,7 +68,8 @@ std::string convDblToStrWithPhpFormat(double n);
  * String type wrapping around StringData to implement copy-on-write and
  * literal string handling (to avoid string copying).
  */
-class String {
+struct String {
+protected:
   req::ptr<StringData> m_str;
 
 protected:
@@ -74,13 +77,10 @@ protected:
   String(StringData* sd, NoIncRef) : m_str(sd, NoIncRef{}) {}
 
 public:
-  typedef hphp_hash_map<int64_t, const StringData *, int64_hash>
-    IntegerStringDataMap;
   static const int MinPrecomputedInteger = SCHAR_MIN;
   static const int MaxPrecomputedInteger = 4095 + SCHAR_MIN;
   static StringData const **converted_integers_raw;
   static StringData const **converted_integers;
-  static IntegerStringDataMap integer_string_data_map;
 
   static bool HasConverted(int64_t n) {
     return MinPrecomputedInteger <= n && n <= MaxPrecomputedInteger;
@@ -88,28 +88,17 @@ public:
   static bool HasConverted(int n) {
     return HasConverted((int64_t)n);
   }
-  static void PreConvertInteger(int64_t n);
 
   // create a string from a character
   static String FromChar(char ch) {
     return String{makeStaticString(ch)};
   }
-  static String FromCStr(const char* str) {
-    return String{makeStaticString(str)};
-  }
 
   static const StringData *ConvertInteger(int64_t n);
   static const StringData *GetIntegerStringData(int64_t n) {
     if (HasConverted(n)) {
-      const StringData *sd = *(converted_integers + n);
-      if (UNLIKELY(sd == nullptr)) {
-        return ConvertInteger(n);
-      }
-      return sd;
+      return *(converted_integers + n);
     }
-    IntegerStringDataMap::const_iterator it =
-      integer_string_data_map.find(n);
-    if (it != integer_string_data_map.end()) return it->second;
     return nullptr;
   }
 
@@ -136,7 +125,10 @@ public:
 
   String(const String& str) : m_str(str.m_str) { }
   /* implicit */ String(const StaticString& str);
-  /* implicit */ String(char) = delete; // prevent unintentional promotion
+
+  /* Prevent unintentional promotion. */
+  /* implicit */ String(char) = delete;
+  /* implicit */ String(Variant&&) = delete;
 
   // Disable this---otherwise this would generally implicitly create a
   // Variant(bool) and then call String(Variant&&) ...
@@ -144,7 +136,7 @@ public:
 
   // Move ctor
   /* implicit */ String(String&& str) noexcept : m_str(std::move(str.m_str)) {}
-  /* implicit */ String(Variant&& src);
+
   // Move assign
   String& operator=(String&& src) {
     m_str = std::move(src.m_str);
@@ -155,11 +147,14 @@ public:
     return *this;
   }
 
-  // Move assign from Variant
-  String& operator=(Variant&& src);
+  String& operator=(const Variant&) = delete;
+  String& operator=(Variant&&) = delete;
 
   /* implicit */ String(const std::string &s)
   : m_str(StringData::Make(s.data(), s.size(), CopyString), NoIncRef{}) { }
+
+  /* implicit */ String(folly::StringPiece s)
+  : m_str(StringData::Make(s), NoIncRef{}) {}
 
   // attach to null terminated malloc'ed string, maybe free it now.
   String(char* s, AttachStringMode mode)
@@ -185,8 +180,8 @@ public:
                           : nullptr, NoIncRef{}) {}
 
   // make an empty string with cap reserve bytes, plus 1 for '\0'
-  String(size_t cap, ReserveStringMode mode)
-  : m_str(StringData::Make(cap), NoIncRef{}) { }
+  String(size_t cap, ReserveStringMode /*mode*/)
+      : m_str(StringData::Make(cap), NoIncRef{}) {}
 
   static String attach(StringData* sd) {
     return String(sd, NoIncRef{});
@@ -206,16 +201,16 @@ public:
 
 public:
   const String& setSize(int len) {
-    assert(m_str);
+    assertx(m_str);
     m_str->setSize(len);
     return *this;
   }
   const String& shrink(size_t len) {
-    assert(m_str);
+    assertx(m_str && !m_str->isImmutable());
     if (m_str->capacity() - len > kMinShrinkThreshold) {
       m_str = req::ptr<StringData>::attach(m_str->shrinkImpl(len));
     } else {
-      assert(len < StringData::MaxSize);
+      assertx(len < StringData::MaxSize);
       m_str->setSize(len);
     }
     return *this;
@@ -260,12 +255,10 @@ public:
     return m_str ? m_str->isZero() : false;
   }
 
-  /**
-   * Take a sub-string from start with specified length. Note, read
-   * http://www.php.net/substr about meanings of negative start or length.
-   */
-  String substr(int start, int length = 0x7FFFFFFF,
-                bool nullable = false) const;
+  String substr(int start, int length = StringData::MaxSize) const {
+    return String::attach(
+      m_str ? m_str->substr(start, length) : staticEmptyString());
+  }
 
   /**
    * Find a character or a substring and return its position. "pos" has to be
@@ -292,14 +285,12 @@ public:
   }
   String& operator=(const StaticString& v);
   String& operator=(const char* v);
-  String& operator=(const Variant& v);
   String& operator=(const std::string &s);
   // These should be members, but g++ doesn't yet support the rvalue
   // reference notation on lhs (http://goo.gl/LuCTo).
   friend String&& operator+(String&& lhs, const char* rhs);
   friend String&& operator+(String&& lhs, String&& rhs);
   friend String operator+(String&& lhs, const String & rhs);
-  friend String operator+(const String & lhs, String&& rhs);
   friend String operator+(const String& lhs, const char* rhs);
   friend String operator+(const String & lhs, const String & rhs);
   String& operator += (const char* v);
@@ -328,18 +319,20 @@ public:
   bool operator <= (const char* v) const = delete;
   bool operator >  (const char* v) const = delete;
   bool operator <  (const char* v) const = delete;
+
   bool operator == (const String& v) const;
   bool operator != (const String& v) const;
   bool operator >= (const String& v) const = delete;
   bool operator <= (const String& v) const = delete;
   bool operator >  (const String& v) const;
   bool operator <  (const String& v) const;
-  bool operator == (const Variant& v) const;
-  bool operator != (const Variant& v) const;
+
+  bool operator == (const Variant& v) const = delete;
+  bool operator != (const Variant& v) const = delete;
   bool operator >= (const Variant& v) const = delete;
   bool operator <= (const Variant& v) const = delete;
-  bool operator >  (const Variant& v) const;
-  bool operator <  (const Variant& v) const;
+  bool operator >  (const Variant& v) const = delete;
+  bool operator <  (const Variant& v) const = delete;
 
   /**
    * Type conversions
@@ -350,8 +343,11 @@ public:
   int    toInt32  () const { return m_str ? m_str->toInt32  () : 0;}
   int64_t toInt64 () const { return m_str ? m_str->toInt64  () : 0;}
   double toDouble () const { return m_str ? m_str->toDouble () : 0;}
-  VarNR  toKey   () const;
   std::string toCppString() const { return std::string(c_str(), size()); }
+  TypedValue asTypedValue() const {
+    assertx(m_str);
+    return make_tv<KindOfString>(m_str.get());
+  }
 
   /**
    * Comparisons
@@ -359,27 +355,30 @@ public:
   bool same (const char* v2) const = delete;
   bool same (const StringData *v2) const;
   bool same (const String& v2) const;
-  bool same (const Array& v2) const;
-  bool same (const Object& v2) const;
-  bool same (const Resource& v2) const;
+  bool same (const Array& v2) const = delete;
+  bool same (const Object& v2) const = delete;
+  bool same (const Resource& v2) const = delete;
+
   bool equal(const char* v2) const = delete;
   bool equal(const StringData *v2) const;
   bool equal(const String& v2) const;
-  bool equal(const Array& v2) const;
-  bool equal(const Object& v2) const;
-  bool equal(const Resource& v2) const;
+  bool equal(const Array& v2) const = delete;
+  bool equal(const Object& v2) const = delete;
+  bool equal(const Resource& v2) const = delete;
+
   bool less (const char* v2) const = delete;
   bool less (const StringData *v2) const;
   bool less (const String& v2) const;
-  bool less (const Array& v2) const;
-  bool less (const Object& v2) const;
-  bool less (const Resource& v2) const;
+  bool less (const Array& v2) const = delete;
+  bool less (const Object& v2) const = delete;
+  bool less (const Resource& v2) const = delete;
+
   bool more (const char* v2) const = delete;
   bool more (const StringData *v2) const;
   bool more (const String& v2) const;
-  bool more (const Array& v2) const;
-  bool more (const Object& v2) const;
-  bool more (const Resource& v2) const;
+  bool more (const Array& v2) const = delete;
+  bool more (const Object& v2) const = delete;
+  bool more (const Resource& v2) const = delete;
 
   int compare(const char* v2) const;
   int compare(const String& v2) const;
@@ -387,23 +386,24 @@ public:
   /**
    * Offset
    */
-  String rvalAt(bool    key) const { return rvalAtImpl(key ? 1 : 0);}
-  String rvalAt(char    key) const { return rvalAtImpl(key);}
-  String rvalAt(short   key) const { return rvalAtImpl(key);}
-  String rvalAt(int     key) const { return rvalAtImpl(key);}
-  String rvalAt(int64_t key) const { return rvalAtImpl(key);}
-  String rvalAt(double  key) const { return rvalAtImpl((int64_t)key);}
-  String rvalAt(const char* key) const {
-    return rvalAtImpl(String(key).toInt32());
+  String rval(bool    key) const { return rvalImpl(key ? 1 : 0);}
+  String rval(char    key) const { return rvalImpl(key);}
+  String rval(short   key) const { return rvalImpl(key);}
+  String rval(int     key) const { return rvalImpl(key);}
+  String rval(int64_t key) const { return rvalImpl(key);}
+  String rval(double  key) const { return rvalImpl((int64_t)key);}
+  String rval(const char* key) const {
+    return rvalImpl(String(key).toInt32());
   }
-  String rvalAt(const StringData *key) const {
+  String rval(const StringData *key) const {
     not_reached();
-    return rvalAtImpl(key ? key->toInt32() : 0);
+    return rvalImpl(key ? key->toInt32() : 0);
   }
-  String rvalAt(const String& key) const { return rvalAtImpl(key.toInt32());}
-  String rvalAt(const Array& key) const;
-  String rvalAt(const Object& key) const;
-  String rvalAt(const Variant& key) const;
+  String rval(const String& key) const { return rvalImpl(key.toInt32());}
+
+  String rval(const Array& key) const = delete;
+  String rval(const Object& key) const = delete;
+  String rval(const Variant& key) const = delete;
 
   /**
    * Returns one character at specified position.
@@ -417,10 +417,7 @@ public:
   void dump() const;
 
  private:
-  static req::ptr<StringData> buildString(int n);
-  static req::ptr<StringData> buildString(int64_t n);
-
-  String rvalAtImpl(int key) const {
+  String rvalImpl(int key) const {
     if (m_str) {
       return String{m_str->getChar(key)};
     }
@@ -435,90 +432,10 @@ public:
 extern const String null_string;
 
 ///////////////////////////////////////////////////////////////////////////////
-
-struct string_data_lt {
-  bool operator()(const StringData *s1, const StringData *s2) const {
-    int len1 = s1->size();
-    int len2 = s2->size();
-    if (len1 < len2) {
-      return (len1 == 0) || (memcmp(s1->data(), s2->data(), len1) <= 0);
-    } else if (len1 == len2) {
-      return (len1 != 0) && (memcmp(s1->data(), s2->data(), len1) < 0);
-    } else /* len1 > len2 */ {
-      return ((len2 != 0) && (memcmp(s1->data(), s2->data(), len2) < 0));
-    }
-  }
-};
-
-template <class T> using ConstStringDataMap = hphp_hash_map<
-  const StringData*,
-  T,
-  string_data_hash,
-  string_data_same
->;
-
-using ConstStringDataSet = hphp_hash_set<
-  const StringData*,
-  string_data_hash,
-  string_data_same
->;
-
-struct hphp_string_hash {
-  size_t operator()(const String& s) const {
-    return s.get()->hash();
-  }
-};
-
-struct hphp_string_same {
-  bool operator()(const String& s1, const String& s2) const {
-    return s1.get()->same(s2.get());
-  }
-};
-
-struct hphp_string_isame {
-  bool operator()(const String& s1, const String& s2) const {
-    return s1.get()->isame(s2.get());
-  }
-};
-
-struct StringDataHashCompare {
-  bool equal(const StringData *s1, const StringData *s2) const {
-    assert(s1 && s2);
-    return s1->same(s2);
-  }
-  size_t hash(const StringData *s) const {
-    assert(s);
-    return s->hash();
-  }
-};
-
-struct StringDataHashICompare {
-  bool equal(const StringData *s1, const StringData *s2) const {
-    assert(s1 && s2);
-    return s1->isame(s2);
-  }
-  size_t hash(const StringData *s) const {
-    assert(s);
-    return s->hash();
-  }
-};
-
-typedef hphp_hash_set<String, hphp_string_hash, hphp_string_isame> StringISet;
-
-template<typename T>
-class StringIMap :
-  public hphp_hash_map<String, T, hphp_string_hash, hphp_string_isame> { };
-
-typedef hphp_hash_set<String, hphp_string_hash, hphp_string_same> StringSet;
-
-template<typename T>
-class StringMap :
-  public hphp_hash_map<String, T, hphp_string_hash, hphp_string_same> { };
-
-///////////////////////////////////////////////////////////////////////////////
 // StrNR
 
-class StrNR {
+struct StrNR {
+private:
   StringData *m_px;
 
 public:
@@ -526,6 +443,7 @@ public:
   explicit StrNR(StringData *sd) : m_px(sd) {}
   explicit StrNR(const StringData *sd) : m_px(const_cast<StringData*>(sd)) {}
   explicit StrNR(const String &s) : m_px(s.get()) {} // XXX
+  explicit StrNR(const char*) = delete;
 
   ~StrNR() {
     if (debug) {
@@ -562,19 +480,24 @@ private:
 
 /**
  * A StaticString can be co-accessed by multiple threads, therefore they are
- * not thread local, and they have to be allocated BEFORE any thread starts,
- * so that they won't be garbage collected by MemoryManager. This is used by
- * constant strings, so they can be pre-allocated before request handling.
+ * not thread local.
  */
 struct StaticString : String {
-  explicit StaticString(const char* s);
-  StaticString(const char* s, int length); // binary string
-  explicit StaticString(std::string s);
+  TYPE_SCAN_IGNORE_BASES(String);
+
+  template<size_t N> explicit StaticString(const char(&s)[N]) {
+    construct(s, N - 1);
+  }
+  template<size_t N> explicit StaticString(char(&s)[N]) = delete;
+
   ~StaticString() {
     // prevent ~req::ptr from destroying contents.
     detach();
   }
-  StaticString& operator=(const StaticString &str);
+  StaticString& operator=(const StaticString& other) = delete;
+
+ private:
+  void construct(const char* s, size_t len);
 };
 
 StaticString getDataTypeString(DataType t);
@@ -583,7 +506,7 @@ StaticString getDataTypeString(DataType t);
 
 inline String::String(const StaticString& str) :
   m_str(str.m_str.get(), NoIncRef{}) {
-  assert(str.m_str->isStatic());
+  assertx(str.m_str->isStatic());
 }
 
 inline String& String::operator=(const StaticString& v) {
@@ -597,12 +520,35 @@ ALWAYS_INLINE String empty_string() {
   return String::attach(staticEmptyString());
 }
 
+ALWAYS_INLINE TypedValue empty_string_tv() {
+  return make_tv<KindOfPersistentString>(staticEmptyString());
+}
+
 //////////////////////////////////////////////////////////////////////
+
+ALWAYS_INLINE String& asStrRef(tv_lval tv) {
+  assertx(tvIsPlausible(*tv));
+  assertx(isStringType(type(tv)));
+  type(tv) = KindOfString;
+  return reinterpret_cast<String&>(val(tv).pstr);
+}
+
+ALWAYS_INLINE const String& asCStrRef(tv_rval tv) {
+  assertx(tvIsPlausible(*tv));
+  assertx(isStringType(type(tv)));
+  return reinterpret_cast<const String&>(val(tv).pstr);
+}
+
+ALWAYS_INLINE String toString(tv_rval tv) {
+  if (isStringType(type(tv))) return String{assert_not_null(val(tv).pstr)};
+  return String::attach(tvCastToStringData(*tv));
+}
 
 }
 
 namespace folly {
-template<> struct FormatValue<HPHP::String> {
+template<> class FormatValue<HPHP::String> {
+ public:
   explicit FormatValue(const HPHP::String& str) : m_val(str) {}
 
   template<typename Callback>
@@ -612,6 +558,19 @@ template<> struct FormatValue<HPHP::String> {
 
  private:
   const HPHP::String& m_val;
+};
+
+template<> class FormatValue<HPHP::StaticString> {
+ public:
+  explicit FormatValue(const HPHP::StaticString& str) : m_val(str) {}
+
+  template<typename Callback>
+  void format(FormatArg& arg, Callback& cb) const {
+    FormatValue<HPHP::StringData*>(m_val.get()).format(arg, cb);
+  }
+
+ private:
+  const HPHP::StaticString& m_val;
 };
 }
 

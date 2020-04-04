@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -51,7 +51,9 @@ namespace HPHP {
   O(REQUEST_METHOD,  RAW_STRING, getExtendedMethod) \
 /**/
 
-class FastCGISession;
+struct FastCGISession;
+
+const StaticString s_fastcgi("fastcgi");
 
 /*
  * FastCGITransport is used to communicate between a PHP (VM) thread running a
@@ -106,9 +108,9 @@ class FastCGISession;
  * onBodyComplete()       None                None (remains live)  R/W
  * onSendEndImpl()        onComplete()        None (may destroy)   R/W
  */
-struct FastCGITransport : public Transport, private Synchronizable {
+struct FastCGITransport final : Transport, private Synchronizable {
   explicit FastCGITransport(FastCGISession* session) : m_session(session) {}
-  virtual ~FastCGITransport() {}
+  ~FastCGITransport() override {}
 
   ///////////////////////////////////////////////////////////////////////////
   // FastCGISession callbacks
@@ -165,13 +167,13 @@ struct FastCGITransport : public Transport, private Synchronizable {
   void onSendEndImpl() override;
 
   // POST request data
-  const void* getPostData(int& size) override;
-  const void* getMorePostData(int& size) override;
+  const void* getPostData(size_t& size) override;
+  const void* getMorePostData(size_t& size) override;
   bool hasMorePostData() override;
 
   // HEADER data
   std::string getHeader(const char* name) override;          // unmangled name
-  void getHeaders(HeaderMap& headers) override;              // HTTP headers
+  const HeaderMap& getHeaders() override;                    // HTTP headers
   void getTransportParams(HeaderMap& serverParams) override; // FCGI parameters
 
   // Modified properties
@@ -212,8 +214,8 @@ struct FastCGITransport : public Transport, private Synchronizable {
 
   // Request parameter getters
   // These properties can be extracted directly from the request parameters
-  int getRequestSize() const override {
-    return getParamTyped<int>("CONTENT_LENGTH");
+  size_t getRequestSize() const override {
+    return getParamTyped<size_t>("CONTENT_LENGTH");
   }
 
 #define RAW_STRING const char*
@@ -228,6 +230,11 @@ struct FastCGITransport : public Transport, private Synchronizable {
 #undef STD_STRING
 #undef O
 #undef FCGI_PROTOCOL_HEADERS
+
+  // Get a description of the type of transport.
+  String describe() const override {
+    return s_fastcgi;
+  }
 
 private:
   ///////////////////////////////////////////////////////////////////////////
@@ -273,6 +280,7 @@ private:
   std::string m_serverObject;
   Method m_method{Method::Unknown};
   std::unordered_map<std::string, std::string> m_requestParams;
+  HeaderMap m_unmangledRequestParams;
 
   folly::IOBufQueue m_txBuf; // buffer for sending messages
 

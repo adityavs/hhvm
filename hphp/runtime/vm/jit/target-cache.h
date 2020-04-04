@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -80,26 +80,26 @@ struct ClassCache {
 //////////////////////////////////////////////////////////////////////
 
 struct StaticMethodCache {
-  const Func* m_func;
-  const Class* m_cls;
+  LowPtr<const Func> m_func;
+  LowPtr<const Class> m_cls;
 
   static rds::Handle alloc(const StringData* cls,
                       const StringData* meth,
                       const char* ctxName);
   static const Func* lookup(rds::Handle chand,
                             const NamedEntity* ne, const StringData* cls,
-                            const StringData* meth, TypedValue* vmfp);
+                            const StringData* meth, const Class* ctx);
 };
 
 struct StaticMethodFCache {
-  const Func* m_func;
+  LowPtr<const Func> m_func;
   int m_static;
 
   static rds::Handle alloc(const StringData* cls,
                       const StringData* meth,
                       const char* ctxName);
   static const Func* lookup(rds::Handle chand, const Class* cls,
-                            const StringData* meth, TypedValue* vmfp);
+                            const StringData* meth, const Class* ctx);
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -110,23 +110,24 @@ namespace MethodCache {
  * One-way request-local cache for object method lookups.
  *
  * MethodCache entries cache the dispatch target for an object method call.
- * Each line consists of a Class* key (stored as a uintptr_t) and a Func*.  We
- * also pack bits into the key---the low bit is set if the function is a magic
- * call (in which case the cached Func* is, and the second lowest bit is set if
- * the cached Func has AttrStatic.
+ * Each line consists of a Class* key and a Func* (stored as a uintptr_t).
+ * We also pack a bit into the value -- the low bit is set if the function is
+ * a magic call.
  */
 struct Entry {
-  uintptr_t m_key;
+  const Class* m_key;
   const Func* m_value;
 };
 
-template<bool fatal>
-void handlePrimeCacheInit(Entry* mce,
-                          ActRec* ar,
-                          StringData* name,
-                          Class* cls,
-                          Class* ctx,
-                          uintptr_t rawTarget);
+const Func* handleDynamicCall(const Class* cls,
+                              const StringData* name,
+                              const Class* ctx);
+
+const Func* handleStaticCall(const Class* cls,
+                             const StringData* name,
+                             const Class* ctx,
+                             rds::Handle mce_handle,
+                             uintptr_t mcePrime);
 
 } // namespace MethodCache
 

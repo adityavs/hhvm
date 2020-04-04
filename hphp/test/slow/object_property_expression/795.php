@@ -1,15 +1,21 @@
-<?php
-
-$b = 10;
+<?hh
 class C1 {
+  private static $b = 10;
   public function __get( $what ) {
-    global $b;
-    return $b;
+
+    return self::$b;
   }
 }
+
+
+
+
+
+<<__EntryPoint>>
+function main_795() {
+
 $c1 = new C1();
-function assign_ref(&$lv) {
-  $lv = 8;
+var_dump($c1->a);
+$c1->a = 8;
+var_dump($c1->a);
 }
-assign_ref($c1->a);
-var_dump($b);

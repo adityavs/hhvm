@@ -1,23 +1,23 @@
-<?php
+<?hh
 
 function a() {
-  $foo = array("bob", "fred", "jussi", "jouni", "egon", "marliese");
-  $bar = each($foo);
+  $foo = varray["bob", "fred", "jussi", "jouni", "egon", "marliese"];
+  $bar = each(inout $foo);
   var_dump($bar);
 }
 
 function b() {
-  $foo = array("Robert" => "Bob", "Seppo" => "Sepi");
-  $bar = each($foo);
+  $foo = darray["Robert" => "Bob", "Seppo" => "Sepi"];
+  $bar = each(inout $foo);
   var_dump($bar);
 }
 
 function c() {
-  $fruit = array("a" => "apple", "b" => "banana", "c" => "cranberry");
-  reset($fruit);
+  $fruit = darray["a" => "apple", "b" => "banana", "c" => "cranberry"];
+  reset(inout $fruit);
   $output = '';
   while (true) {
-    $item = each($fruit);
+    $item = each(inout $fruit);
     if ($item === false) break;
     $output .= $item[0];
     $output .= ": ";
@@ -27,6 +27,10 @@ function c() {
   var_dump($output);
 }
 
+
+<<__EntryPoint>>
+function main_each() {
 a();
 b();
 c();
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -15,12 +15,11 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/ext/soap/packet.h"
-
-#include <memory>
 #include "hphp/runtime/ext/soap/ext_soap.h"
-#include "hphp/util/hash-map-typedefs.h"
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/system/systemlib.h"
+#include <memory>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -32,18 +31,17 @@ static void add_soap_fault(SoapClient *client, const String& code,
 }
 
 /* SOAP client calls this function to parse response from SOAP server */
-bool parse_packet_soap(SoapClient *obj, const char *buffer,
-                       int buffer_size,
-                       std::shared_ptr<sdlFunction> fn, const char *fn_name,
-                       Variant &return_value, Array& soap_headers) {
-  char* envelope_ns = NULL;
+bool parse_packet_soap(SoapClient* obj, const char* buffer, int buffer_size,
+                       std::shared_ptr<sdlFunction> fn, const char* /*fn_name*/,
+                       Variant& return_value, Array& soap_headers) {
+  char* envelope_ns = nullptr;
   xmlNodePtr trav, env, head, body, resp, cur, fault;
   xmlAttrPtr attr;
   int param_count = 0;
   int soap_version = SOAP_1_1;
-  sdlSoapBindingFunctionHeaderMap *hdrs = NULL;
+  sdlSoapBindingFunctionHeaderMap *hdrs = nullptr;
 
-  assert(return_value.asTypedValue()->m_type == KindOfUninit);
+  assertx(return_value.asTypedValue()->m_type == KindOfUninit);
   return_value.asTypedValue()->m_type = KindOfNull;
 
   /* Response for one-way opearation */
@@ -57,16 +55,16 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
     add_soap_fault(obj, "Client", "looks like we got no XML document");
     return false;
   }
-  if (xmlGetIntSubset(response) != NULL) {
+  if (xmlGetIntSubset(response) != nullptr) {
     add_soap_fault(obj, "Client", "DTD are not supported by SOAP");
     xmlFreeDoc(response);
     return false;
   }
 
   /* Get <Envelope> element */
-  env = NULL;
+  env = nullptr;
   trav = response->children;
-  while (trav != NULL) {
+  while (trav != nullptr) {
     if (trav->type == XML_ELEMENT_NODE) {
       if (!env && node_is_equal_ex(trav,"Envelope", SOAP_1_1_ENV_NAMESPACE)) {
         env = trav;
@@ -85,7 +83,7 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
     }
     trav = trav->next;
   }
-  if (env == NULL) {
+  if (env == nullptr) {
     add_soap_fault(obj, "Client",
                    "looks like we got XML without \"Envelope\" element");
     xmlFreeDoc(response);
@@ -93,8 +91,8 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
   }
 
   attr = env->properties;
-  while (attr != NULL) {
-    if (attr->ns == NULL) {
+  while (attr != nullptr) {
+    if (attr->ns == nullptr) {
       add_soap_fault(obj, "Client",
                      "A SOAP Envelope element cannot have non Namespace "
                      "qualified attributes");
@@ -118,36 +116,36 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
   }
 
   /* Get <Header> element */
-  head = NULL;
+  head = nullptr;
   trav = env->children;
-  while (trav != NULL && trav->type != XML_ELEMENT_NODE) {
+  while (trav != nullptr && trav->type != XML_ELEMENT_NODE) {
     trav = trav->next;
   }
-  if (trav != NULL && node_is_equal_ex(trav,"Header",envelope_ns)) {
+  if (trav != nullptr && node_is_equal_ex(trav,"Header",envelope_ns)) {
     head = trav;
     trav = trav->next;
   }
 
   /* Get <Body> element */
-  body = NULL;
-  while (trav != NULL && trav->type != XML_ELEMENT_NODE) {
+  body = nullptr;
+  while (trav != nullptr && trav->type != XML_ELEMENT_NODE) {
     trav = trav->next;
   }
-  if (trav != NULL && node_is_equal_ex(trav,"Body",envelope_ns)) {
+  if (trav != nullptr && node_is_equal_ex(trav,"Body",envelope_ns)) {
     body = trav;
     trav = trav->next;
   }
-  while (trav != NULL && trav->type != XML_ELEMENT_NODE) {
+  while (trav != nullptr && trav->type != XML_ELEMENT_NODE) {
     trav = trav->next;
   }
-  if (body == NULL) {
+  if (body == nullptr) {
     add_soap_fault(obj, "Client", "Body must be present in a SOAP envelope");
     xmlFreeDoc(response);
     return false;
   }
   attr = body->properties;
-  while (attr != NULL) {
-    if (attr->ns == NULL) {
+  while (attr != nullptr) {
+    if (attr->ns == nullptr) {
       if (soap_version == SOAP_1_2) {
         add_soap_fault(obj, "Client",
                        "A SOAP Body element cannot have non Namespace "
@@ -170,17 +168,17 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
     }
     attr = attr->next;
   }
-  if (trav != NULL && soap_version == SOAP_1_2) {
+  if (trav != nullptr && soap_version == SOAP_1_2) {
     add_soap_fault(obj, "Client",
                    "A SOAP 1.2 envelope can contain only Header and Body");
     xmlFreeDoc(response);
     return false;
   }
 
-  if (head != NULL) {
+  if (head != nullptr) {
     attr = head->properties;
-    while (attr != NULL) {
-      if (attr->ns == NULL) {
+    while (attr != nullptr) {
+      if (attr->ns == nullptr) {
         add_soap_fault(obj, "Client",
                        "A SOAP Header element cannot have non Namespace "
                        "qualified attributes");
@@ -206,55 +204,58 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
 
   /* Check if <Body> contains <Fault> element */
   fault = get_node_ex(body->children,"Fault",envelope_ns);
-  if (fault != NULL) {
-    char *faultcode = NULL;
+  if (fault != nullptr) {
+    char *faultcode = nullptr;
     String faultstring, faultactor;
     Variant details;
     xmlNodePtr tmp;
 
     if (soap_version == SOAP_1_1) {
       tmp = get_node(fault->children, "faultcode");
-      if (tmp != NULL && tmp->children != NULL) {
+      if (tmp != nullptr && tmp->children != nullptr) {
         faultcode = (char*)tmp->children->content;
       }
 
       tmp = get_node(fault->children, "faultstring");
-      if (tmp != NULL && tmp->children != NULL) {
-        Variant zv = master_to_zval(get_conversion(KindOfString), tmp);
+      if (tmp != nullptr && tmp->children != nullptr) {
+        Variant zv =
+          master_to_zval(get_conversion(dataTypeToSoap(KindOfString)), tmp);
         faultstring = zv.toString();
       }
 
       tmp = get_node(fault->children, "faultactor");
-      if (tmp != NULL && tmp->children != NULL) {
-        Variant zv = master_to_zval(get_conversion(KindOfString), tmp);
+      if (tmp != nullptr && tmp->children != nullptr) {
+        Variant zv =
+          master_to_zval(get_conversion(dataTypeToSoap(KindOfString)), tmp);
         faultactor = zv.toString();
       }
 
       tmp = get_node(fault->children, "detail");
-      if (tmp != NULL) {
+      if (tmp != nullptr) {
         details = master_to_zval(encodePtr(), tmp);
       }
     } else {
       tmp = get_node(fault->children, "Code");
-      if (tmp != NULL && tmp->children != NULL) {
+      if (tmp != nullptr && tmp->children != nullptr) {
         tmp = get_node(tmp->children, "Value");
-        if (tmp != NULL && tmp->children != NULL) {
+        if (tmp != nullptr && tmp->children != nullptr) {
           faultcode = (char*)tmp->children->content;
         }
       }
 
       tmp = get_node(fault->children,"Reason");
-      if (tmp != NULL && tmp->children != NULL) {
+      if (tmp != nullptr && tmp->children != nullptr) {
         /* TODO: lang attribute */
         tmp = get_node(tmp->children,"Text");
-        if (tmp != NULL && tmp->children != NULL) {
-          Variant zv = master_to_zval(get_conversion(KindOfString), tmp);
+        if (tmp != nullptr && tmp->children != nullptr) {
+          Variant zv =
+            master_to_zval(get_conversion(dataTypeToSoap(KindOfString)), tmp);
           faultstring = zv.toString();
         }
       }
 
       tmp = get_node(fault->children,"Detail");
-      if (tmp != NULL) {
+      if (tmp != nullptr) {
         details = master_to_zval(encodePtr(), tmp);
       }
     }
@@ -270,15 +271,15 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
   /* Parse content of <Body> element */
   return_value = Array::Create();
   resp = body->children;
-  while (resp != NULL && resp->type != XML_ELEMENT_NODE) {
+  while (resp != nullptr && resp->type != XML_ELEMENT_NODE) {
     resp = resp->next;
   }
-  if (resp != NULL) {
+  if (resp != nullptr) {
     if (fn && fn->binding && fn->binding->bindingType == BINDING_SOAP) {
       /* Function has WSDL description */
       sdlParamPtr h_param, param;
-      xmlNodePtr val = NULL;
-      const char *name, *ns = NULL;
+      xmlNodePtr val = nullptr;
+      const char *name, *ns = nullptr;
       Variant tmp(Variant::NullInit{});
       sdlSoapBindingFunctionPtr fnb =
         (sdlSoapBindingFunctionPtr)fn->bindingAttributes;
@@ -322,13 +323,13 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
             } else {
               val = get_node(cur->children, (char*)param->paramName.c_str());
               if (res_count == 1) {
-                if (val == NULL) {
+                if (val == nullptr) {
                   val = get_node(cur->children, "return");
                 }
-                if (val == NULL) {
+                if (val == nullptr) {
                   val = get_node(cur->children, "result");
                 }
-                if (val == NULL && cur->children && !cur->children->next) {
+                if (val == nullptr && cur->children && !cur->children->next) {
                   val = cur->children;
                 }
               }
@@ -344,13 +345,13 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
 */
           } else {
             /* Decoding value of parameter */
-            if (param != NULL) {
+            if (param != nullptr) {
               tmp = master_to_zval(param->encode, val);
             } else {
               tmp = master_to_zval(encodePtr(), val);
             }
           }
-          return_value.toArrRef().set(String(param->paramName), tmp);
+          return_value.asArrRef().set(String(param->paramName), tmp);
           param_count++;
         }
       }
@@ -358,28 +359,33 @@ bool parse_packet_soap(SoapClient *obj, const char *buffer,
       /* Function hasn't WSDL description */
       xmlNodePtr val;
       val = resp->children;
-      while (val != NULL) {
+      while (val != nullptr) {
         while (val && val->type != XML_ELEMENT_NODE) {
           val = val->next;
         }
-        if (val != NULL) {
+        if (val != nullptr) {
           if (!node_is_equal_ex(val,"result",RPC_SOAP12_NAMESPACE)) {
             Variant tmp = master_to_zval(encodePtr(), val);
             if (val->name) {
               String key((char*)val->name, CopyString);
-              if (return_value.toCArrRef().exists(key)) {
-                auto& lval = return_value.toArrRef().lvalAt(key);
-                if (!lval.isArray()) lval = lval.toArray();
-                lval.toArrRef().append(tmp);
+              if (return_value.asCArrRef().exists(key)) {
+                auto const lval = return_value.asArrRef().lval(key);
+                if (!isArrayLikeType(lval.type())) {
+                  auto const tv = make_array_like_tv(
+                    tvCastToArrayLikeData(lval.tv())
+                  );
+                  tvMove(tv, lval);
+                }
+                asArrRef(lval).append(tmp);
               } else if (val->next && get_node(val->next, (char*)val->name)) {
                 Array arr = Array::Create();
                 arr.append(tmp);
-                return_value.toArrRef().set(key, arr);
+                return_value.asArrRef().set(key, arr);
               } else {
-                return_value.toArrRef().set(key, tmp);
+                return_value.asArrRef().set(key, tmp);
               }
             } else {
-              return_value.toArrRef().append(tmp);
+              return_value.asArrRef().append(tmp);
             }
             ++param_count;
           }

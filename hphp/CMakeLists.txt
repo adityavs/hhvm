@@ -15,19 +15,47 @@
 #   +----------------------------------------------------------------------+
 #
 
+add_definitions("-DHHVM")
+
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
   # I'm sorry, but facebook's internal repo has the top level dir stored inside
   # of hphp/, so we need to pull that one in first if it exists
   CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7 FATAL_ERROR)
-  set(HPHP_HOME ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  get_filename_component(HPHP_HOME "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+  set(ENABLE_EXTENSION_PGSQL OFF CACHE INTERNAL "" FORCE)
+  set(TP_DIR "${HPHP_HOME}/hphp/public_tld/third-party/")
+  set(TP_BUILD_DIR "${TP_DIR}")
   set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/facebook/CMake"
                         "${CMAKE_CURRENT_SOURCE_DIR}/public_tld/CMake"
                         ${CMAKE_MODULE_PATH})
+  include(HPHPCompiler)
+endif()
+
+include(HHVMProject)
+
+include(HHVMExtensionConfig)
+# Before we do anything else, we'll configure the extensions,
+# so that the defines take effect globally.
+file(GLOB subdirs ${CMAKE_CURRENT_SOURCE_DIR}/runtime/ext/*)
+foreach (dir ${subdirs})
+  if (IS_DIRECTORY ${dir})
+    if (EXISTS "${dir}/config.cmake")
+      set(HRE_CURRENT_EXT_PATH "${dir}")
+      include("${dir}/config.cmake")
+    endif()
+  endif()
+endforeach()
+HHVM_EXTENSION_RESOLVE_DEPENDENCIES()
+
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/facebook")
   include(FBTLD)
 endif()
 
 include(HPHPSetup)
-include(FollySetup)
+include(HPHPFindLibs)
+include(HHVMGenerateConfig)
+HHVM_GENERATE_CONFIG("${CMAKE_CURRENT_BINARY_DIR}/util/hphp-config.h")
+
 if (ENABLE_COTIRE)
   include(cotire)
   FIND_PATH(LIBC_INCLUDE_PATH stdlib.h)
@@ -50,6 +78,7 @@ if (ENABLE_COTIRE)
       "${LIBC_INCLUDE_PATH}/libelf.h"
       "${LIBC_INCLUDE_PATH}/elf.h"
       "${LIBC_INCLUDE_PATH}/gelf.h"
+      "${LIBC_INCLUDE_PATH}/resolv.h"
       "${ARCH_INCLUDE_PATH}"
       "${CCLIENT_INCLUDE_PATH}"
       "${JEMALLOC_INCLUDE_DIR}/jemalloc"
@@ -57,8 +86,22 @@ if (ENABLE_COTIRE)
       "${ONIGURUMA_INCLUDE_DIR}/oniguruma.h"
       "${LIBPNG_INCLUDE_DIRS}/png.h"
       "${LDAP_INCLUDE_DIR}/ldap.h"
+      "${LIBSQLITE3_INCLUDE_DIR}/sqlite3ext.h"
       "${CMAKE_SOURCE_DIR}"
       "${CMAKE_BINARY_DIR}")
+
+  # XED headers need to be wrapped in extern "C"
+  if (ENABLE_XED)
+    if (LibXed_INCLUDE_DIR)
+      set_property(DIRECTORY
+          APPEND PROPERTY COTIRE_PREFIX_HEADER_IGNORE_PATH
+            "${LibXed_INCLUDE_DIR}")
+    else()
+      set_property(DIRECTORY
+          APPEND PROPERTY COTIRE_PREFIX_HEADER_IGNORE_PATH
+            "${TP_DIR}/xed/xed/build/include/xed")
+    endif()
+  endif()
 endif()
 
 # Only thing to do directly in tools is install this one script. Tools also has
@@ -69,12 +112,15 @@ install(PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/tools/oss-repo-mode
   DESTINATION bin
   COMPONENT dev)
 
-add_definitions("-DHHVM")
 add_definitions("-DUSE_CMAKE")
 
 enable_language(ASM)
 
-add_subdirectory(tools/bootstrap)
+link_libraries(folly)
+if (NOT PCRE_LIBRARY)
+  link_libraries(pcre)
+endif()
+
 add_subdirectory(tools/hfsort)
 add_subdirectory(tools/version)
 add_subdirectory(tools/tc-print)
@@ -87,10 +133,13 @@ add_subdirectory(parser)
 
 add_subdirectory(runtime)
 add_subdirectory(runtime/ext)
-add_subdirectory(runtime/ext_hhvm)
-if (ENABLE_ZEND_COMPAT)
-  add_subdirectory(runtime/ext_zend_compat)
-endif()
+
+# The runtime/test binary require GTest and GMock to be installed globally
+option(RUNTIME_TEST_BIN "Create the HHVM runtime/test binary" OFF)
+if (RUNTIME_TEST_BIN)
+  add_subdirectory(runtime/test)
+endif ()
+
 add_subdirectory(system)
 add_subdirectory(util)
 add_subdirectory(ppc64-asm)
@@ -105,6 +154,8 @@ if (TEST_BIN)
 endif ()
 
 add_subdirectory(tools/gdb)
+
+include(test/dso_test/dso_test.cmake)
 
 # Keep this last
 add_subdirectory(tools/hphpize)

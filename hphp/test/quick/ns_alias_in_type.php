@@ -1,4 +1,4 @@
-<?php
+<?hh
 namespace A;
 use D;
 interface I {
@@ -11,4 +11,6 @@ use A\I;
 class E implements I {
   public function foo(D $param) {}
 }
+<<__EntryPoint>> function main(): void {
 echo "ok";
+}

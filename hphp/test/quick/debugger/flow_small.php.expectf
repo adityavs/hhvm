@@ -128,6 +128,24 @@ $this = cls Object
 )
 
 step
+Break at cls::pri() on line 19 of %s/flow_small.php
+  18     $y = $x + 3; $z = $x * 5;
+  19*    foo($y, $z);
+  20     if ($x == 3) {
+
+step
+Break at cls::pri() on line 19 of %s/flow_small.php
+  18     $y = $x + 3; $z = $x * 5;
+  19*    foo($y, $z);
+  20     if ($x == 3) {
+
+step
+Break at cls::pri() on line 19 of %s/flow_small.php
+  18     $y = $x + 3; $z = $x * 5;
+  19*    foo($y, $z);
+  20     if ($x == 3) {
+
+step
 Break at foo() on line 6 of %s/flow_small.php
    5 function foo($a, $b) {
    6*  $c = $b - $a;
@@ -342,13 +360,5 @@ continue
 foo:25
 out pri:7
 out pub:7
-Breakpoint 1 reached at test() on line 62 of %s/flow_small.php
-  61   $obj = new cls();
-  62*  $obj->pub($x);
-  63   error_log("test done ".$x);
-
-break clear all
-All breakpoints are cleared.
-continue
 test done 7
 quit

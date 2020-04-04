@@ -1,11 +1,13 @@
 #include "hphp/runtime/ext/icu/ext_icu_break_iterator.h"
 
+using icu::BreakIterator;
+using icu::RuleBasedBreakIterator;
+
 namespace HPHP { namespace Intl {
 
 const StaticString
   s_IntlBreakIterator("IntlBreakIterator"),
-  s_IntlCodePointBreakIterator("IntlCodePointBreakIterator"),
-  s_DONE("DONE");
+  s_IntlCodePointBreakIterator("IntlCodePointBreakIterator");
 
 Class* IntlBreakIterator::c_IntlBreakIterator = nullptr;
 Class* IntlBreakIterator::c_IntlCodePointBreakIterator = nullptr;
@@ -24,7 +26,7 @@ inline Object ibi_create(const char *funcname,
                                                      UErrorCode&),
                          const String& locale) {
   UErrorCode error = U_ZERO_ERROR;
-  auto bi = func(Locale::createFromName(locale.c_str()), error);
+  auto bi = func(icu::Locale::createFromName(locale.c_str()), error);
   if (U_FAILURE(error)) {
     s_intl_error->setError(error, "%s: error creating BreakIterator", funcname);
     return Object();
@@ -132,8 +134,8 @@ static Variant HHVM_METHOD(IntlBreakIterator, getLocale, int64_t locale_type) {
   return String(locale.getName(), CopyString);
 }
 
-static Object HHVM_METHOD(IntlBreakIterator, getPartsIterator,
-                          const String& key_type) {
+static Object
+HHVM_METHOD(IntlBreakIterator, getPartsIterator, const String& /*key_type*/) {
   throw_not_implemented("IntlBreakIterator::getPartsIterator");
 }
 
@@ -392,37 +394,29 @@ void IntlExtension::initBreakIterator() {
 
   HHVM_ME(IntlPartsIterator, getBreakIterator);
 
-  Native::registerClassConstant<KindOfInt64>(s_IntlBreakIterator.get(),
-                                             s_DONE.get(),
-                                             icu::BreakIterator::DONE);
+  HHVM_RCC_INT(IntlBreakIterator, DONE, icu::BreakIterator::DONE);
 
-#define BI_CONST(name) \
-  Native::registerClassConstant<KindOfInt64>(s_IntlBreakIterator.get(), \
-                                             makeStaticString(#name), \
-                                             UBRK_##name);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_NONE, UBRK_WORD_NONE);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_NONE_LIMIT, UBRK_WORD_NONE_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_NUMBER, UBRK_WORD_NUMBER);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_NUMBER_LIMIT, UBRK_WORD_NUMBER_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_LETTER, UBRK_WORD_LETTER);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_LETTER_LIMIT, UBRK_WORD_LETTER_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_KANA, UBRK_WORD_KANA);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_KANA_LIMIT, UBRK_WORD_KANA_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_IDEO, UBRK_WORD_IDEO);
+  HHVM_RCC_INT(IntlBreakIterator, WORD_IDEO_LIMIT, UBRK_WORD_IDEO_LIMIT);
 
-  BI_CONST(WORD_NONE);
-  BI_CONST(WORD_NONE_LIMIT);
-  BI_CONST(WORD_NUMBER);
-  BI_CONST(WORD_NUMBER_LIMIT);
-  BI_CONST(WORD_LETTER);
-  BI_CONST(WORD_LETTER_LIMIT);
-  BI_CONST(WORD_KANA);
-  BI_CONST(WORD_KANA_LIMIT);
-  BI_CONST(WORD_IDEO);
-  BI_CONST(WORD_IDEO_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, LINE_SOFT, UBRK_LINE_SOFT);
+  HHVM_RCC_INT(IntlBreakIterator, LINE_SOFT_LIMIT, UBRK_LINE_SOFT_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, LINE_HARD, UBRK_LINE_HARD);
+  HHVM_RCC_INT(IntlBreakIterator, LINE_HARD_LIMIT, UBRK_LINE_HARD_LIMIT);
 
-  BI_CONST(LINE_SOFT);
-  BI_CONST(LINE_SOFT_LIMIT);
-  BI_CONST(LINE_HARD);
-  BI_CONST(LINE_HARD_LIMIT);
-
-  BI_CONST(SENTENCE_TERM);
-  BI_CONST(SENTENCE_TERM_LIMIT);
-  BI_CONST(SENTENCE_SEP);
-  BI_CONST(SENTENCE_SEP_LIMIT);
-
-#undef BI_CONST
+  HHVM_RCC_INT(IntlBreakIterator, SENTENCE_TERM, UBRK_SENTENCE_TERM);
+  HHVM_RCC_INT(IntlBreakIterator, SENTENCE_TERM_LIMIT,
+               UBRK_SENTENCE_TERM_LIMIT);
+  HHVM_RCC_INT(IntlBreakIterator, SENTENCE_SEP, UBRK_SENTENCE_SEP);
+  HHVM_RCC_INT(IntlBreakIterator, SENTENCE_SEP_LIMIT, UBRK_SENTENCE_SEP_LIMIT);
 
   Native::registerNativeDataInfo<IntlBreakIterator>(s_IntlBreakIterator.get());
 

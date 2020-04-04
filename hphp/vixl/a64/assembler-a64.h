@@ -103,6 +103,11 @@ class CPURegister {
     return size_ == 64;
   }
 
+  bool Is128Bits() const {
+    assert(IsValid());
+    return size_ == 128;
+  }
+
   bool IsValid() const {
     return IsValidRegister() || IsValidFPRegister();
   }
@@ -115,8 +120,9 @@ class CPURegister {
 
   bool IsValidFPRegister() const {
     return IsFPRegister() &&
-           ((size_ == kSRegSize) || (size_ == kDRegSize)) &&
-           (code_ < kNumberOfFPRegisters);
+           (code_ < kNumberOfFPRegisters) &&
+           ((size_ == kSRegSize) || (size_ == kDRegSize) ||
+            (size_ == kVRegSize));
   }
 
   bool Is(const CPURegister& other) const {
@@ -212,10 +218,16 @@ class FPRegister : public CPURegister {
   static const FPRegister dregisters[];
 };
 
+
+// For SIMD instructions
+typedef FPRegister VRegister;
+
+
 // No*Reg is used to indicate an unused argument, or an error case. Note that
 // these all compare equal (using the Is() method). The Register and FPRegister
 // variants are provided for convenience.
 const Register NoReg;
+const VRegister NoVReg;
 const FPRegister NoFPReg;
 const CPURegister NoCPUReg;
 
@@ -231,7 +243,8 @@ const Register sp(kSPRegInternalCode, kXRegSize);
 
 #define DEFINE_FPREGISTERS(N)  \
 const FPRegister s##N(N, kSRegSize);  \
-const FPRegister d##N(N, kDRegSize);
+const FPRegister d##N(N, kDRegSize);  \
+const FPRegister v##N(N, kVRegSize);
 REGISTER_CODE_LIST(DEFINE_FPREGISTERS)
 #undef DEFINE_FPREGISTERS
 
@@ -545,10 +558,23 @@ class Label {
  private:
   // Indicates if the label has been bound, ie its location is fixed.
   bool is_bound_;
+
   // Branches instructions branching to this label form a chained list, with
   // their offset indicating where the next instruction is located.
   // link_ points to the latest branch instruction generated branching to this
   // branch.
+
+  // link_ and target_ will hold virtual addresses if the CodeBlock is
+  // configured as such. When binding a Label, the physical instructions will
+  // be updated with targets computed with the virtual address of the linked
+  // instructions and the virtual target_. This will cause calls to
+  // Instruction::ImmPCOffsetTarget() for the physical instruction to return
+  // target in the weeds, and so the code in relocation-arm.cpp takes this
+  // into account. Why the madness? Because translations in high memory of
+  // thread local caches will have branches distances as if they were in
+  // low memory. Ideally, this means we're very likely to have an identically-
+  // sized translation once we relocate into the code cache.
+
   // If link_ is not nullptr, the label has been linked to.
   HPHP::CodeAddress link_;
   // The label location.
@@ -620,12 +646,12 @@ class Assembler {
     return UpdateAndGetByteOffsetTo(label) >> kInstructionSizeLog2;
   }
 
+  HPHP::CodeBlock& code() const { return cb_; }
+
+  HPHP::jit::TCA base() const { return cb_.base(); }
+
   HPHP::jit::TCA frontier() const {
     return cb_.frontier();
-  }
-
-  bool isFrontierAligned(size_t align) const {
-    return cb_.isFrontierAligned(align);
   }
 
   // Instruction set functions.
@@ -691,6 +717,12 @@ class Assembler {
 
   // Calculate the address of a PC offset.
   void adr(const Register& rd, int imm21);
+
+  // Calculate the page address of a label.
+  void adrp(const Register& rd, Label* label);
+
+  // Calculate the page address of a PC offset.
+  void adrp(const Register& rd, int imm21);
 
   // Data Processing instructions.
   // Add.
@@ -1089,11 +1121,29 @@ class Assembler {
   void stnp(const CPURegister& rt, const CPURegister& rt2,
             const MemOperand& dst);
 
+  // Load Add - Large System Extension
+  void ldaddal(const Register& rs, const Register& rt, const MemOperand& src);
+
   // Load literal to register.
   void ldr(const Register& rt, uint64_t imm);
 
   // Load literal to FP register.
   void ldr(const FPRegister& ft, double imm);
+
+  // Load exclusive register.
+  void ldxr(const Register& rt, const MemOperand& src);
+
+  // Store exclusive register.
+  void stxr(const Register& rs, const Register& rt, const MemOperand& dst);
+
+  // One-element structure load to one register.
+  void ld1(const VRegister& vt, const MemOperand& src);
+
+  // One-element structure store from one register.
+  void st1(const VRegister& vt, const MemOperand& src);
+
+  // Vector move from Vreg to Vreg.
+  void mov(const VRegister& vd, const VRegister& vs);
 
   // Move instructions. The default shift of -1 indicates that the move
   // instruction will calculate an appropriate 16-bit immediate and left shift
@@ -1162,6 +1212,12 @@ class Assembler {
   // Move FP register to FP register.
   void fmov(FPRegister fd, FPRegister fn);
 
+  // Move register to FP register 1
+  void fmov(const FPRegister& fd, int index, const Register& rn);
+
+  // Move FP register 1 to register
+  void fmov(const Register& rd, const FPRegister& fn, int index);
+
   // FP add.
   void fadd(const FPRegister& fd, const FPRegister& fn, const FPRegister& fm);
 
@@ -1197,6 +1253,12 @@ class Assembler {
 
   // FP round to integer (nearest with ties to even).
   void frintn(const FPRegister& fd, const FPRegister& fn);
+
+  // FP round to integer (towards -Inf)
+  void frintm(const FPRegister& fd, const FPRegister& fn);
+
+  // FP round to integer (towards +Inf)
+  void frintp(const FPRegister& fd, const FPRegister& fn);
 
   // FP round to integer (towards zero).
   void frintz(const FPRegister& fd, const FPRegister& fn);
@@ -1298,6 +1360,12 @@ class Assembler {
     return rm.code() << Rm_offset;
   }
 
+  static Instr RmNot31(CPURegister rm) {
+    assert(rm.code() != kSPRegInternalCode);
+    assert(!rm.IsZero());
+    return Rm(rm);
+  }
+
   static Instr Ra(CPURegister ra) {
     assert(ra.code() != kSPRegInternalCode);
     return ra.code() << Ra_offset;
@@ -1311,6 +1379,11 @@ class Assembler {
   static Instr Rt2(CPURegister rt2) {
     assert(rt2.code() != kSPRegInternalCode);
     return rt2.code() << Rt2_offset;
+  }
+
+  static Instr Rs(CPURegister rs) {
+    assert(rs.code() != kSPRegInternalCode);
+    return rs.code() << Rs_offset;
   }
 
   // These encoding functions allow the stack pointer to be encoded, and
@@ -1546,6 +1619,12 @@ class Assembler {
     return scale << FPScale_offset;
   }
 
+  // Instruction bits for vector format in load and store operations.
+  static Instr LSVFormat(VRegister /*vd*/) {
+    // Note: vasm opcodes need only 2 lanes (64b each)
+    return LS_NEON_2D;
+  }
+
   // Size of the code generated in bytes
   uint64_t SizeOfCodeGenerated() const {
     assert(cb_.available() > 0);
@@ -1603,6 +1682,11 @@ class Assembler {
   void LoadStore(const CPURegister& rt,
                  const MemOperand& addr,
                  LoadStoreOp op);
+  void LoadStoreStruct(const VRegister& vt,
+                       const MemOperand& addr,
+                       NEONLoadStoreMultiStructOp op);
+  Instr LoadStoreStructAddrModeField(const MemOperand& addr);
+
   static bool IsImmLSUnscaled(ptrdiff_t offset);
   static bool IsImmLSScaled(ptrdiff_t offset, LSDataSize size);
 
@@ -1723,11 +1807,10 @@ class Assembler {
 
   // Emit the instruction at pc_.
   void Emit(Instr instruction) {
-    assert(cb_.canEmit(sizeof(instruction)));
     assert(sizeof(instruction) == sizeof(uint32_t));
     CheckBufferSpace();
 
-#ifdef DEBUG
+#ifndef NDEBUG
     finalized_ = false;
 #endif
 
@@ -1736,10 +1819,9 @@ class Assembler {
 
   // Emit data inline in the instruction stream.
   void EmitData(void const * data, unsigned size) {
-    assert(cb_.canEmit(size));
     CheckBufferSpace();
 
-#ifdef DEBUG
+#ifndef NDEBUG
     finalized_ = false;
 #endif
 
@@ -1749,7 +1831,6 @@ class Assembler {
   }
 
   inline void CheckBufferSpace() {
-    assert(cb_.available() > 0);
     if (cb_.frontier() > next_literal_pool_check_) {
       CheckLiteralPool();
     }
@@ -1764,7 +1845,7 @@ class Assembler {
 
   friend class BlockLiteralPoolScope;
 
-#ifdef DEBUG
+#ifndef NDEBUG
   bool finalized_;
 #endif
 };

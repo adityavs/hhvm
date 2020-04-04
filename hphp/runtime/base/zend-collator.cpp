@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -15,13 +15,13 @@
    +----------------------------------------------------------------------+
 */
 #include "hphp/runtime/base/zend-collator.h"
-#include "hphp/runtime/base/zend-strtod.h"
 #include "hphp/runtime/base/intl-convert.h"
-#include "hphp/runtime/base/type-conversions.h"
+#include "hphp/runtime/base/tv-type.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/comparisons.h"
+#include "hphp/zend/zend-strtod.h"
 
 namespace HPHP {
 
@@ -84,8 +84,14 @@ static double collator_u_strtod(const UChar *nptr, UChar **endptr) {
     if (length < (int)sizeof(buf)) {
       numbuf = buf;
     } else {
-      numbuf = (char *) req::malloc(length + 1);
+      numbuf = (char *) req::malloc_noptrs(length + 1);
     }
+
+    SCOPE_EXIT {
+      if (numbuf != buf) {
+        req::free(numbuf);
+      }
+    };
 
     bufpos = numbuf;
 
@@ -95,10 +101,6 @@ static double collator_u_strtod(const UChar *nptr, UChar **endptr) {
 
     *bufpos = '\0';
     value = zend_strtod(numbuf, nullptr);
-
-    if (numbuf != buf) {
-      req::free(numbuf);
-    }
 
     if (endptr != nullptr) {
       *endptr = (UChar *)u;
@@ -248,7 +250,7 @@ static DataType collator_is_numeric(UChar *str, int length, int64_t *lval,
     end_ptr_double = nullptr;
   } else {
     if (end_ptr_double == str+length) { /* floating point string */
-      if (!finite(local_dval)) {
+      if (!std::isfinite(local_dval)) {
         /* "inf","nan" and maybe other weird ones */
         return KindOfNull;
       }
@@ -287,7 +289,7 @@ static String intl_convert_str_utf8_to_utf16(const String& utf8_str,
                              utf8_str.data(), utf8_str.length(),
                              status);
   if (U_FAILURE(*status)) {
-    return (const char *)(L"");
+    return empty_string();
   }
   return String((char*)ustr, UBYTES(ustr_len), AttachString);
 }
@@ -339,7 +341,7 @@ static Variant collator_convert_object_to_string(const Variant& obj) {
   String str;
   try {
     str = obj.toString();
-  } catch (Exception &e) {
+  } catch (Exception& e) {
     return obj;
   }
   UErrorCode status;
@@ -355,13 +357,11 @@ static Variant collator_convert_object_to_string(const Variant& obj) {
 static void collator_convert_array_from_utf16_to_utf8(Array &array,
                                                       UErrorCode * status) {
   for (ArrayIter iter(array); iter; ++iter) {
-    const Variant& value = iter.secondRef();
+    auto const tv = iter.secondVal();
     /* Process string values only. */
-    if (!value.isString()) continue;
-    String str = intl_convert_str_utf16_to_utf8(value.toString(), status);
-    if (U_FAILURE(*status)) {
-      return;
-    }
+    if (!isStringType(type(tv))) continue;
+    String str = intl_convert_str_utf16_to_utf8(StrNR(val(tv).pstr), status);
+    if (U_FAILURE(*status)) return;
     /* Update current value with the converted value. */
     Variant key = iter.first();
     array.set(key, str);
@@ -371,13 +371,11 @@ static void collator_convert_array_from_utf16_to_utf8(Array &array,
 static void collator_convert_array_from_utf8_to_utf16(Array &array,
                                                       UErrorCode * status) {
   for (ArrayIter iter(array); iter; ++iter) {
-    const Variant& value = iter.secondRef();
+    auto const tv = iter.secondVal();
     /* Process string values only. */
-    if (!value.isString()) continue;
-    String str = intl_convert_str_utf8_to_utf16(value.toString(), status);
-    if (U_FAILURE(*status)) {
-      return;
-    }
+    if (!isStringType(type(tv))) continue;
+    String str = intl_convert_str_utf8_to_utf16(StrNR(val(tv).pstr), status);
+    if (U_FAILURE(*status)) return;
     /* Update current value with the converted value. */
     Variant key = iter.first();
     array.set(key, str);
@@ -418,7 +416,7 @@ static int collator_regular_compare_function(const Variant& v1, const Variant& v
       num2 = collator_convert_string_to_number_if_possible(str2);
     }
     if (same(num1, false) || same(num2, false)) {
-      assert(data);
+      assertx(data);
       int ret = ucol_strcoll((const UCollator *)data,
                              (UChar*)(str1.toString().data()),
                              UCHARS(str1.toString().length()),
@@ -470,9 +468,9 @@ static int collator_regular_compare_descending(const Variant& v1, const Variant&
   return collator_regular_compare_function(v1, v2, data, false);
 }
 
-static int collator_numeric_compare_function(const Variant& v1, const Variant& v2,
-                                             const void *data,
-                                             bool ascending) {
+static int
+collator_numeric_compare_function(const Variant& v1, const Variant& v2,
+                                  const void* /*data*/, bool ascending) {
   Variant num1;
   Variant num2;
 
@@ -509,7 +507,7 @@ static int collator_numeric_compare_descending(const Variant& v1, const Variant&
 static int collator_string_compare_function(const Variant& v1, const Variant& v2,
                                             const void *data,
                                             bool ascending) {
-  assert(data);
+  assertx(data);
   String str1;
   if (v1.isString()) {
     str1 = v1.toString();
@@ -554,7 +552,7 @@ static int collator_string_compare_descending(const Variant& v1, const Variant& 
 static bool collator_sort_internal(bool renumber, Variant &array,
                                    int sort_flags, bool ascending, bool byKey,
                                    UCollator *coll, Intl::IntlError *errcode) {
-  assert(coll);
+  assertx(coll);
   errcode->clearError();
   Array temp = array.toArray();
   Array::PFUNC_CMP cmp_func;
@@ -594,13 +592,17 @@ static bool collator_sort_internal(bool renumber, Variant &array,
     errcode->setError(error, "Error converting array from UTF-16 to UTF-8");
     return false;
   }
-  array = temp;
+  if (renumber) {
+    array = temp.toVArray();
+  } else {
+    array = temp.toDArray();
+  }
   return true;
 }
 
 bool collator_sort(Variant &array, int sort_flags, bool ascending,
                    UCollator *coll, Intl::IntlError *errcode) {
-  assert(coll);
+  assertx(coll);
   bool byKey = false;
   bool ret = collator_sort_internal(true, array, sort_flags, ascending, byKey,
                                     coll, errcode);
@@ -609,17 +611,8 @@ bool collator_sort(Variant &array, int sort_flags, bool ascending,
 
 bool collator_asort(Variant &array, int sort_flags, bool ascending,
                     UCollator *coll, Intl::IntlError *errcode) {
-  assert(coll);
+  assertx(coll);
   bool byKey = false;
-  bool ret = collator_sort_internal(false, array, sort_flags, ascending, byKey,
-                                    coll, errcode);
-  return ret;
-}
-
-bool collator_ksort(Variant &array, int sort_flags, bool ascending,
-                    UCollator *coll, Intl::IntlError *errcode) {
-  assert(coll);
-  bool byKey = true;
   bool ret = collator_sort_internal(false, array, sort_flags, ascending, byKey,
                                     coll, errcode);
   return ret;

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // with type hints
 class C8 {
@@ -6,5 +6,9 @@ class C8 {
     var_dump($a0);
   }
 }
+
+<<__EntryPoint>>
+function main_769() {
 $c = new C8;
-$c(array(1, 2, 3));
+$c(varray[1, 2, 3]);
+}

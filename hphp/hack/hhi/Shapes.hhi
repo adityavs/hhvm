@@ -1,13 +1,14 @@
-<?hh // decl
+<?hh
 /**
  * Copyright (c) 2014, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  */
+
+namespace HH {
 
 abstract final class Shapes {
 
@@ -30,23 +31,54 @@ abstract final class Shapes {
  *   ...
  * )
  */
-  public static function idx(
-    shape() $shape,
+  <<__Rx>>
+  public static function idx<T as shape(...)>(
+    T $shape,
     arraykey $index,
     $default = null,
-  ) {}
+  );
 
   /**
    * Check if a field in shape exists.
    * Similar to array_key_exists, but for shapes.
    */
-  public static function keyExists(shape() $shape, arraykey $index): bool {}
+  <<__Rx>>
+  public static function keyExists<T as shape(...)>(
+    T $shape,
+    arraykey $index
+  ): bool;
 
   /**
-   * Returns a $shape with $index field removed. Currently allowed only for
-   * local variables.
+   * Removes the $index field from the $shape (passed in as an inout argument).
+   * As with all inout arguments, it can only be used with local variables.
    */
-  public static function removeKey(shape() $shape, arraykey $index): void {}
+  <<__Rx>>
+  public static function removeKey<T as shape(...)>(
+    inout T $shape,
+    arraykey $index
+  ): void;
 
-  public static function toArray(shape() $shape): array<arraykey, mixed>;
+  <<__Rx>>
+  public static function toArray<T as shape(...)>(
+    T $shape
+  ): darray<arraykey, mixed>;
+
+  <<__Rx>>
+  public static function toDict<T as shape(...)>(
+    T $shape
+  ): dict<arraykey, mixed>;
+
+  /**
+   * Returns the value of the field $index of $shape,
+   * throws if the field is missing.
+   * Use this to access optional fields on shapes.
+   */
+  <<__Rx>>
+  public static function at<T as shape(...)>(
+    T $shape,
+    arraykey $index,
+  );
+
 }
+
+} // namespace HH

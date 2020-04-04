@@ -2,7 +2,7 @@
   +----------------------------------------------------------------------+
   | HipHop for PHP                                                       |
   +----------------------------------------------------------------------+
-  | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+  | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
   | Copyright (c) 1997-2014 The PHP Group                                |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
@@ -46,7 +46,7 @@ unsigned int UTF8To16Decoder::getNextChar() {
   int pos = m_cursor;
   unsigned int this_char = 0;
 
-  assert(pos <= m_strlen);
+  assertx(pos <= m_strlen);
 
   if (!CHECK_LEN(pos, 1))
     MB_FAILURE(pos, 1);

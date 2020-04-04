@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -29,39 +29,21 @@ bool HHVM_FUNCTION(function_exists, const String& function_name,
   bool autoload = true);
 Variant HHVM_FUNCTION(call_user_func, const Variant& function,
   const Array& params = null_array);
-Variant HHVM_FUNCTION(forward_static_call_array, const Variant& function,
-  const Array& params);
-Variant HHVM_FUNCTION(forward_static_call, const Variant& function,
-  const Array& params = null_array);
-String HHVM_FUNCTION(create_function, const String& args, const String& code);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant HHVM_FUNCTION(func_get_arg, int arg_num);
-// __SystemLib\\func_get_arg_sl
-Variant HHVM_FUNCTION(SystemLib_func_get_arg_sl, int arg_num);
-
-Variant HHVM_FUNCTION(func_get_args);
-// __SystemLib\\func_get_args_sl
-Variant HHVM_FUNCTION(SystemLib_func_get_args_sl);
 Array hhvm_get_frame_args(const ActRec* ar, int offset);
-
-/**
- * HipHop extension that allows requesting only a subset of function arguments.
- * Exposed as __SystemLib\func_slice_args.
- */
-Variant HHVM_FUNCTION(SystemLib_func_slice_args, int offset);
-
-int64_t HHVM_FUNCTION(func_num_args);
-// __SystemLib\\func_num_arg_
-int64_t HHVM_FUNCTION(SystemLib_func_num_arg_);
 
 ///////////////////////////////////////////////////////////////////////////////
 
 void HHVM_FUNCTION(register_postsend_function,
-  const Variant& function, const Array& params = null_array);
+  const Variant& function);
 void HHVM_FUNCTION(register_shutdown_function,
-  const Variant& function, const Array& params = null_array);
+  const Variant& function);
+
+///////////////////////////////////////////////////////////////////////////////
+
+String HHVM_FUNCTION(HH_fun_get_function, TypedValue v);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

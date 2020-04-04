@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -13,81 +13,37 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
-#include "hphp/runtime/base/req-containers.h"
+#include "hphp/runtime/base/apc-gc-manager.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
 #include "hphp/runtime/base/memory-manager-defs.h"
 #include "hphp/runtime/base/heap-scan.h"
-#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/request-info.h"
 #include "hphp/runtime/base/heap-graph.h"
+#include "hphp/runtime/base/weakref-data.h"
+#include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/alloc.h"
+#include "hphp/util/cycles.h"
+#include "hphp/util/ptr-map.h"
+#include "hphp/util/rds-local.h"
+#include "hphp/util/struct-log.h"
+#include "hphp/util/timer.h"
 #include "hphp/util/trace.h"
+#include "hphp/util/type-scan.h"
 
 #include <algorithm>
+#include <boost/dynamic_bitset.hpp>
+#include <folly/portability/Unistd.h>
+#include <folly/Range.h>
 #include <iterator>
 #include <vector>
-#include <folly/Range.h>
 
 namespace HPHP {
 TRACE_SET_MOD(gc);
-using HK = HeaderKind;
+
+RDS_LOCAL_NO_CHECK(RequestLocalGCData, rl_gcdata);
+IMPLEMENT_RDS_LOCAL_HOTVALUE(bool, t_eager_gc);
 
 namespace {
-
-// information about heap objects, indexed by valid object starts.
-struct PtrMap {
-  void insert(const Header* h) {
-    assert(!sorted_);
-    regions_.emplace_back(h, h->size());
-  }
-  const Header* header(const void* p) const {
-    assert(sorted_);
-    // Find the first region which begins beyond p.
-    auto it =
-      std::upper_bound(
-        regions_.begin(),
-        regions_.end(),
-        p,
-        [](const void* p,
-           const std::pair<const Header*, std::size_t>& region) {
-          return p < region.first;
-        }
-      );
-    // If its the first region, p is before any region, so there's no
-    // header. Otherwise, backup to the previous region.
-    if (it == regions_.begin()) return nullptr;
-    --it;
-    // p can only potentially point within this previous region, so check that.
-    return (uintptr_t(p) < uintptr_t(it->first) + it->second) ?
-      it->first : nullptr;
-  }
-  bool isHeader(const void* p) const {
-    auto h = header(p);
-    return h && h == p;
-  }
-
-  void prepare() {
-    assert(!sorted_);
-    std::sort(regions_.begin(), regions_.end());
-    assert(sanityCheck());
-    sorted_ = true;
-  }
-private:
-  bool sanityCheck() const {
-    // Verify that all the regions are in increasing and non-overlapping order.
-    void* last = nullptr;
-    for (const auto& region : regions_) {
-      if (!last || last <= region.first) {
-        last = (void*)(uintptr_t(region.first) + region.second);
-      } else {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  std::vector<std::pair<const Header*, std::size_t>> regions_;
-  bool sorted_ = false;
-};
 
 struct Counter {
   size_t count{0};
@@ -98,563 +54,703 @@ struct Counter {
   }
 };
 
-struct Marker {
-  explicit Marker() {}
+constexpr auto MinMark = GCBits(1);
+constexpr auto MaxMark = GCBits(3);
+
+/*
+ * GC Runtime Options
+ *
+ * Eval.EnableGC - Default value of the per-request MemoryManager::m_gc_enabled
+ * flag. This flag can be dynamically set/cleared by PHP via
+ * ini_set("zend.enable_gc"). In turn, m_gc_enabled enables automatic background
+ * garbage collection. Regardless of its value, PHP can call gc_collect_cycles()
+ * for manual gc.
+ *
+ * Eval.EagerGC - If set, trigger collection after every allocation, in debug
+ * builds. Has no effect in opt builds or when m_gc_enabled == false.
+ *
+ * Eval.FilterGCPoints - If true, use a bloom filter to only do an eager
+ * collection once per unique VMPC. This makes eager mode fast enough to be
+ * usable for unit tests, and almost tolerable for large integration tests.
+ *
+ * Eval.GCSampleRate - per *request* sample rate to enable GC logging.
+ * If coinflip is true, every GC for the current request will be logged.
+ * Note this is not the per-collection sample rate: we do one coinflip per
+ * request.
+ *
+ * Eval.GCMinTrigger - Minimum heap growth, in bytes since the last collection,
+ * before triggering the next collection. See MemoryManager::updateNextGc().
+ *
+ * Eval.GCTriggerPct - Minimum heap growth, as a percent of remaining heap
+ * space, before triggering the next collection. see updateNextGC().
+ *
+ * Eval.Quarantine - If true, objects swept by GC will be trash filled and
+ * leaked, never reallocated.
+ *
+ * Experimental options
+ *
+ * Eval.GCForAPC - enable whole-process APC collection. See APCGCManager.
+ * Eval.GCForAPCTrigger - trigger threshold; see APCGCManager.
+ *
+ * Eval.TwoPhaseGC - perform tracing in two phases, the second of which
+ * must only encounter exactly-scanned pointers, to enable object copying.
+ */
+
+/*
+ * Collector state needed during a single whole-heap mark-sweep collection.
+ */
+struct Collector {
+  explicit Collector(HeapImpl& heap, APCGCManager* apcgc, GCBits mark_version)
+    : heap_(heap), mark_version_{mark_version}, apcgc_(apcgc)
+  {}
+  template<bool apcgc> void collect();
   void init();
-  void trace();
   void sweep();
-
-  // scanners can tell us where the pointers are seated.
-  void where(const char* area) {}
-
-  // mark exact pointers
-  void operator()(const StringData*);
-  void operator()(const ArrayData*);
-  void operator()(const ObjectData*);
-  void operator()(const ResourceData*);
-  void operator()(const ResourceHdr*);
-  void operator()(const RefData*);
-  void operator()(const TypedValue&);
-  void operator()(const TypedValueAux& v) { (*this)(*(const TypedValue*)&v); }
-  void operator()(const NameValueTable*);
-  void operator()(const VarEnv*);
-  void operator()(const RequestEventHandler*);
+  template<bool apcgc> void traceAll();
+  template<bool apcgc> void traceConservative();
+  template<bool apcgc> void traceExact();
 
   // mark ambiguous pointers in the range [start,start+len)
-  void operator()(const void* start, size_t len);
+  template<bool apcgc>
+  void conservativeScan(const void* start, size_t len);
 
-  // classes containing exact pointers
-  void operator()(const String&);
-  void operator()(const Array&);
-  void operator()(const ArrayNoDtor&);
-  void operator()(const Object&);
-  void operator()(const Resource&);
-  void operator()(const Variant&);
-  void operator()(const StringBuffer&);
-  void operator()(const NameValueTable&);
-  void operator()(const AsioContext& p) { scanner().scan(p, *this); }
-  void operator()(const VarEnv& venv) { (*this)(&venv); }
+  bool marked(const HeapObject* h) {
+    return h->marks() == mark_version_;
+  }
+  template<bool apcgc> void checkedEnqueue(const void* p);
+  template<bool apcgc> void exactEnqueue(const void* p);
+  HeapObject* find(const void*);
 
-  template<class T> void operator()(const req::ptr<T>& p) {
-    (*this)(p.get());
-  }
-  template<class T> void operator()(const req::vector<T>& c) {
-    for (auto& e : c) (*this)(e);
-  }
-  template<class T> void operator()(const req::set<T>& c) {
-    for (auto& e : c) (*this)(e);
-  }
-  template<class T,class U> void operator()(const std::pair<T,U>& p) {
-    (*this)(p.first);
-    (*this)(p.second);
-  }
-  template<class T,class U,class V,class W>
-  void operator()(const req::hash_map<T,U,V,W>& c) {
-    for (auto& e : c) (*this)(e); // each element is pair<T,U>
+  size_t slab_index(const void* h) {
+    assertx((char*)h >= (char*)slabs_range_.ptr &&
+           (char*)h < (char*)slabs_range_.ptr + slabs_range_.size);
+    return (uintptr_t(h) - uintptr_t(slabs_range_.ptr)) >> kLgSlabSize;
   }
 
-  template <typename T>
-  void operator()(const LowPtr<T>& p) {
-    (*this)(p.get());
-  }
-
-  void operator()(const ArrayIter& iter) {
-    scan(iter, *this);
-  }
-  void operator()(const MArrayIter& iter) {
-    scan(iter, *this);
-  }
-
-  // TODO: these need to be implemented.
-  void operator()(const ActRec&) { }
-  void operator()(const Stack&) { }
-
-  void operator()(const RequestEventHandler& h) { (*this)(&h); }
-
-  // TODO (6512343): this needs to be hooked into scan methods for Extensions.
-  void operator()(const Extension&) { }
-
-  // Explicitly ignored field types.
-  void operator()(const LowPtr<Class>&) {}
-  void operator()(const Func*) {}
-  void operator()(const Class*) {}
-  void operator()(const Unit*) {}
-  void operator()(const std::string&) {}
-  void operator()(int) {}
-
-private:
-  template<class T> static bool counted(T* p) {
-    return p && p->isRefCounted();
-  }
-  bool mark(const void*);
-  bool inRds(const void* vp) {
-    auto p = reinterpret_cast<const char*>(vp);
-    return p >= rds_.begin() && p < rds_.end();
-  }
-  template<class T> void enqueue(const T* p) {
-    auto h = reinterpret_cast<const Header*>(p);
-    assert(h &&
-           h->kind() <= HK::BigMalloc &&
-           h->kind() != HK::ResumableFrame &&
-           h->kind() != HK::NativeData);
-    work_.push_back(h);
-  }
-
-private:
-  PtrMap ptrs_;
-  std::vector<const Header*> work_;
-  folly::Range<const char*> rds_; // full mmap'd rds section.
-  Counter total_;        // bytes allocated in heap
+  HeapImpl& heap_;
+  GCBits const mark_version_;
+  size_t num_small_{0}, num_big_{0}, num_slabs_{0};
+  size_t marked_{0}, pinned_{0}, unknown_{0}; // object counts
+  Counter cscanned_roots_, cscanned_; // bytes
+  Counter xscanned_roots_, xscanned_; // bytes
+  size_t init_ns_, initfree_ns_, roots_ns_{0}, mark_ns_{0}, sweep_ns_;
+  size_t max_worklist_{0}; // max size of cwork_ + xwork_
+  size_t freed_bytes_{0};
+  PtrMap<const HeapObject*> ptrs_;
+  MemBlock slabs_range_;
+  boost::dynamic_bitset<> slab_map_; // 1 bit per 2M
+  type_scan::Scanner type_scanner_;
+  std::vector<const HeapObject*> cwork_, xwork_;
+  APCGCManager* const apcgc_;
 };
 
-// mark the object at p, return true if first time.
-bool Marker::mark(const void* p) {
-  assert(p && ptrs_.isHeader(p));
-  auto h = static_cast<const Header*>(p);
-  assert(h->kind() <= HK::BigMalloc && h->kind() != HK::ResumableObj);
-  auto first = !h->hdr_.mark;
-  h->hdr_.mark = true;
-  return first;
-}
-
-// Utility to just extract the kind field from an arbitrary Header ptr.
-inline DEBUG_ONLY HeaderKind kind(const void* p) {
-  return static_cast<const Header*>(p)->kind();
-}
-
-void Marker::operator()(const ObjectData* p) {
-  if (!p) return;
-  assert(isObjectKind(p->headerKind()));
-  if (p->getAttribute(ObjectData::HasNativeData)) {
-    // HNI style native object; mark the NativeNode header, queue the object.
-    // [NativeNode][NativeData][ObjectData][props] is one allocation.
-    // For generators -
-    // [NativeNode][locals][Resumable][GeneratorData][ObjectData]
-    auto h = Native::getNativeNode(p, p->getVMClass()->getNativeDataInfo());
-    assert(h->hdr.kind == HK::NativeData);
-    if (mark(h)) {
-      enqueue(p);
-    }
-  } else if (p->headerKind() == HK::ResumableObj) {
-    // Resumable object, prefixed by a ResumableNode header, which is what
-    // we need to mark.
-    // [ResumableNode][locals][Resumable][ObjectData<ResumableObj>]
-    auto r = Resumable::FromObj(p);
-    auto frame = reinterpret_cast<const TypedValue*>(r) -
-                 r->actRec()->func()->numSlotsInFrame();
-    auto node = reinterpret_cast<const ResumableNode*>(frame) - 1;
-    assert(node->hdr.kind == HK::ResumableFrame);
-    if (mark(node)) {
-      // mark the ResumableFrame prefix, but enqueue the ObjectData* to scan
-      enqueue(p);
-    }
-  } else {
-    // Ordinary non-builtin object subclass, or IDL-style native object.
-    if (mark(p)) {
-      enqueue(p);
-    }
+HeapObject* Collector::find(const void* ptr) {
+  if (uintptr_t(ptr) - uintptr_t(slabs_range_.ptr) < slabs_range_.size &&
+      slab_map_.test(slab_index(ptr))) {
+    return Slab::fromPtr(ptr)->find(ptr);
   }
+  return const_cast<HeapObject*>(ptrs_.start(ptr));
 }
 
-void Marker::operator()(const ResourceHdr* p) {
-  if (p && mark(p)) {
-    assert(kind(p) == HK::Resource);
-    enqueue(p);
-  }
-}
-
-void Marker::operator()(const ResourceData* r) {
-  if (r && mark(r->hdr())) {
-    assert(kind(r->hdr()) == HK::Resource);
-    enqueue(r->hdr());
-  }
-}
-
-// ArrayData objects could be static
-void Marker::operator()(const ArrayData* p) {
-  if (p && counted(p) && mark(p)) {
-    assert(isArrayKind(kind(p)));
-    enqueue(p);
-  }
-}
-
-// RefData objects contain at most one ptr, scan it eagerly.
-void Marker::operator()(const RefData* p) {
-  if (!p) return;
-  if (inRds(p)) {
-    // p is a static local, initialized by RefData::initInRDS().
-    // we already scanned p's body as part of scanning RDS.
-    return;
-  }
-  if (mark(p)) {
-    assert(kind(p) == HK::Ref);
-    enqueue(p);
-  }
-}
-
-// The only thing interesting in a string is a possible APCString*,
-// which is not a request-local allocation.
-void Marker::operator()(const StringData* p) {
-  if (p && counted(p)) {
-    assert(kind(p) == HK::String);
-    mark(p);
-  }
-}
-
-// NVTs live inside VarEnv, and GlobalsArray has an interior ptr to one.
-// ignore the interior pointer; NVT should be scanned by VarEnv::scan.
-void Marker::operator()(const NameValueTable* p) {}
-
-// VarEnvs are allocated with req::make, so they aren't first-class heap
-// objects. assume a VarEnv* is a unique ptr, and scan it eagerly.
-void Marker::operator()(const VarEnv* p) {
-  if (p) p->scan(*this);
-}
-
-void Marker::operator()(const RequestEventHandler* p) {
-  p->scan(*this);
-}
-
-void Marker::operator()(const String& p)    { (*this)(p.get()); }
-void Marker::operator()(const Array& p)     { (*this)(p.get()); }
-void Marker::operator()(const ArrayNoDtor& p) { (*this)(p.arr()); }
-void Marker::operator()(const Object& p)    { (*this)(p.get()); }
-void Marker::operator()(const Resource& p)  { (*this)(p.hdr()); }
-void Marker::operator()(const Variant& p)   { (*this)(*p.asTypedValue()); }
-
-void Marker::operator()(const StringBuffer& p) { p.scan(*this); }
-void Marker::operator()(const NameValueTable& p) { p.scan(*this); }
-
-// mark a TypedValue or TypedValueAux. taking tv by value would exclude aux.
-void Marker::operator()(const TypedValue& tv) {
-  switch (tv.m_type) {
-    case KindOfString:    return (*this)(tv.m_data.pstr);
-    case KindOfArray:     return (*this)(tv.m_data.parr);
-    case KindOfObject:    return (*this)(tv.m_data.pobj);
-    case KindOfResource:  return (*this)(tv.m_data.pres);
-    case KindOfRef:       return (*this)(tv.m_data.pref);
-    case KindOfUninit:
-    case KindOfNull:
-    case KindOfBoolean:
-    case KindOfInt64:
-    case KindOfDouble:
-    case KindOfStaticString:
-    case KindOfClass: // only in eval stack
-      return;
-  }
-}
-
-// mark ambigous pointers in the range [start,start+len). If the start or
-// end is a partial word, don't scan that word.
-void FOLLY_DISABLE_ADDRESS_SANITIZER
-Marker::operator()(const void* start, size_t len) {
-  constexpr uintptr_t M{7}; // word size - 1
-  auto s = (char**)((uintptr_t(start) + M) & ~M); // round up
-  auto e = (char**)((uintptr_t(start) + len) & ~M); // round down
-  for (; s < e; s++) {
-    auto p = *s;
-    auto h = ptrs_.header(p);
-    if (!h) continue;
-    // mark p if it's an interesting kind. since we have metadata for it,
-    // it must have a valid header.
-    h->hdr_.cmark = true;
-    if (!mark(h)) continue; // skip if already marked.
-    switch (h->kind()) {
-      case HK::Apc:
-      case HK::Globals:
-      case HK::Proxy:
-      case HK::Ref:
-      case HK::Resource:
-      case HK::Packed:
-      case HK::Struct:
-      case HK::Mixed:
-      case HK::Empty:
-      case HK::SmallMalloc:
-      case HK::BigMalloc:
-        enqueue(h);
-        break;
-      case HK::Object:
-      case HK::AwaitAllWH:
-      case HK::Vector:
-      case HK::Map:
-      case HK::Set:
-      case HK::Pair:
-      case HK::ImmVector:
-      case HK::ImmMap:
-      case HK::ImmSet:
-        // Object kinds. None of these should have native-data, because if they
-        // do, the mapped header should be for the NativeData prefix.
-        assert(!h->obj_.getAttribute(ObjectData::HasNativeData));
-        enqueue(h);
-        break;
-      case HK::ResumableFrame:
-        enqueue(h->resumableObj());
-        break;
-      case HK::NativeData:
-        enqueue(h->nativeObj());
-        break;
-      case HK::String:
-        // nothing to queue since strings don't have pointers
-        break;
-      case HK::ResumableObj:
-      case HK::BigObj:
-      case HK::Free:
-      case HK::Hole:
-        // None of these kinds should be encountered because they're either not
-        // interesting to begin with, or are mapped to different headers, so we
-        // shouldn't get these from the pointer map.
-        always_assert(false && "bad header kind");
-        break;
-    }
-  }
-}
-
-// initially parse the heap to find valid objects and initialize metadata.
-// Certain objects can have count==0
-// * StringData owned by StringBuffer
-// * ArrayData owned by ArrayInit
-// * Object ctors allocating memory in ctor (while count still==0).
-void Marker::init() {
-  rds_ = folly::Range<const char*>((char*)rds::header(),
-                                   RuntimeOption::EvalJitTargetCacheSize);
-  MM().forEachHeader([&](Header* h) {
-    h->hdr_.mark = h->hdr_.cmark = false;
-    switch (h->kind()) {
-      case HK::Apc:
-      case HK::Globals:
-      case HK::Proxy:
-      case HK::Packed:
-      case HK::Mixed:
-      case HK::Struct:
-      case HK::Empty:
-      case HK::String:
-        assert(h->hdr_.count > 0);
-        ptrs_.insert(h);
-        total_ += h->size();
-        break;
-      case HK::Ref:
-        // EZC non-ref refdatas sometimes have count==0
-        assert(h->hdr_.count > 0 || !h->ref_.zIsRef());
-        ptrs_.insert(h);
-        total_ += h->size();
-        break;
-      case HK::Resource:
-        // ZendNormalResourceData objects sometimes never incref'd
-        // TODO: t5969922, t6545412 might be a real bug.
-        ptrs_.insert(h);
-        total_ += h->size();
-        break;
-      case HK::Object:
-      case HK::Vector:
-      case HK::Map:
-      case HK::Set:
-      case HK::Pair:
-      case HK::ImmVector:
-      case HK::ImmMap:
-      case HK::ImmSet:
-      case HK::AwaitAllWH:
-        // count==0 can be witnessed, see above
-        total_ += h->size();
-        if (!h->obj_.getAttribute(ObjectData::HasNativeData)) {
-          ptrs_.insert(h);
-        } else {
-          // Objects with native-data shouldn't be encountered on their own
-          // because they should be prefixed by a NativeData allocation.
-          assert(false && "object with native-data from forEachHeader()");
-        }
-        break;
-      case HK::ResumableFrame: {
-        // Pointers to either the frame or the object will be mapped to the
-        // frame.
-        total_ += h->size();
-        ptrs_.insert(h);
-        auto obj = reinterpret_cast<const Header*>(h->resumableObj());
-        obj->hdr_.mark = obj->hdr_.cmark = false;
-        break;
-      }
-      case HK::NativeData: {
-        // Pointers to either the native data or the object will be mapped to
-        // the native data.
-        total_ += h->size();
-        ptrs_.insert(h);
-        auto obj = reinterpret_cast<const Header*>(h->nativeObj());
-        obj->hdr_.mark = obj->hdr_.cmark = false;
-        break;
-      }
-      case HK::SmallMalloc:
-      case HK::BigMalloc:
-        total_ += h->size();
-        ptrs_.insert(h);
-        break;
-      case HK::Free:
-        break;
-      case HK::ResumableObj:
-        // These shouldn't be encountered on their own, they should always be
-        // prefixed by a ResumableFrame allocation.
-      case HK::Hole:
-      case HK::BigObj:
-        assert(false && "skipped by forEachHeader()");
-        break;
-    }
-  });
-  ptrs_.prepare();
-}
-
-void Marker::trace() {
-  scanRoots(*this);
-  while (!work_.empty()) {
-    auto h = work_.back();
-    work_.pop_back();
-    scanHeader(h, *this);
-  }
-}
-
-// check that headers have a "sensible" state during sweeping.
-DEBUG_ONLY bool check_sweep_header(const Header* h) {
-  assert(!h->hdr_.cmark || h->hdr_.mark); // cmark implies mark
+DEBUG_ONLY bool checkEnqueuedKind(const HeapObject* h) {
   switch (h->kind()) {
-    case HK::Packed:
-    case HK::Struct:
-    case HK::Mixed:
-    case HK::Empty:
-    case HK::Apc:
-    case HK::Globals:
-    case HK::Proxy:
-    case HK::String:
-    case HK::Resource:
-    case HK::Ref:
-      // ordinary counted objects
+    case HeaderKind::Apc:
+    case HeaderKind::Globals:
+    case HeaderKind::Resource:
+    case HeaderKind::ClsMeth:
+    case HeaderKind::Packed:
+    case HeaderKind::Mixed:
+    case HeaderKind::Dict:
+    case HeaderKind::VecArray:
+    case HeaderKind::Keyset:
+    case HeaderKind::Empty:
+    case HeaderKind::Cpp:
+    case HeaderKind::SmallMalloc:
+    case HeaderKind::BigMalloc:
+    case HeaderKind::String:
+    case HeaderKind::Record:
+    case HeaderKind::RecordArray:
+    case HeaderKind::RFunc: // TODO(T63348446)
       break;
-    case HK::Object:
-    case HK::Vector:
-    case HK::Map:
-    case HK::Set:
-    case HK::Pair:
-    case HK::ImmVector:
-    case HK::ImmMap:
-    case HK::ImmSet:
-    case HK::AwaitAllWH:
-      // objects; should not have native-data
-      assert(!h->obj_.getAttribute(ObjectData::HasNativeData));
+    case HeaderKind::Free:
+    case HeaderKind::Hole:
+      // these can be on the worklist because we don't expect to find
+      // dangling pointers. they are ignored when popped from the worklist.
       break;
-    case HK::ResumableFrame:
-    case HK::NativeData:
-      // not counted but marked when embedded object is marked
+    case HeaderKind::Object:
+    case HeaderKind::Vector:
+    case HeaderKind::Map:
+    case HeaderKind::Set:
+    case HeaderKind::Pair:
+    case HeaderKind::ImmVector:
+    case HeaderKind::ImmMap:
+    case HeaderKind::ImmSet:
+    case HeaderKind::WaitHandle:
+    case HeaderKind::AwaitAllWH:
+      // Object kinds. None of these have native-data, because if they
+      // do, the mapped header should be for the NativeData prefix.
       break;
-    case HK::SmallMalloc:
-    case HK::BigMalloc:
-      // not counted but can be marked.
+    case HeaderKind::AsyncFuncFrame:
+    case HeaderKind::NativeData:
+    case HeaderKind::ClosureHdr:
+    case HeaderKind::MemoData:
+      // these have inner objects, but we queued the outer one.
       break;
-    case HK::Free:
-      // free memory; these should not be marked.
-      assert(!h->hdr_.mark);
-      break;
-    case HK::ResumableObj:
-    case HK::BigObj:
-    case HK::Hole:
-      // These should never be encountered because they don't represent
-      // independent allocations.
-      assert(false && "invalid header kind");
+    case HeaderKind::Closure:
+    case HeaderKind::AsyncFuncWH:
+    case HeaderKind::NativeObject:
+      // These header types should not be found during heap or slab iteration
+      // because they are appended to ClosureHdr or AsyncFuncFrame.
+    case HeaderKind::Slab:
+      // These header types are not allocated objects; they are handled
+      // earlier and should never be queued on the gc worklist.
+      always_assert(false && "bad header kind");
       break;
   }
   return true;
 }
 
-// another pass through the heap now that everything is marked.
-void Marker::sweep() {
-  Counter marked, ambig, freed;
-  std::vector<Header*> reaped;
-  auto& mm = MM();
-  mm.iterate([&](Header* h) {
-    assert(check_sweep_header(h));
-    auto size = h->size(); // internal size
-    if (h->hdr_.mark) {
-      marked += size;
-      if (h->hdr_.cmark) ambig += size;
-      return; // continue foreach loop
+bool willScanConservative(const HeapObject* h) {
+  return (h->kind() == HeaderKind::SmallMalloc ||
+          h->kind() == HeaderKind::BigMalloc) &&
+         type_scan::hasConservativeScanner(
+             static_cast<const MallocNode*>(h)->typeIndex()
+         );
+}
+
+template <bool apcgc>
+void Collector::checkedEnqueue(const void* p) {
+  if (auto h = find(p)) {
+    // enqueue h the first time. If it's an object with no pointers (eg String),
+    // we'll skip it when we process the queue.
+    auto old = h->marks();
+    if (old != mark_version_) {
+      h->setmarks(mark_version_);
+      ++marked_;
+      auto& work = willScanConservative(h) ? cwork_ : xwork_;
+      work.push_back(h);
+      max_worklist_ = std::max(max_worklist_, cwork_.size() + xwork_.size());
+      assertx(checkEnqueuedKind(h));
     }
-    // when freeing objects below, do not run their destructors! we don't
-    // want to execute cascading decrefs or anything. the normal release()
-    // methods of refcounted classes aren't usable because they run dtors.
-    // also, if freeing the current object causes other objects to be freed,
-    // then must initialize the FreeNode header on them, in order to continue
-    // parsing. For now, defer freeing those kinds of objects to after parsing.
-    switch (h->kind()) {
-      case HK::Packed:
-      case HK::Struct:
-      case HK::Mixed:
-      case HK::Empty:
-      case HK::Globals:
-      case HK::Proxy:
-      case HK::Resource:
-      case HK::Ref:
-      case HK::Object:
-      case HK::AwaitAllWH:
-      case HK::Vector:
-      case HK::Map:
-      case HK::Set:
-      case HK::Pair:
-      case HK::ImmVector:
-      case HK::ImmMap:
-      case HK::ImmSet:
-      case HK::ResumableFrame:
-      case HK::NativeData:
-      case HK::Apc:
-      case HK::String:
-        freed += size;
-        reaped.push_back(h);
-        break;
-      case HK::SmallMalloc:
-      case HK::BigMalloc:
-        // Don't free malloc-ed allocations even if they're not reachable.
-        break;
-      case HK::Free:
-        break;
-      case HK::Hole:
-      case HK::BigObj:
-      case HK::ResumableObj:
-        assert(false && "skipped by forEachHeader()");
-        break;
-    }
-  });
-  TRACE(1, "sweep tot %lu(%lu) mk %lu(%lu) amb %lu(%lu) free %lu(%lu)\n",
-        total_.count, total_.bytes,
-        marked.count, marked.bytes,
-        ambig.count, ambig.bytes,
-        freed.count, freed.bytes);
-  // once we're done iterating the heap, it's safe to free unreachable objects.
-  for (auto h : reaped) {
-    if (h->kind() == HK::Apc) {
-      // frees localCache, delists, decref apc-array, free array
-      h->apc_.reap();
-    } else if (h->kind() == HK::String) {
-      // decref apc shared str, free str
-      h->str_.release(); // no destructor can run, so release() is safe.
-    } else if (auto obj = h->obj()) {
-      if (obj->getAttribute(ObjectData::HasDynPropArr)) {
-        // dynPropTable is a req::hash_map, so this will req::free junk
-        g_context->dynPropTable.erase(obj);
-      }
-      mm.objFree(h, h->size());
-    } else {
-      mm.objFree(h, h->size());
-    }
-  }
-  if (RuntimeOption::EvalEagerGCProbability > 0) {
-    mm.quarantine();
+  } else if (apcgc) {
+    // If p doesn't belong to any APC data, APCGCManager won't do anything
+    apcgc_->mark(p);
   }
 }
+
+// It is correct to ignore willScanConservative(h) in phase 2 because:
+// * target is !type_scan::isKnownType, making it an "unknown" root,
+// and scanned & pinned in phase 1; OR
+// * target is a marked (thus pinned) req::container buffer, found in phase 1,
+// so we can disregard this pointer to it, since it won't move; OR
+// * target is an unmarked req::container buffer. p is a (possibly interior)
+// pointer into it. p shouldn't keep the buffer alive, since whoever
+// owns it, will scan it using the container's iterator api; OR
+// * p could be a stale pointer of any interesting type, that randomly
+// is pointing to recycled memory. ignoring it is actually desireable.
+template <bool apcgc>
+void Collector::exactEnqueue(const void* p) {
+  if (auto h = find(p)) {
+    auto old = h->marks();
+    if (old != mark_version_ && !willScanConservative(h)) {
+      h->setmarks(mark_version_);
+      ++marked_;
+      xwork_.push_back(h);
+      max_worklist_ = std::max(max_worklist_, xwork_.size());
+      assertx(checkEnqueuedKind(h));
+    }
+  } else if (apcgc) {
+    // If p doesn't belong to any APC data, APCGCManager won't do anything
+    apcgc_->mark(p);
+  }
+}
+
+// mark ambigous pointers in the range [start,start+len). If the start or
+// end is a partial word, don't scan that word.
+template <bool apcgc>
+void FOLLY_DISABLE_ADDRESS_SANITIZER
+Collector::conservativeScan(const void* start, size_t len) {
+  constexpr uintptr_t M{7}; // word size - 1
+  auto s = (char**)((uintptr_t(start) + M) & ~M); // round up
+  auto e = (char**)((uintptr_t(start) + len) & ~M); // round down
+  cscanned_ += uintptr_t(e) - uintptr_t(s);
+  for (; s < e; s++) {
+    checkedEnqueue<apcgc>(
+      // Mask off the upper 16-bits to handle things like
+      // DiscriminatedPtr which stores things up there.
+      (void*)(uintptr_t(*s) & (-1ULL >> 16))
+    );
+  }
+}
+
+inline int64_t cpu_ns() {
+  return HPHP::Timer::GetThreadCPUTimeNanos();
+}
+
+/*
+ * If we have non-conservative scanners, we must treat all unknown
+ * type-index allocations in the heap as roots. Why? The generated
+ * scanners will only report a pointer if it knows the pointer can point
+ * to an object on the request heap. It does this by tracking all types
+ * which are allocated via the allocation functions via the type-index
+ * mechanism. If an allocation has an unknown type-index, then by definition
+ * we don't know which type it contains, and therefore the auto generated
+ * scanners will never report a pointer to such a type.
+ *
+ * The only good way to solve this is to treat such allocations as roots
+ * and conservative scan them. If we're conservative scanning everything,
+ * we need to take no special action, as the above problem only applies to
+ * auto generated scanners.
+ */
+
+// initially parse the heap to find valid objects and initialize metadata.
+NEVER_INLINE void Collector::init() {
+  auto const t0 = cpu_ns();
+  SCOPE_EXIT { init_ns_ = cpu_ns() - t0; };
+  tl_heap->initFree();
+  initfree_ns_ = cpu_ns() - t0;
+
+  slabs_range_ = heap_.slab_range();
+  slab_map_.resize((slabs_range_.size + kSlabSize - 1) >> kLgSlabSize);
+
+  heap_.iterate(
+    [&](HeapObject* h, size_t size) { // onBig
+      ptrs_.insert(h, size);
+      if (h->kind() == HeaderKind::BigMalloc &&
+          !type_scan::isKnownType(static_cast<MallocNode*>(h)->typeIndex())) {
+        ++unknown_;
+        h->setmarks(mark_version_);
+        cwork_.push_back(h);
+      }
+    },
+    [&](HeapObject* h, size_t size) { // onSlab
+      slab_map_.set(slab_index(h));
+    }
+  );
+  ptrs_.prepare();
+}
+
+// Collect the heap using mark/sweep.
+//
+// Init: prepare object-start bitmaps, and mark/enqueue unknown allocations.
+//
+// Trace (two-phase):
+// 1. scan all conservative roots, or hybrid roots which might have
+//    conservative fields. Also scan any conservative heap objects reached
+//    via conservative scanning. After phase 1, all conservative scanning is
+//    done and it's safe to move objects while tracing.
+// 2. scan all exact roots and exact heap objects. Ignore any exactly scanned
+//    pointers to conservatively scanned objects (see comments in exactEnqueue()
+//    this is safe).
+//
+// Trace (one-phase). This is used if no exact type_scanners are available.
+// 1. scan all roots, then the transitive closures of all heap objects,
+//    with no moving.
+//
+// Sweep:
+// 1. iterate through any tables holding "weak" pointers, clearing entries
+//    if the target(s) aren't marked, including nulling out WeakRef objects.
+// 2. free all unmarked objects, except SmallMalloc/BigMalloc nodes: We don't
+//    sweep "unknown" allocations or req::container buffers, because we don't
+//    expect to have found all pointers to them. Any other objects allocated
+//    this way are treated similarly.
+
+template <bool apcgc> void Collector::collect() {
+  init();
+  if (type_scan::hasNonConservative() && RuntimeOption::EvalTwoPhaseGC) {
+    traceConservative<apcgc>();
+    traceExact<apcgc>();
+  } else {
+    traceAll<apcgc>();
+  }
+  sweep();
+}
+
+// Phase 1: Scan only conservative or mixed conservative/exact roots, plus any
+// malloc'd heap objects that are themselves fully conservatively scanned.
+template <bool apcgc>
+NEVER_INLINE void Collector::traceConservative() {
+  auto finish = [&] {
+    for (auto r : type_scanner_.m_conservative) {
+      conservativeScan<apcgc>(r.first, r.second);
+    }
+    type_scanner_.m_conservative.clear();
+    // Accumulate m_addrs until traceExact()
+    // Accumulate m_weak until sweep()
+  };
+  auto const t0 = cpu_ns();
+  iterateConservativeRoots(
+    [&](const void* p, size_t size, type_scan::Index tyindex) {
+      type_scanner_.scanByIndex(tyindex, p, size);
+      finish();
+    });
+  auto const t1 = cpu_ns();
+  roots_ns_ += t1 - t0;
+  cscanned_roots_ = cscanned_;
+  while (!cwork_.empty()) {
+    auto h = cwork_.back();
+    cwork_.pop_back();
+    scanHeapObject(h, type_scanner_);
+    finish();
+  }
+  mark_ns_ += cpu_ns() - t1;
+  pinned_ = marked_;
+}
+
+// Phase 2: Scan pointers deferred from phase 1, exact roots, and the remainder
+// of the heap, which is expected to be fully exactly-scannable. Assert if
+// any conservatively-scanned regions are found in this phase. Any unmarked
+// objects found in this phase may be safely copied.
+template <bool apcgc>
+NEVER_INLINE void Collector::traceExact() {
+  auto finish = [&] {
+    assertx(cwork_.empty() && type_scanner_.m_conservative.empty());
+    for (auto addr : type_scanner_.m_addrs) {
+      xscanned_ += sizeof(*addr);
+      exactEnqueue<apcgc>(*addr);
+    }
+    type_scanner_.m_addrs.clear();
+    // Accumulate m_weak until sweep()
+  };
+  auto const t0 = cpu_ns();
+  finish(); // from phase 1
+  iterateExactRoots(
+    [&](const void* p, size_t size, type_scan::Index tyindex) {
+      type_scanner_.scanByIndex(tyindex, p, size);
+      finish();
+    });
+  auto const t1 = cpu_ns();
+  roots_ns_ += t1 - t0;
+  xscanned_roots_ = xscanned_;
+  while (!xwork_.empty()) {
+    auto h = xwork_.back();
+    xwork_.pop_back();
+    scanHeapObject(h, type_scanner_);
+    finish();
+  }
+  mark_ns_ += cpu_ns() - t1;
+}
+
+// Scan all roots & heap in one pass
+template <bool apcgc>
+NEVER_INLINE void Collector::traceAll() {
+  auto finish = [&] {
+    for (auto r : type_scanner_.m_conservative) {
+      conservativeScan<apcgc>(r.first, r.second);
+    }
+    type_scanner_.m_conservative.clear();
+    for (auto addr : type_scanner_.m_addrs) {
+      xscanned_ += sizeof(*addr);
+      checkedEnqueue<apcgc>(*addr);
+    }
+    type_scanner_.m_addrs.clear();
+    // Accumulate m_weak until sweep()
+  };
+  auto const t0 = cpu_ns();
+  iterateRoots([&](const void* p, size_t size, type_scan::Index tyindex) {
+    type_scanner_.scanByIndex(tyindex, p, size);
+    finish();
+  });
+  auto const t1 = cpu_ns();
+  roots_ns_ += t1 - t0;
+  cscanned_roots_ = cscanned_;
+  xscanned_roots_ = xscanned_;
+  while (!cwork_.empty() || !xwork_.empty()) {
+    auto& work = !cwork_.empty() ? cwork_ : xwork_;
+    auto h = work.back();
+    work.pop_back();
+    scanHeapObject(h, type_scanner_);
+    finish();
+  }
+  mark_ns_ += cpu_ns() - t1;
+  pinned_ = marked_;
+}
+
+// another pass through the heap, this time using the PtrMap we computed
+// in init(). Free and maybe quarantine unmarked objects.
+NEVER_INLINE void Collector::sweep() {
+  auto& mm = *tl_heap;
+  auto const t0 = cpu_ns();
+  auto const usage0 = mm.currentUsage();
+  MemoryManager::FreelistArray quarantine;
+  if (RuntimeOption::EvalQuarantine) quarantine = mm.beginQuarantine();
+  SCOPE_EXIT {
+    if (RuntimeOption::EvalQuarantine) mm.endQuarantine(std::move(quarantine));
+    freed_bytes_ = usage0 - mm.currentUsage();
+    sweep_ns_ = cpu_ns() - t0;
+    assertx(freed_bytes_ >= 0);
+  };
+
+  // Clear weak references as needed.
+  for (auto w : type_scanner_.m_weak) {
+    auto wr_data = static_cast<const WeakRefData*>(w);
+    auto type = wr_data->pointee.m_type;
+    if (type == KindOfObject) {
+      auto h = find(wr_data->pointee.m_data.pobj);
+      if (!marked(h)) {
+        // Its important we invalidate the pointer stored in the weakref, and
+        // not the start of the allocation.  In the case of objects with
+        // native datas, the start of allocation may not be the start of the
+        // ObjectData*.
+        WeakRefData::invalidateWeakRef(uintptr_t(wr_data->pointee.m_data.pobj));
+        mm.reinitFree();
+      }
+      continue;
+    }
+    assertx(type == KindOfNull || type == KindOfUninit);
+  }
+  type_scanner_.m_weak.clear();
+
+  bool need_reinit_free = false;
+  g_context->sweepDynPropTable([&](const ObjectData* obj) {
+    if (need_reinit_free) mm.reinitFree();
+    auto h = find(obj);
+    // if we return true, call reinitFree() before calling find() again,
+    // to ensure the heap remains walkable.
+    return need_reinit_free = !h || !marked(h);
+  });
+
+  mm.sweepApcArrays([&](APCLocalArray* a) {
+    return !marked(a);
+  });
+
+  mm.sweepApcStrings([&](StringData* s) {
+    return !marked(s);
+  });
+
+  mm.reinitFree();
+
+  heap_.iterate(
+    [&](HeapObject* big, size_t big_size) { // onBig
+      ++num_big_;
+      auto kind = big->kind();
+      if (kind != HeaderKind::BigMalloc && kind != HeaderKind::SmallMalloc &&
+          !marked(big)) {
+        // NB: kind == SmallMalloc occurs when tl_heap->m_bypassSlabAlloc==true
+        mm.freeBigSize(big);
+      }
+    },
+    [&](HeapObject* big, size_t /*big_size*/) { // onSlab
+      ++num_slabs_;
+      auto slab = Slab::fromHeader(big);
+      slab->iter_starts([&](HeapObject* h) {
+        ++num_small_;
+        auto kind = h->kind();
+        if (!isFreeKind(kind) && kind != HeaderKind::SmallMalloc &&
+            !marked(h)) {
+          mm.freeSmallSize(h, allocSize(h));
+        }
+      });
+    });
+  if (apcgc_) {
+    // This should be removed after global GC API is provided
+    // Currently we do this to sweeping only when script mode
+    apcgc_->sweep();
+  }
+}
+
+StructuredLogEntry logCommon() {
+  StructuredLogEntry sample;
+  sample.setInt("req_num", rl_gcdata->t_req_num);
+  // MemoryUsageStats
+  sample.setInt("memory_limit", tl_heap->getMemoryLimit());
+  sample.setInt("usage", rl_gcdata->t_pre_stats.usage());
+  sample.setInt("mm_usage", rl_gcdata->t_pre_stats.mmUsage());
+  sample.setInt("mm_allocated", rl_gcdata->t_pre_stats.mmAllocated());
+  sample.setInt("aux_usage", rl_gcdata->t_pre_stats.auxUsage());
+  sample.setInt("mm_capacity", rl_gcdata->t_pre_stats.capacity());
+  sample.setInt("peak_usage", rl_gcdata->t_pre_stats.peakUsage);
+  sample.setInt("peak_capacity", rl_gcdata->t_pre_stats.peakCap);
+  sample.setInt("total_alloc", rl_gcdata->t_pre_stats.totalAlloc);
+  return sample;
+}
+
+void traceCollection(const Collector& collector) {
+  constexpr auto MB = 1024 * 1024;
+  auto const cscanned_heap = collector.cscanned_.bytes -
+    collector.cscanned_roots_.bytes;
+  auto const xscanned_heap = collector.xscanned_.bytes -
+    collector.xscanned_roots_.bytes;
+  auto const total_ns = collector.init_ns_ + collector.initfree_ns_ +
+    collector.roots_ns_ + collector.mark_ns_ + collector.sweep_ns_;
+  Trace::ftraceRelease(
+    "gc age {}ms mmUsage {}M trigger {}M "
+    "init {}ms mark {}ms sweep {}ms total {}ms "
+    "marked {} pinned {} free {:.1f}M "
+    "cscan-heap {:.1f}M xscan-heap {:.1f}M\n",
+    rl_gcdata->t_req_age,
+    rl_gcdata->t_pre_stats.mmUsage() / MB,
+    rl_gcdata->t_trigger / MB,
+    collector.init_ns_ / 1000000,
+    collector.mark_ns_ / 1000000,
+    collector.sweep_ns_ / 1000000,
+    total_ns / 1000000,
+    collector.marked_,
+    collector.pinned_,
+    double(collector.freed_bytes_) / MB,
+    double(cscanned_heap) / MB,
+    double(xscanned_heap) / MB
+  );
+}
+
+void logCollection(const char* phase, const Collector& collector) {
+  auto sample = logCommon();
+  sample.setStr("phase", phase);
+  std::string scanner(type_scan::hasNonConservative() ? "typescan" : "ts-cons");
+  sample.setStr("scanner", !debug ? scanner : scanner + "-debug");
+  sample.setInt("gc_num", rl_gcdata->t_gc_num);
+  sample.setInt("req_age_micros", rl_gcdata->t_req_age);
+  // timers of gc-sub phases
+  sample.setInt("init_micros", collector.init_ns_/1000);
+  sample.setInt("initfree_micros", collector.initfree_ns_/1000);
+  sample.setInt("roots_micros", collector.roots_ns_/1000);
+  sample.setInt("mark_micros", collector.mark_ns_/1000);
+  sample.setInt("sweep_micros", collector.sweep_ns_/1000);
+  // object metrics counted at sweep time
+  sample.setInt("slab_count", collector.num_slabs_);
+  sample.setInt("small_count", collector.num_small_);
+  sample.setInt("big_count", collector.num_big_);
+  // size metrics gathered during gc
+  sample.setInt("allocd_span", collector.ptrs_.span().second);
+  sample.setInt("marked_count", collector.marked_);
+  sample.setInt("pinned_count", collector.pinned_);
+  sample.setInt("unknown_count", collector.unknown_);
+  sample.setInt("freed_bytes", collector.freed_bytes_);
+  sample.setInt("trigger_bytes", rl_gcdata->t_trigger);
+  sample.setInt("trigger_allocated", rl_gcdata->t_trigger_allocated);
+  sample.setInt("cscanned_roots", collector.cscanned_roots_.bytes);
+  sample.setInt("xscanned_roots", collector.xscanned_roots_.bytes);
+  sample.setInt("cscanned_heap",
+                collector.cscanned_.bytes - collector.cscanned_roots_.bytes);
+  sample.setInt("xscanned_heap",
+                collector.xscanned_.bytes - collector.xscanned_roots_.bytes);
+  sample.setInt("rds_normal_size", rds::normalSection().size());
+  sample.setInt("rds_normal_count", rds::detail::s_normal_alloc_descs.size());
+  sample.setInt("rds_local_size", rds::localSection().size());
+  sample.setInt("rds_local_count", rds::detail::s_local_alloc_descs.size());
+  sample.setInt("max_worklist", collector.max_worklist_);
+  StructuredLog::log("hhvm_gc", sample);
+}
+
+void collectImpl(HeapImpl& heap, const char* phase, GCBits& mark_version) {
+  VMRegAnchor _;
+  if (t_eager_gc && RuntimeOption::EvalFilterGCPoints) {
+    t_eager_gc = false;
+    auto pc = vmpc();
+    if (rl_gcdata->t_surprise_filter.test(pc)) {
+      if (RuntimeOption::EvalGCForAPC) {
+        if (!APCGCManager::getInstance().excessedGCTriggerBar()) {
+          return;
+        }
+      } else {
+        return;
+      }
+    }
+    rl_gcdata->t_surprise_filter.insert(pc);
+    TRACE(2, "eager gc %s at %p\n", phase, pc);
+    phase = "eager";
+  } else {
+    TRACE(2, "normal gc %s at %p\n", phase, vmpc());
+  }
+  if (rl_gcdata->t_gc_num == 0) {
+    rl_gcdata->t_enable_samples =
+      StructuredLog::coinflip(RuntimeOption::EvalGCSampleRate);
+  }
+  rl_gcdata->t_pre_stats =
+    tl_heap->getStatsCopy(); // don't check or trigger OOM
+  mark_version = (mark_version == MaxMark) ? MinMark :
+                 GCBits(uint8_t(mark_version) + 1);
+  Collector collector(
+    heap,
+    RuntimeOption::EvalGCForAPC ? &APCGCManager::getInstance() : nullptr,
+    mark_version
+  );
+  if (RuntimeOption::EvalGCForAPC) {
+    collector.collect<true>();
+  } else {
+    collector.collect<false>();
+  }
+  if (Trace::moduleEnabledRelease(Trace::gc, 1)) {
+    traceCollection(collector);
+  }
+  if (rl_gcdata->t_enable_samples) {
+    logCollection(phase, collector);
+  }
+  ++rl_gcdata->t_gc_num;
+}
+
+}
+
+void MemoryManager::resetGC() {
+  rl_gcdata->t_req_num = ++(rl_gcdata->g_req_num);
+  rl_gcdata->t_gc_num = 0;
+  if (rds::header()) updateNextGc();
+}
+
+void MemoryManager::resetEagerGC() {
+  if (RuntimeOption::EvalEagerGC && RuntimeOption::EvalFilterGCPoints) {
+    rl_gcdata->t_surprise_filter.clear();
+  }
+}
+
+void MemoryManager::requestEagerGC() {
+  if (RuntimeOption::EvalEagerGC && rds::header()) {
+    t_eager_gc = true;
+    setSurpriseFlag(PendingGCFlag);
+  }
+}
+
+void MemoryManager::checkGC() {
+  if (m_stats.mmUsage() > m_nextGC) {
+    assertx(rds::header());
+    setSurpriseFlag(PendingGCFlag);
+    if (rl_gcdata->t_trigger_allocated == -1) {
+      rl_gcdata->t_trigger_allocated = m_stats.mmAllocated();
+    }
+  }
+}
+
+/*
+ * Compute the next threshold to trigger GC. We wish to ignore auxUsage
+ * for the purpose of this calculation, even though auxUsage is counted
+ * against the request for the sake of OOM. To accomplish this, subtract
+ * auxUsage from the heap limit, before our calculations.
+ *
+ * GC will then be triggered the next time we notice mmUsage > m_nextGc (see
+ * checkGC()).
+ */
+void MemoryManager::updateNextGc() {
+  rl_gcdata->t_trigger_allocated = -1;
+  if (!isGCEnabled()) {
+    m_nextGC = kNoNextGC;
+    updateMMDebt();
+    return;
+  }
+
+  auto const stats = getStatsCopy();
+  auto const clearance =
+    static_cast<uint64_t>(m_usageLimit) -
+    stats.auxUsage() - stats.mmUsage();
+
+  int64_t delta = clearance > std::numeric_limits<int64_t>::max() ?
+    0 : clearance * RuntimeOption::EvalGCTriggerPct;
+  delta = std::max(delta, RuntimeOption::EvalGCMinTrigger);
+  m_nextGC = stats.mmUsage() + delta;
+  updateMMDebt();
 }
 
 void MemoryManager::collect(const char* phase) {
-  if (!RuntimeOption::EvalEnableGC || empty()) return;
-  if (Trace::moduleEnabled(Trace::heapreport)) {
-    printHeapReport(makeHeapGraph(), phase);
-  }
-  Marker mkr;
-  mkr.init();
-  mkr.trace();
-  mkr.sweep();
+  if (empty()) return;
+  rl_gcdata->t_req_age = cpu_ns()/1000 - m_req_start_micros;
+  rl_gcdata->t_trigger = m_nextGC;
+  collectImpl(m_heap, phase, m_mark_version);
+  updateNextGc();
+}
+
+void MemoryManager::setMemoryLimit(size_t limit) {
+  assertx(limit <= (size_t)std::numeric_limits<int64_t>::max());
+  m_usageLimit = limit;
+  updateNextGc();
 }
 
 }

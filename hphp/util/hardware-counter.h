@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,20 +29,17 @@ namespace HPHP {
 
 #ifndef NO_HARDWARE_COUNTERS
 
-class InstructionCounter;
-class LoadCounter;
-class StoreCounter;
-
 struct PerfTable {
   const char* name;
   uint32_t type;
   uint64_t config;
 };
 
-class HardwareCounterImpl;
+struct HardwareCounterImpl;
+struct StructuredLogEntry;
 
-class HardwareCounter {
-public:
+/* If you change the public interface, remember to update the stubs below. */
+struct HardwareCounter {
   HardwareCounter();
   ~HardwareCounter();
 
@@ -58,8 +55,19 @@ public:
   typedef void (*PerfEventCallback)(const std::string&, int64_t, void*);
   static void GetPerfEvents(PerfEventCallback f, void* data);
   static void ClearPerfEvents();
-  static void Init(bool enable, const std::string& events, bool subProc);
-  static DECLARE_THREAD_LOCAL_NO_CHECK(HardwareCounter, s_counter);
+  static void UpdateServiceData(const timespec& cpu_begin,
+                                const timespec& wall_begin,
+                                StructuredLogEntry* entry,
+                                bool includingPsp);
+  static void Init(bool enable,
+                   const std::string& events,
+                   bool subProc,
+                   bool excludeKernel,
+                   bool fastReads,
+                   int exportInterval);
+  static void RecordSubprocessTimes();
+  static void ExcludeKernel();
+  static THREAD_LOCAL_NO_CHECK(HardwareCounter, s_counter);
   bool m_countersSet{false};
 private:
   void reset();
@@ -70,23 +78,27 @@ private:
   bool addPerfEvent(const char* event);
   bool setPerfEvents(folly::StringPiece events);
   void getPerfEvents(PerfEventCallback f, void* data);
+  template<typename F>
+  void forEachCounter(F func);
   void clearPerfEvents();
+  void updateServiceData(StructuredLogEntry* entry, bool includingPsp);
 
-  std::unique_ptr<InstructionCounter> m_instructionCounter;
-  std::unique_ptr<LoadCounter> m_loadCounter;
-  std::unique_ptr<StoreCounter> m_storeCounter;
+  std::unique_ptr<HardwareCounterImpl> m_instructionCounter;
+  std::unique_ptr<HardwareCounterImpl> m_loadCounter;
+  std::unique_ptr<HardwareCounterImpl> m_storeCounter;
   std::vector<std::unique_ptr<HardwareCounterImpl>> m_counters;
 };
 
 #else // NO_HARDWARE_COUNTERS
+
+struct StructuredLogEntry;
 
 /* Stub implementation for platforms without hardware counters (non-linux)
  * This mock class pretends to track performance events, but just returns
  * static values, so it doesn't even need to worry about thread safety
  * for the one static instance of itself.
  */
-class HardwareCounter {
-public:
+struct HardwareCounter {
   HardwareCounter() : m_countersSet(false) { }
   ~HardwareCounter() { }
 
@@ -101,9 +113,20 @@ public:
   typedef void (*PerfEventCallback)(const std::string&, int64_t, void*);
   static void GetPerfEvents(PerfEventCallback f, void* data) { }
   static void ClearPerfEvents() { }
-  static void Init(bool enable, const std::string& events, bool subProc) {}
+  static void UpdateServiceData(const timespec& cpu_begin,
+                                const timespec& wall_begin,
+                                StructuredLogEntry* entry,
+                                bool includingPsp) { }
+  static void Init(bool enable,
+                   const std::string& events,
+                   bool subProc,
+                   bool excludeKernel,
+                   bool fastReads,
+                   int exportInterval) {}
+  static void RecordSubprocessTimes() {}
+  static void ExcludeKernel() {}
 
-  // Normally exposed by DECLARE_THREAD_LOCAL_NO_CHECK
+  // Normally exposed by THREAD_LOCAL_NO_CHECK
   void getCheck() { }
   void destroy() { }
   static HardwareCounter s_counter;

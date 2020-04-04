@@ -8,4 +8,5 @@ string(8) "__invoke"
 string(%d) "Closure$Foo\Bar\C::func;%d"
 string(%d) "Closure$Foo\Bar\C::func;%d"
 int(2)
-string(3) "BAZ"
+string(12) "\Foo\Bar\BAZ"
+string(12) "\Foo\Bar\BAZ"

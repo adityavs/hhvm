@@ -1,5 +1,5 @@
 #!/bin/env php
-<?php
+<?hh
 
 $php = '/home/engshare/externals/cpp/hphp/centos-dev/php/bin/php';
 // $php = '/home/ptarjan/bin/php-5.4';
@@ -13,8 +13,8 @@ function ends_with($big, $little) {
 }
 
 // More efficient lookups than array_search
-foreach ($config as $key => &$value) {
-  $value = array_fill_keys($value, true);
+foreach ($config as $key => $value) {
+  $config[$key] = array_fill_keys($value, true);
 }
 
 function is_valid_diff($wanted_re, $output) {

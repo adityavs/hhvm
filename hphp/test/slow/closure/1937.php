@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 function test($a, $b) {
   return array_map(function (array $x) use ($b) {
@@ -6,4 +6,8 @@ function test($a, $b) {
     }
 , $a);
 }
-test(array(array(1), array(2)), 5);
+
+<<__EntryPoint>>
+function main_1937() {
+test(varray[varray[1], varray[2]], 5);
+}

@@ -1,12 +1,16 @@
 File "test_foreach2.php", line 14, characters 12-13:
 Invalid return type (Typing[4110])
 File "test_foreach2.php", line 12, characters 37-39:
-This is an int
+Expected int
 File "test_foreach2.php", line 12, characters 24-29:
-It is incompatible with a string
-File "builtins.hhi", line 20, characters 49-50:
+But got string
+File "collections/Map.hhi", line 59, characters 64-65:
   via this generic Tv
-File "builtins.hhi", line 14, characters 56-57:
+File "collections/interfaces.hhi", line 1136, characters 63-64:
   via this generic Tv
-File "builtins.hhi", line 9, characters 64-65:
+File "collections/interfaces.hhi", line 865, characters 61-62:
+  via this generic Tv
+File "rx/interfaces.hhi", line 389, characters 36-37:
+  via this generic Tv
+File "rx/interfaces.hhi", line 35, characters 63-64:
   via this generic Tv

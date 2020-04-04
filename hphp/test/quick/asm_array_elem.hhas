@@ -1,8 +1,11 @@
+.hh_file 1;
 
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
   Int 1
   RetC
 }
@@ -14,10 +17,12 @@
   SetL $foo
   PopC
 
-  FPushFuncD 1 "var_dump"
-  FPassL 0 $foo
-  FCall 1
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  CGetL $foo
+  FCallFuncD <> 1 1 "" - "" "var_dump"
+  PopC
 
   Int 1
   RetC

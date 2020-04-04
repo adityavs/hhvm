@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,22 +22,19 @@ namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 inline IRInstruction::IRInstruction(Opcode op,
-                                    BCMarker marker,
+                                    BCContext bcctx,
                                     Edge* edges,
                                     uint32_t numSrcs,
                                     SSATmp** srcs)
-  : m_typeParam{}
-  , m_op(op)
+  : m_op(op)
+  , m_iroff(bcctx.iroff)
   , m_numSrcs(numSrcs)
   , m_numDsts(0)
   , m_hasTypeParam{false}
-  , m_marker(marker)
-  , m_id(kTransient)
+  , m_marker(bcctx.marker)
   , m_srcs(srcs)
   , m_dest(nullptr)
-  , m_block(nullptr)
   , m_edges(edges)
-  , m_extra(nullptr)
 {
   if (op != DefConst) {
     // DefConst is the only opcode that's allowed to not have a marker, since
@@ -61,7 +58,7 @@ inline bool IRInstruction::consumesReferences() const {
 }
 
 inline bool IRInstruction::mayRaiseError() const {
-  return opcodeHasFlags(op(), MayRaiseError);
+  return opcodeMayRaise(op());
 }
 
 inline bool IRInstruction::isTerminal() const {
@@ -76,17 +73,18 @@ inline bool IRInstruction::isPassthrough() const {
   return opcodeHasFlags(op(), Passthrough);
 }
 
+inline bool IRInstruction::isLayoutAgnostic() const {
+  return opcodeHasFlags(op(), LayoutAgnostic);
+}
+
 inline bool IRInstruction::producesReference() const {
   return opcodeHasFlags(op(), ProducesRC);
 }
 
 inline SSATmp* IRInstruction::getPassthroughValue() const {
   assertx(isPassthrough());
-  assertx(is(IncRef,
-             CheckType, AssertType, AssertNonNull,
-             MapAddElemC, ColAddNewElemC,
-             CastCtxThis,
-             Mov));
+  assertx(is(CheckType, CheckVArray, CheckDArray, CheckDVArray,
+             AssertType, AssertNonNull, Mov, ConvPtrToLval));
   return src(0);
 }
 
@@ -99,6 +97,10 @@ inline uint32_t IRInstruction::id() const {
 
 inline bool IRInstruction::isTransient() const {
   return m_id == kTransient;
+}
+
+inline uint16_t IRInstruction::iroff() const {
+  return m_iroff;
 }
 
 template<typename... Args>
@@ -120,6 +122,18 @@ inline const BCMarker& IRInstruction::marker() const {
 
 inline BCMarker& IRInstruction::marker() {
   return m_marker;
+}
+
+inline BCContext IRInstruction::bcctx() const {
+  return BCContext { m_marker, m_iroff };
+}
+
+inline const Func* IRInstruction::func() const {
+  return m_marker.hasFunc() ? m_marker.func() : nullptr;
+}
+
+inline const Class* IRInstruction::ctx() const {
+  return m_marker.hasFunc() ?  m_marker.func()->cls() : nullptr;
 }
 
 inline bool IRInstruction::hasTypeParam() const { return m_hasTypeParam; }
@@ -151,7 +165,7 @@ inline uint32_t IRInstruction::numDsts() const {
 }
 
 inline SSATmp* IRInstruction::src(uint32_t i) const {
-  always_assert(i < numSrcs());
+  always_assert_flog(i < numSrcs(), "src {} out of range in {}", i, toString());
   return m_srcs[i];
 }
 
@@ -180,6 +194,12 @@ inline void IRInstruction::setSrcs(uint32_t numSrcs, SSATmp** newSrcs) {
   m_srcs = newSrcs;
 }
 
+inline void IRInstruction::deleteSrc(uint32_t i) {
+  always_assert(i < numSrcs());
+  std::copy(m_srcs + i + 1, m_srcs + m_numSrcs, m_srcs + i);
+  --m_numSrcs;
+}
+
 inline void IRInstruction::setDst(SSATmp* newDst) {
   assertx(hasDst());
   m_dest = newDst;
@@ -190,6 +210,13 @@ inline void IRInstruction::setDsts(uint32_t numDsts, SSATmp** newDsts) {
   assertx(naryDst());
   m_numDsts = numDsts;
   m_dsts = newDsts;
+}
+
+inline void IRInstruction::deleteDst(uint32_t i) {
+  always_assert(i < numDsts());
+  assertx(naryDst());
+  std::copy(m_dsts + i + 1, m_dsts + m_numDsts, m_dsts + i);
+  --m_numDsts;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -211,10 +238,16 @@ typename IRExtraDataType<opc>::type* IRInstruction::extra() {
   return static_cast<typename IRExtraDataType<opc>::type*>(m_extra);
 }
 
-template<class T>
+template<typename T>
 const T* IRInstruction::extra() const {
   if (debug) assert_opcode_extra<T>(op());
   return static_cast<const T*>(m_extra);
+}
+
+template<typename T>
+T* IRInstruction::extra() {
+  if (debug) assert_opcode_extra<T>(op());
+  return static_cast<T*>(m_extra);
 }
 
 inline const IRExtraData* IRInstruction::rawExtra() const {

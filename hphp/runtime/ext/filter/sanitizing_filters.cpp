@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -60,9 +60,10 @@ static const unsigned char hexchars[] = "0123456789ABCDEF";
 
 #define DEFAULT_URL_ENCODE    LOWALPHA HIALPHA DIGIT "-._"
 
-static Variant php_filter_encode_url(const String& value, const unsigned char* chars,
-                                     const int char_len, int high, int low,
-                                     int encode_nul) {
+static Variant
+php_filter_encode_url(const String& value, const unsigned char* chars,
+                      const int char_len, int /*high*/, int /*low*/,
+                      int /*encode_nul*/) {
   unsigned char tmp[256];
   unsigned char *s = (unsigned char *)chars;
   unsigned char *e = s + char_len;
@@ -102,8 +103,8 @@ static Variant php_filter_strip(const String& value, long flags) {
   }
 
   /* Optimization for if no strip flags are set */
-  if (! ((flags & k_FILTER_FLAG_STRIP_LOW) ||
-         (flags & k_FILTER_FLAG_STRIP_HIGH)) ) {
+  if (!(flags & (k_FILTER_FLAG_STRIP_LOW |
+                 k_FILTER_FLAG_STRIP_HIGH | k_FILTER_FLAG_STRIP_BACKTICK))) {
     return value;
   }
 
@@ -159,7 +160,7 @@ Variant php_filter_string(PHP_INPUT_FILTER_PARAM_DECL) {
   unsigned char enc[256] = {0};
 
   /* strip high/strip low ( see flags )*/
-  String stripped(php_filter_strip(value, flags));
+  auto const stripped = php_filter_strip(value, flags).toString();
 
   if (!(flags & k_FILTER_FLAG_NO_ENCODE_QUOTES)) {
     enc[uc('\'')] = enc[uc('"')] = 1;
@@ -227,7 +228,7 @@ Variant php_filter_full_special_chars(PHP_INPUT_FILTER_PARAM_DECL) {
   if (!(flags & k_FILTER_FLAG_NO_ENCODE_QUOTES)) {
     quotes = k_ENT_QUOTES;
   } else {
-    quotes = k_ENT_NOQUOTES;
+    quotes = k_ENT_HTML_QUOTE_NONE;
   }
   return HHVM_FN(htmlentities)(value, quotes);
 }

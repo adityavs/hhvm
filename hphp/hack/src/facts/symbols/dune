@@ -1,0 +1,15 @@
+(library
+  (name index_builder)
+  (wrapped false)
+  (libraries
+    core_kernel
+    facts
+    hhbc
+    hhi
+    parser
+    process
+    process_types
+    procs_procs
+    search_utils
+    sqlite_utils
+    utils_hash))

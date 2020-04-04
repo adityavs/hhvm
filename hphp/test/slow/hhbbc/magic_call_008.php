@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class Foo {
   private function fun() {
@@ -20,4 +20,8 @@ function main() {
   (new Foo)->go();
 }
 
+
+<<__EntryPoint>>
+function main_magic_call_008() {
 main();
+}

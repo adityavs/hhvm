@@ -1,9 +1,8 @@
-<?php
+<?hh
 
 function err() {
   return true;
 }
-set_error_handler('err');
 
 function doswitch($foo) {
   echo "--------------------------------\n";
@@ -40,7 +39,7 @@ class c {}
 
 function main() {
   $f = fopen("/dev/null", "w");
-  $things = array(
+  $things = varray[
     null,
     true,
     false,
@@ -53,15 +52,19 @@ function main() {
     'blar',
     '',
     4,
-    array(),
-    array('foo', 'floo'),
+    varray[],
+    varray['foo', 'floo'],
     new stdclass(),
     new c(),
     $f
-  );
+  ];
   var_dump($f == 4);
   foreach ($things as $t) {
     doswitch($t);
   }
 }
-main();
+<<__EntryPoint>>
+function main_entry(): void {
+  set_error_handler(fun('err'));
+  main();
+}

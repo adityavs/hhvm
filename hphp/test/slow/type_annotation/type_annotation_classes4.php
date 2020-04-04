@@ -1,8 +1,11 @@
 <?hh // strict
+namespace {
 
 class C {
   const type T = Foo\D;
   const type U = this;
+}
+
 }
 
 namespace Foo {
@@ -15,10 +18,11 @@ class D {
 class E {
   const type T = D;
 }
-
-var_dump(type_structure(\C::class, 'T'));
-var_dump(type_structure(\C::class, 'U'));
-var_dump(type_structure(D::class, 'T'));
-var_dump(type_structure(D::class, 'U'));
-var_dump(type_structure(E::class, 'T'));
+<<__EntryPoint>> function main(): void {
+\var_dump(type_structure(\C::class, 'T'));
+\var_dump(type_structure(\C::class, 'U'));
+\var_dump(type_structure(D::class, 'T'));
+\var_dump(type_structure(D::class, 'U'));
+\var_dump(type_structure(E::class, 'T'));
+}
 }

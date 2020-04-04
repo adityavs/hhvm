@@ -1,10 +1,12 @@
-<?php
-function f($x = [1]) {
+<?hh
+function f($x = varray[1]) {
   return $x;
 }
 class C {
-  public static $y = [2, 3];
+  public static $y = varray[2, 3];
 }
-var_dump([]);
+<<__EntryPoint>> function main(): void {
+var_dump(varray[]);
 var_dump(f());
 var_dump(C::$y);
+}

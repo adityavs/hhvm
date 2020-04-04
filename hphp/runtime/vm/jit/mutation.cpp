@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,6 @@
 #include "hphp/runtime/vm/jit/mutation.h"
 
 #include "hphp/runtime/vm/jit/cfg.h"
-#include "hphp/runtime/vm/jit/guard-relaxation.h"
 #include "hphp/runtime/vm/jit/state-vector.h"
 #include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/pass-tracer.h"
@@ -86,9 +85,22 @@ struct RefineTmpsRec {
       FTRACE(3, "  {}\n", inst);
       for (auto srcID = uint32_t{0}; srcID < inst.numSrcs(); ++srcID) {
         auto const src = inst.src(srcID);
-        if (auto const replace = find_replacement(src, blk)) {
-          FTRACE(1, "    rewrite {} -> {} in {}\n", *src, *replace, inst);
-          inst.setSrc(srcID, replace);
+        // We'll often see multiple refinements of a given tmp in a row; for
+        // example, in a retranslation chain, we may see a negative type assert
+        // for the previous check followed by a new CheckType. Keep following
+        // this chain of replacements as long as they're usable.
+        //
+        // We shouldn't hit a cycle here because we always transition to a tmp
+        // defined earlier in the same block or to one defined in a dominator.
+        auto prev = src;
+        auto next = src;
+        while (next != nullptr) {
+          prev = next;
+          next = find_replacement(next, blk);
+        }
+        if (prev != src) {
+          FTRACE(1, "    rewrite {} -> {} in {}\n", *src, *prev, inst);
+          inst.setSrc(srcID, prev);
           if (inst.hasDst()) needsReflow = true;
         }
       }
@@ -99,7 +111,11 @@ struct RefineTmpsRec {
         continue;
       }
 
-      if (inst.is(CheckType, AssertType)) {
+      if (inst.is(CheckType, AssertType, CheckVArray, CheckDArray)) {
+        // Type information for one use of a pointer can't be transferred to
+        // other uses, because we may overwrite the pointer's target in between
+        // the uses (e.g. due to minstr escalation).
+        if (inst.hasTypeParam() && inst.typeParam() <= TMemToCell) continue;
         if (!saved_state) saved_state = state;
         auto const dst = inst.dst();
         auto const src = inst.src(0);
@@ -134,10 +150,8 @@ struct RefineTmpsRec {
 
 }
 
-void cloneToBlock(const BlockList& rpoBlocks,
-                  IRUnit& unit,
-                  Block::iterator const first,
-                  Block::iterator const last,
+void cloneToBlock(const BlockList& /*rpoBlocks*/, IRUnit& unit,
+                  Block::iterator const first, Block::iterator const last,
                   Block* const target) {
   StateVector<SSATmp,SSATmp*> rewriteMap(unit, nullptr);
 
@@ -207,7 +221,7 @@ void moveToBlock(Block::iterator const first,
   }
 }
 
-bool retypeDests(IRInstruction* inst, const IRUnit* unit) {
+bool retypeDests(IRInstruction* inst, const IRUnit* /*unit*/) {
   auto changed = false;
   for (auto i = uint32_t{0}; i < inst->numDsts(); ++i) {
     DEBUG_ONLY auto const oldType = inst->dst(i)->type();
@@ -276,7 +290,7 @@ void insertNegativeAssertTypes(IRUnit& unit, const BlockList& blocks) {
     auto const takenTy = negativeCheckType(srcTy, checkTy);
     if (takenTy < srcTy) {
       inst.taken()->prepend(
-        unit.gen(AssertType, inst.marker(), takenTy, inst.src(0))
+        unit.gen(AssertType, inst.bcctx(), takenTy, inst.src(0))
       );
     }
   }
@@ -293,20 +307,20 @@ void refineTmps(IRUnit& unit,
 }
 
 SSATmp* insertPhi(IRUnit& unit, Block* blk,
-                  const jit::vector<SSATmp*>& inputs) {
-  assert(blk->numPreds() > 1);
+                  const jit::hash_map<Block*, SSATmp*>& inputs) {
+  assertx(blk->numPreds() > 1);
   auto label = &blk->front();
   if (!label->is(DefLabel)) {
-    label = unit.defLabel(1, label->marker());
-    blk->insert(blk->begin(), label);
+    label = unit.defLabel(1, blk, label->bcctx());
   } else {
     for (auto d = label->numDsts(); d--; ) {
       auto result = label->dst(d);
-      uint32_t i = 0;
       blk->forEachPred([&](Block* pred) {
           if (result) {
             auto& jmp = pred->back();
-            if (jmp.src(d) != inputs[i++]) {
+            auto it = inputs.find(pred);
+            assertx(it != inputs.end());
+            if (jmp.src(d) != it->second) {
               result = nullptr;
             }
           }
@@ -316,12 +330,22 @@ SSATmp* insertPhi(IRUnit& unit, Block* blk,
     unit.expandLabel(label, 1);
   }
 
-  uint32_t i = 0;
   blk->forEachPred([&](Block* pred) {
-      unit.expandJmp(&pred->back(), inputs[i++]);
+      auto it = inputs.find(pred);
+      assertx(it != inputs.end());
+      unit.expandJmp(&pred->back(), it->second);
     });
   retypeDests(label, &unit);
   return label->dst(label->numDsts() - 1);
+}
+
+SSATmp* deletePhiDest(IRInstruction* label, unsigned i) {
+  assertx(label->is(DefLabel));
+  auto dest = label->dst(i);
+  label->block()->forEachSrc(
+    i, [&](IRInstruction* jmp, SSATmp* /*src*/) { jmp->deleteSrc(i); });
+  label->deleteDst(i);
+  return dest;
 }
 
 //////////////////////////////////////////////////////////////////////

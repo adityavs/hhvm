@@ -1,3 +1,4 @@
+.hh_file 1;
 # Test making closures
 
 .main {
@@ -5,12 +6,14 @@
   SetL $x
   PopC
 
-  CUGetL $x
-  CreateCl 1 "ClosureTest"
+  NullUninit
+  NullUninit
+  NullUninit
 
-  FPushFunc 0
-  FCall 0
-  UnboxR
+  CUGetL $x
+  CreateCl 1 0
+
+  FCallFunc <> 0 1 "" - ""
   Print
   PopC
 
@@ -20,8 +23,8 @@
 
 .class [no_override unique] ClosureTest extends Closure {
   .property [private] x = uninit;
-  .method [public static mayusevv] __invoke() isClosureBody {
-    .declvars $0Closure $x;
+  .method [public static] __invoke() isClosureBody {
+    .declvars $x;
     CGetL $x
     RetC
   }

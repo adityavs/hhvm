@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -14,6 +14,8 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
+#include <sstream>
 
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/runtime-option.h"
@@ -139,7 +141,7 @@ bool php_mail(const String& to, const String& subject, const String& message,
 ///////////////////////////////////////////////////////////////////////////////
 
 const StaticString
-  s_zero("\0", 1),
+  s_zero("\0"),
   s_space(" ");
 
 bool HHVM_FUNCTION(mail,
@@ -194,8 +196,7 @@ int64_t HHVM_FUNCTION(ezmlm_hash, const String& addr) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MailExtension final : public Extension {
- public:
+struct MailExtension final : Extension {
   MailExtension() : Extension("mail") { }
   void moduleInit() override {
     HHVM_FE(mail);

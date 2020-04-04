@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class C {
   function __construct() {
@@ -12,7 +12,7 @@ class C {
     echo "set C\n";
     $this->_p[ $what ] = $value;
   }
-  private $_p = array();
+  private $_p = varray[];
 }
 function f() {
   echo "f()\n";
@@ -24,4 +24,8 @@ function foo() {
   $obj->b = new C;
   $obj->b->a = f();
 }
+
+<<__EntryPoint>>
+function main_1519() {
 foo();
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,7 +25,6 @@
 #include "hphp/runtime/debugger/debugger_thrift_buffer.h"
 #include "hphp/runtime/base/preg.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/comparisons.h"
@@ -86,7 +85,7 @@ InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
       m_callingSite(nullptr), m_class(nullptr),
       m_file((StringData*)nullptr),
       m_line0(0), m_char0(0), m_line1(0), m_char1(0),
-      m_offset(InvalidAbsoluteOffset), m_unit(nullptr), m_valid(false),
+      m_offset(kInvalidOffset), m_unit(nullptr), m_valid(false),
       m_funcEntry(false) {
   TRACE(2, "InterruptSite::InterruptSite\n");
 #define bail_on(c) if (c) { return; }
@@ -96,7 +95,9 @@ InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
   if (hardBreakPoint && fp->skipFrame()) {
     // for hard breakpoint, the fp is for an extension function,
     // so we need to construct the site on the caller
-    fp = context->getPrevVMState(fp, &m_offset);
+    Offset offset;
+    fp = context->getPrevVMStateSkipFrame(fp, &offset);
+    m_offset = fp->unit()->offsetOf(skipCall(fp->unit()->at(offset)));
   } else {
     auto const *pc = vmpc();
     auto f = fp->m_func;
@@ -132,7 +133,7 @@ void InterruptSite::Initialize(ActRec *fp) {
   TRACE(2, "InterruptSite::Initialize\n");
 
 #define bail_on(c) if (c) { return; }
-  assert(fp);
+  assertx(fp);
   m_activationRecord = fp;
   bail_on(!fp->m_func);
   m_unit = fp->m_func->unit();
@@ -182,7 +183,7 @@ const char *BreakPointInfo::GetInterruptName(InterruptType interrupt) {
     case RequestEnded:   return "end of request or start of psp";
     case PSPEnded:       return "end of psp";
     default:
-      assert(false);
+      assertx(false);
       break;
   }
   return nullptr;
@@ -216,7 +217,7 @@ BreakPointInfo::BreakPointInfo(bool regex, State state,
       m_line1(0), m_line2(0),
       m_regex(regex), m_check(false) {
   TRACE(2, "BreakPointInfo::BreakPointInfo..const std::string &file)\n");
-  assert(m_interruptType != ExceptionHandler); // Server-side only.
+  assertx(m_interruptType != ExceptionHandler); // Server-side only.
   if (m_interruptType == ExceptionThrown) {
     parseExceptionThrown(exp);
   } else {
@@ -338,7 +339,7 @@ void BreakPointInfo::toggle() {
     case Once:     setState(Disabled); break;
     case Disabled: setState(Always);   break;
     default:
-      assert(false);
+      assertx(false);
       break;
   }
 }
@@ -435,7 +436,7 @@ std::string BreakPointInfo::state(bool padding) const {
     case Once:     return padding ? "ONCE    " : "ONCE"    ;
     case Disabled: return padding ? "DISABLED" : "DISABLED";
     default:
-      assert(false);
+      assertx(false);
       break;
   }
   return "";
@@ -635,7 +636,7 @@ void mangleXhpName(const std::string &source, std::string &target) {
 
 int32_t scanName(const std::string &str, int32_t offset) {
   auto len = str.length();
-  assert(0 <= offset && offset <= len);
+  assertx(0 <= offset && offset <= len);
   while (offset < len) {
     char ch = str[offset];
     if (ch == ':' || ch == '\\' || ch == ',' || ch == '(' || ch == '=' ||
@@ -661,7 +662,7 @@ int32_t scanName(const std::string &str, int32_t offset) {
 int32_t scanNumber(const std::string &str, int32_t offset, int32_t& value) {
   value = 0;
   auto len = str.length();
-  assert(0 <= offset && offset < len);
+  assertx(0 <= offset && offset < len);
   while (offset < len) {
     char ch = str[offset];
     if (ch < '0' || ch > '9') return offset;
@@ -674,7 +675,7 @@ int32_t scanNumber(const std::string &str, int32_t offset, int32_t& value) {
 int32_t BreakPointInfo::parseFileLocation(const std::string &str,
                                           int32_t offset) {
   auto len = str.length();
-  assert(0 <= offset && offset < len);
+  assertx(0 <= offset && offset < len);
   auto offset1 = scanNumber(str, offset, m_line1);
   if (offset1 == offset) return offset; //Did not find a number
   m_line2 = m_line1; //so that we always have a range
@@ -999,12 +1000,12 @@ bool BreakPointInfo::Match(const char *haystack, int haystack_len,
                                 CopyString),
                          String(haystack, haystack_len, CopyString),
                          &matches);
-  return HPHP::same(r, 1);
+  return HPHP::same(r, static_cast<int64_t>(1));
 }
 
 bool BreakPointInfo::checkExceptionOrError(const Variant& e) {
   TRACE(2, "BreakPointInfo::checkException\n");
-  assert(!e.isNull());
+  assertx(!e.isNull());
   if (e.isObject()) {
     if (m_regex) {
       return Match(m_class.c_str(), m_class.size(),
@@ -1034,7 +1035,7 @@ bool BreakPointInfo::checkUrl(std::string &url) {
 bool BreakPointInfo::checkLines(int line) {
   TRACE(2, "BreakPointInfo::checkLines\n");
   if (m_line1) {
-    assert(m_line2 == -1 || m_line2 >= m_line1);
+    assertx(m_line2 == -1 || m_line2 >= m_line1);
     return line >= m_line1 && (m_line2 == -1 || line <= m_line2);
   }
   return true;
@@ -1078,11 +1079,10 @@ bool BreakPointInfo::checkClause(DebuggerProxy &proxy) {
       // Don't hit more breakpoints while attempting to decide if we should stop
       // at this breakpoint.
       EvalBreakControl eval(true);
-      bool failed;
-      Variant ret = proxy.ExecutePHP(m_php, output, 0, failed,
-                                     DebuggerProxy::ExecutePHPFlagsNone);
+      auto const ret = proxy.ExecutePHP(m_php, output, 0,
+                                        DebuggerProxy::ExecutePHPFlagsNone);
       if (m_check) {
-        return ret.toBoolean();
+        return ret.second.toBoolean();
       }
     }
     m_output = std::string(output.data(), output.size());

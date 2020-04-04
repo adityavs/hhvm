@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,11 +16,13 @@
 
 #include "hphp/runtime/server/fastcgi/fastcgi-server.h"
 
+#include "hphp/runtime/server/http-server.h"
+
 namespace HPHP {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool FastCGIAcceptor::canAccept(const folly::SocketAddress& address) {
+bool FastCGIAcceptor::canAccept(const folly::SocketAddress& /*address*/) {
   // TODO: Support server IP whitelist.
   auto const cons = m_server->getLibEventConnectionCount();
   return (RuntimeOption::ServerConnectionLimit == 0 ||
@@ -28,12 +30,11 @@ bool FastCGIAcceptor::canAccept(const folly::SocketAddress& address) {
 }
 
 void FastCGIAcceptor::onNewConnection(
-  folly::AsyncSocket::UniquePtr sock,
+  folly::AsyncTransportWrapper::UniquePtr sock,
   const folly::SocketAddress* peerAddress,
-  const std::string& nextProtocolName,
-  SecureTransportType secureProtocolType,
-  const ::wangle::TransportInfo& tinfo)
-{
+  const std::string& /*nextProtocolName*/,
+  SecureTransportType /*secureProtocolType*/,
+  const ::wangle::TransportInfo& /*tinfo*/) {
   folly::SocketAddress localAddress;
   try {
     sock->getLocalAddress(&localAddress);
@@ -66,10 +67,9 @@ FastCGIServer::FastCGIServer(const std::string &address,
                              int port,
                              int workers,
                              bool useFileSocket)
-  : Server(address, port, workers),
+  : Server(address, port),
     m_worker(&m_eventBaseManager),
-    m_dispatcher(workers,
-                 RuntimeOption::ServerThreadRoundRobin,
+    m_dispatcher(workers, workers,
                  RuntimeOption::ServerThreadDropCacheTimeoutSeconds,
                  RuntimeOption::ServerThreadDropStack,
                  this,
@@ -80,14 +80,15 @@ FastCGIServer::FastCGIServer(const std::string &address,
   if (useFileSocket) {
     sock_addr.setFromPath(address);
   } else if (address.empty()) {
-    sock_addr.setFromLocalPort(port);
+    sock_addr.setFromHostPort("localhost", port);
+    assert(sock_addr.isLoopbackAddress());
   } else {
     sock_addr.setFromHostPort(address, port);
   }
   m_socketConfig.bindAddress = sock_addr;
   m_socketConfig.acceptBacklog = RuntimeOption::ServerBacklog;
   std::chrono::seconds timeout;
-  if (RuntimeOption::ConnectionTimeoutSeconds > 0) {
+  if (RuntimeOption::ConnectionTimeoutSeconds >= 0) {
     timeout = std::chrono::seconds(RuntimeOption::ConnectionTimeoutSeconds);
   } else {
     // default to 2 minutes
@@ -102,7 +103,7 @@ void FastCGIServer::start() {
   try {
     m_socket->bind(m_socketConfig.bindAddress);
   } catch (const std::system_error& ex) {
-    LOG(ERROR) << ex.what();
+    Logger::Error(std::string(ex.what()));
     if (m_socketConfig.bindAddress.getFamily() == AF_UNIX) {
       throw FailedToListenException(m_socketConfig.bindAddress.getPath());
     }
@@ -141,6 +142,7 @@ void FastCGIServer::stop() {
   if (getStatus() != RunStatus::RUNNING) return; // nothing to do
 
   setStatus(RunStatus::STOPPING);
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DRAIN_READS);
 
   m_worker.getEventBase()->runInEventBaseThread([&] {
     // Shutdown the server socket. Unfortunately, we will drop all unaccepted
@@ -189,14 +191,15 @@ void FastCGIServer::terminateServer() {
   if (getStatus() != RunStatus::STOPPING) {
     setStatus(RunStatus::STOPPING);
   }
-
   // Wait for the server socket thread to stop running
   m_worker.stopWhenIdle();
 
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DRAIN_DISPATCHER);
   // Wait for VMs to shutdown
   m_dispatcher.stop();
 
   setStatus(RunStatus::STOPPED);
+  HttpServer::MarkShutdownStat(ShutdownEvent::SHUTDOWN_DONE);
 
   // Notify HttpServer that we've shutdown
   for (auto listener: m_listeners) {

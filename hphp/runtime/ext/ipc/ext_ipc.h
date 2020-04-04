@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,6 +24,10 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // message queue
 
+constexpr int64_t k_MSG_IPC_NOWAIT = 1;
+constexpr int64_t k_MSG_NOERROR    = 2;
+constexpr int64_t k_MSG_EXCEPT     = 4;
+
 int64_t HHVM_FUNCTION(ftok,
                       const String& pathname,
                       const String& proj);
@@ -37,18 +41,18 @@ bool HHVM_FUNCTION(msg_send,
                    const Resource& queue,
                    int64_t msgtype,
                    const Variant& message,
-                   bool serialize = true,
-                   bool blocking = true,
-                   VRefParam errorcode = uninit_null());
+                   bool serialize,
+                   bool blocking,
+                   Variant& errorcode);
 bool HHVM_FUNCTION(msg_receive,
                    const Resource& queue,
                    int64_t desiredmsgtype,
-                   VRefParam msgtype,
+                   int64_t& msgtype,
                    int64_t maxsize,
-                   VRefParam message,
-                   bool unserialize = true,
-                   int64_t flags = 0,
-                   VRefParam errorcode = uninit_null());
+                   Variant& message,
+                   bool unserialize,
+                   int64_t flags,
+                   Variant& errorcode);
 bool HHVM_FUNCTION(msg_remove_queue,
                    const Resource& queue);
 bool HHVM_FUNCTION(msg_set_queue,
@@ -61,7 +65,8 @@ Array HHVM_FUNCTION(msg_stat_queue,
 // semaphore
 
 bool HHVM_FUNCTION(sem_acquire,
-                   const Resource& sem_identifier);
+                   const Resource& sem_identifier,
+                   bool nowait = false);
 Variant HHVM_FUNCTION(sem_get,
                       int64_t key,
                       int64_t max_acquire = 1,

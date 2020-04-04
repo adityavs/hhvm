@@ -1,4 +1,4 @@
-<?php
+<?hh
 error_reporting(E_ALL & ~E_DEPRECATED);
 
 /* Prototype  : string mcrypt_ecb(string cipher, string key, string data, int mode, string iv)
@@ -16,7 +16,7 @@ function test_error_handler($err_no, $err_msg, $filename, $linenum, $vars) {
 		echo "Error: $err_no - $err_msg, $filename($linenum)\n";
 	}
 }
-set_error_handler('test_error_handler');
+set_error_handler(fun('test_error_handler'));
 
 // Initialise function arguments not being substituted (if any)
 $cipher = MCRYPT_TRIPLEDES;
@@ -49,11 +49,11 @@ EOT;
 $fp = fopen(__FILE__, "r");
 
 // add arrays
-$index_array = array (1, 2, 3);
-$assoc_array = array ('one' => 1, 'two' => 2);
+$index_array = varray [1, 2, 3];
+$assoc_array = darray ['one' => 1, 'two' => 2];
 
 //array of values to iterate over
-$inputs = array(
+$inputs = darray[
 
       // int data
       'int 0' => 0,
@@ -69,10 +69,10 @@ $inputs = array(
       'float .5' => .5,
 
       // array data
-      'empty array' => array(),
+      'empty array' => varray[],
       'int indexed array' => $index_array,
       'associative array' => $assoc_array,
-      'nested arrays' => array('foo', $index_array, $assoc_array),
+      'nested arrays' => varray['foo', $index_array, $assoc_array],
 
       // null data
       'uppercase NULL' => NULL,
@@ -100,16 +100,15 @@ $inputs = array(
       
       // resource variable
       'resource' => $fp      
-);
+];
 
 // loop through each element of the array for iv
 
 foreach($inputs as $valueType =>$value) {
       echo "\n--$valueType--\n";
-      var_dump(bin2hex( mcrypt_ecb($cipher, $key, $data, $mode, $value)));
+      try { var_dump(bin2hex( mcrypt_ecb($cipher, $key, $data, $mode, $value))); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
 };
 
 fclose($fp);
 
-?>
-===DONE===
+echo "===DONE===\n";

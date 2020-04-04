@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,8 +18,6 @@
 
 namespace HPHP {
 
-struct IMarker;
-
 //////////////////////////////////////////////////////////////////////
 
 /*
@@ -33,17 +31,12 @@ struct RequestEventHandler {
 
   virtual void requestInit() = 0;
   virtual void requestShutdown() = 0;
-  virtual void vscan(IMarker&) const = 0;
-  template<class F> void scan(F&) const;
 
   /*
    * Priority of request shutdown call. Lower priority values are called
    * earlier than higher priority values. Since priorities are only meaningful
    * due to how they relate to each other, it's important to consider existing
    * overrides when overriding this (add your handler here if you do):
-   *
-   * 10: ZendObjectStore
-   *       (in runtime/ext_zend_compat/hhvm/zend-object-store.h)
    */
   virtual int priority() const { return 0; }
 

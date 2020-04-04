@@ -1,13 +1,13 @@
-<?hh
+<?hh // partial
 
-function compact<T>(Vector<?T> $vector): Vector<T> {
-  //UNSAFE
+/* HH_FIXME[4336] */
+function my_compact<T>(Vector<?T> $vector): Vector<T> {
 }
 
 function test(bool $b): ?string {
 
-  $nullable = Vector {null}; // Vector([?T]])
-  $non_nullable = compact($nullable); // Vector([T])
+  $nullable = Vector { null }; // Vector([?T]])
+  $non_nullable = my_compact($nullable); // Vector([T])
 
   if ($b) {
     $res = $nullable;

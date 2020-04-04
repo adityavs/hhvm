@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class C extends I {
 
@@ -10,3 +10,4 @@ class C extends I {
 
 
 }
+

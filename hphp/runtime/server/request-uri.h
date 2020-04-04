@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,11 +22,10 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class VirtualHost;
-class Transport;
+struct VirtualHost;
+struct Transport;
 
-class RequestURI {
-public:
+struct RequestURI {
   RequestURI(const VirtualHost *vhost, Transport *transport,
              const std::string &pathTranslation,
              const std::string &sourceRoot);
@@ -44,6 +43,7 @@ public:
 
   bool rewritten() const { return m_rewritten; }
   bool defaultDoc() const { return m_defaultDoc; }
+  bool globalDoc() const { return m_globalDoc; }
   bool done() const { return m_done; }
   bool forbidden() const { return m_forbidden; }
 
@@ -65,6 +65,7 @@ private:
 
   bool m_rewritten;  // whether rewrite rules have applied
   bool m_defaultDoc; // whether DefaultDocument was appended
+  bool m_globalDoc; // whether GlobalDocument was used
   bool m_done;
   bool m_forbidden;
   const char *m_ext;   // file extension
@@ -75,6 +76,9 @@ private:
   bool rewriteURL(const VirtualHost *vhost, Transport *transport,
                   const std::string &pathTranslation,
                   const std::string &sourceRoot);
+  bool resolveGlobalURL(const VirtualHost *vhost,
+                        const std::string &pathTranslation,
+                        const std::string &sourceRoot);
   bool resolveURL(const VirtualHost *vhost,
                   const std::string &pathTranslation,
                   const std::string &sourceRoot);

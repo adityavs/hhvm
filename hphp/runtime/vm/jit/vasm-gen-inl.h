@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,6 +14,8 @@
    +----------------------------------------------------------------------+
 */
 
+#include "hphp/runtime/vm/jit/cg-meta.h"
+
 #include <algorithm>
 
 namespace HPHP { namespace jit {
@@ -24,7 +26,8 @@ namespace HPHP { namespace jit {
 inline Vout& Vout::operator=(const Vout& v) {
   assertx(&v.m_unit == &m_unit);
   m_block = v.m_block;
-  m_origin = v.m_origin;
+  m_irctx = v.m_irctx;
+  m_weight_scale = v.m_weight_scale;
   return *this;
 }
 
@@ -38,11 +41,15 @@ inline Vout::operator Vlabel() const {
 }
 
 inline AreaIndex Vout::area() const {
-  return m_unit.blocks[m_block].area;
+  return m_unit.blocks[m_block].area_idx;
 }
 
 inline Vreg Vout::makeReg() {
   return m_unit.makeReg();
+}
+
+inline Vaddr Vout::makeAddr() {
+  return m_unit.makeAddr();
 }
 
 inline Vtuple Vout::makeTuple(const VregList& regs) const {
@@ -62,5 +69,39 @@ inline Vreg Vout::cns(T v) {
   return m_unit.makeConst(Vconst{v});
 }
 
+template<class T, class... Args>
+T* Vout::allocData(Args&&... args) {
+  return m_unit.allocData<T>(std::forward<Args>(args)...);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
+
+namespace detail {
+
+template<class GenFunc>
+TCA vwrap_impl(CodeBlock& main, CodeBlock& cold, DataBlock& data,
+               CGMeta* meta, GenFunc gen, CodeKind kind, bool relocate) {
+  CGMeta dummy_meta;
+
+  auto const start = main.frontier();
+
+  { // Finish emitting in this scope so that we can assert about `dummy_meta'.
+    Vauto vauto { main, cold, data, meta ? *meta : dummy_meta, kind, relocate };
+    gen(vauto.main(), vauto.cold());
+  }
+
+  dummy_meta.process_literals();
+  if (!meta) {
+    dummy_meta.addressImmediates.clear();
+    dummy_meta.fallthru.reset();
+  }
+  assertx(dummy_meta.empty());
+
+  return start;
+}
+
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 }}

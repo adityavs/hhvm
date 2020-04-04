@@ -1,2 +1,0 @@
-array<[1]intersect(Tstring), [2]intersect(Tstring, Tint)>
-No errors

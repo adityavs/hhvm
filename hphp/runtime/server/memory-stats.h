@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,27 +26,17 @@
 
 namespace HPHP {
 
-class MemoryStats {
-  struct StatM {
-    size_t m_vmSize;
-    size_t m_vmRss;
-    size_t m_share;
-    size_t m_text;
-    size_t m_data;
-  };
+struct MemoryStats {
+  void ReportMemory(std::string &out, Writer::Format format);
+  static MemoryStats* GetInstance();
+  void ResetStaticStringSize();
+  void LogStaticStringAlloc(size_t bytes);
 
-  public:
-    void ReportMemory(std::string &out, Writer::Format format);
-    static MemoryStats* GetInstance();
-    void ResetStaticStringSize();
-    void LogStaticStringAlloc(size_t bytes);
-    MemoryStats() {}
-
-  private:
-    size_t GetStaticStringSize();
-    bool FillProcessStatM(StatM* pStatM);
-    std::atomic<size_t> m_staticStringSize;
+private:
+  size_t GetStaticStringSize();
+  std::atomic<size_t> m_staticStringSize;
 };
+
 }
 
 #endif //incl_HPHP_MEMORYSTATS_H_

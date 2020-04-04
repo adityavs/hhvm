@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // Lazy infinite list!
 function fibonacci($first, $second) {
@@ -10,8 +10,9 @@ function fibonacci($first, $second) {
     $a = $temp;
   }
 }
-
+<<__EntryPoint>> function main(): void {
 foreach (fibonacci(0, 1) as $k) {
   if ($k > 1000) break;
   echo $k . "\n";
+}
 }

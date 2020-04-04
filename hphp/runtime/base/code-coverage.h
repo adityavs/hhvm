@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,27 +17,35 @@
 #ifndef incl_HPHP_EVAL_CODE_COVERAGE_H_
 #define incl_HPHP_EVAL_CODE_COVERAGE_H_
 
-#include "hphp/util/hash-map-typedefs.h"
+#include "hphp/runtime/base/req-hash-map.h"
+#include "hphp/runtime/base/req-vector.h"
 
+#include <folly/Optional.h>
 #include <string>
 #include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Array;
+struct Array;
 
 struct CodeCoverage {
   void Record(const char* filename, int line0, int line1);
+  void onSessionInit();
+  void onSessionExit();
 
   /*
-   * Returns an array in this format,
+   * If report_frequency is passed, returns an array in this format,
+   *
+   * array('filename' => covered_line_count, ....)
+   *
+   * Otherwise, returns an array in this format,
    *
    *  array('filename' => array( line => count, ...))
    *
    * If sys is passed as false, systemlib files are not included.
    */
-  Array Report(bool sys = true);
+  Array Report(bool report_frequency = false, bool sys = true);
 
   /*
    * Write JSON format into the file.
@@ -53,9 +61,15 @@ struct CodeCoverage {
    */
   void Reset();
 
+  /*
+   * Causes CodeCoverage to dump any coverage data onSessionExit()
+   */
+  void dumpOnExit() { shouldDump = true; }
+
 private:
-  typedef hphp_const_char_map<std::vector<int>> CodeCoverageMap;
-  CodeCoverageMap m_hits;
+  using CodeCoverageMap = req::vector_map<const char*, req::vector<int>>;
+  folly::Optional<CodeCoverageMap> m_hits;
+  bool shouldDump{false};
 };
 
 ///////////////////////////////////////////////////////////////////////////////

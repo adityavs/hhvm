@@ -5821,8 +5821,12 @@ static void TestUScvtfHelper(uint64_t in,
     double expected_ucvtf = expected_ucvtf_base / pow(2, fbits);
     ASSERT_EQUAL_FP64(expected_scvtf, results_scvtf_x[fbits]);
     ASSERT_EQUAL_FP64(expected_ucvtf, results_ucvtf_x[fbits]);
-    if (cvtf_s32) ASSERT_EQUAL_FP64(expected_scvtf, results_scvtf_w[fbits]);
-    if (cvtf_u32) ASSERT_EQUAL_FP64(expected_ucvtf, results_ucvtf_w[fbits]);
+    if (cvtf_s32) {
+      ASSERT_EQUAL_FP64(expected_scvtf, results_scvtf_w[fbits]);
+    }
+    if (cvtf_u32) {
+      ASSERT_EQUAL_FP64(expected_ucvtf, results_ucvtf_w[fbits]);
+    }
   }
   for (int fbits = 33; fbits <= 64; fbits++) {
     double expected_scvtf = expected_scvtf_base / pow(2, fbits);
@@ -5975,8 +5979,12 @@ static void TestUScvtf32Helper(uint64_t in,
     float expected_ucvtf = expected_ucvtf_base / pow(2, fbits);
     ASSERT_EQUAL_FP32(expected_scvtf, results_scvtf_x[fbits]);
     ASSERT_EQUAL_FP32(expected_ucvtf, results_ucvtf_x[fbits]);
-    if (cvtf_s32) ASSERT_EQUAL_FP32(expected_scvtf, results_scvtf_w[fbits]);
-    if (cvtf_u32) ASSERT_EQUAL_FP32(expected_ucvtf, results_ucvtf_w[fbits]);
+    if (cvtf_s32) {
+      ASSERT_EQUAL_FP32(expected_scvtf, results_scvtf_w[fbits]);
+    }
+    if (cvtf_u32) {
+      ASSERT_EQUAL_FP32(expected_ucvtf, results_ucvtf_w[fbits]);
+    }
     break;
   }
   for (int fbits = 33; fbits <= 64; fbits++) {
@@ -7671,15 +7679,15 @@ TEST(Assembler, printf_no_preserve) {
 // Functions for testing the HostCall pseudo-opcode.
 extern "C" {
 
-int64_t minusOne() {
+intptr_t minusOne() {
   return -1;
 }
 
-char secondChar(const char* str) {
+intptr_t secondChar(const char* str) {
   return str[1];
 }
 
-int addTogether(int a, int b) {
+intptr_t addTogether(intptr_t a, intptr_t b) {
   // Make sure the arguments are in the right order
   return (3 * a) + b;
 }

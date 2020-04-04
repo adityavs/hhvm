@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,30 +15,32 @@
 */
 #include "hphp/runtime/base/file-util.h"
 
+#include <algorithm>
 #include <vector>
 #include <fstream>
 
 #include <boost/filesystem.hpp>
 
 #include <sys/types.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <libgen.h>
 
 #include <folly/String.h>
+#include <folly/portability/Dirent.h>
+#include <folly/portability/Fcntl.h>
+#include <folly/portability/Libgen.h>
+#include <folly/portability/SysStat.h>
 
+#include "hphp/runtime/base/file-util-defs.h"
+#include "hphp/runtime/base/runtime-error.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
-#include "hphp/util/exception.h"
 #include "hphp/util/network.h"
 #include "hphp/util/compatibility.h"
+#include "hphp/util/process.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 using std::string;
-using std::vector;
 namespace fs = boost::filesystem;
 
 bool FileUtil::mkdir(const std::string &path, int mode /* = 0777 */) {
@@ -71,14 +73,14 @@ static bool same(const char *file1, const char *file2) {
     Logger::Error("unable to read %s", file1);
     return false;
   }
+  SCOPE_EXIT { fclose(f1); };
   FILE *f2 = fopen(file2, "r");
   if (f2 == nullptr) {
-    fclose(f1);
     Logger::Error("unable to read %s", file2);
     return false;
   }
+  SCOPE_EXIT { fclose(f2); };
 
-  bool ret = false;
   char buf1[8192];
   char buf2[sizeof(buf1)];
   int n1;
@@ -88,22 +90,19 @@ static bool same(const char *file1, const char *file2) {
     while (toread) {
       int n2 = fread(buf2 + pos, 1, toread, f2);
       if (n2 <= 0) {
-        goto exit_false;
+        return false;
       }
       toread -= n2;
       pos += n2;
     }
     if (memcmp(buf1, buf2, n1) != 0) {
-      goto exit_false;
+      return false;
     }
   }
   if (fread(buf2, 1, 1, f2) == 0) {
-    ret = true;
+    return true;
   }
- exit_false:
-  fclose(f2);
-  fclose(f1);
-  return ret;
+  return false;
 }
 
 void FileUtil::syncdir(const std::string &dest_, const std::string &src_,
@@ -120,13 +119,14 @@ void FileUtil::syncdir(const std::string &dest_, const std::string &src_,
     Logger::Error("syncdir: unable to open dest %s", dest.c_str());
     return;
   }
+  SCOPE_EXIT { closedir(ddest); };
 
   DIR *dsrc = opendir(src.c_str());
   if (dsrc == nullptr) {
-    closedir(ddest);
     Logger::Error("syncdir: unable to open src %s", src.c_str());
     return;
   }
+  SCOPE_EXIT { closedir(dsrc); };
 
   dirent *e;
 
@@ -192,39 +192,42 @@ void FileUtil::syncdir(const std::string &dest_, const std::string &src_,
       }
     }
   }
-
-  closedir(dsrc);
-  closedir(ddest);
 }
 
 int FileUtil::copy(const char *srcfile, const char *dstfile) {
   int srcFd = open(srcfile, O_RDONLY);
   if (srcFd == -1) return -1;
+  SCOPE_EXIT { close(srcFd); };
+
+  struct stat st;
+  int ret = fstat(srcFd, &st);
+  if (ret == -1) {
+    Logger::Error("fstat failed: %s", folly::errnoStr(errno).c_str());
+    return -1;
+  }
+  if (!S_ISREG(st.st_mode)) {
+    Logger::Error("copy failed: the first argument must be a regular file");
+    return -1;
+  }
+
   int dstFd = open(dstfile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (dstFd == -1) return -1;
+  SCOPE_EXIT { close(dstFd); };
 
   while (1) {
     char buf[8192];
-    bool err = false;
     ssize_t rbytes = read(srcFd, buf, sizeof(buf));
     ssize_t wbytes;
     if (rbytes == 0) break;
     if (rbytes == -1) {
-      err = true;
       Logger::Error("read failed: %s", folly::errnoStr(errno).c_str());
+      return -1;
     } else if ((wbytes = write(dstFd, buf, rbytes)) != rbytes) {
-      err = true;
       Logger::Error("write failed: %zd, %s", wbytes,
                     folly::errnoStr(errno).c_str());
-    }
-    if (err) {
-      close(srcFd);
-      close(dstFd);
       return -1;
     }
   }
-  close(srcFd);
-  close(dstFd);
   return 0;
 }
 
@@ -239,8 +242,22 @@ static int force_sync(int fd) {
 int FileUtil::directCopy(const char *srcfile, const char *dstfile) {
   int srcFd = open(srcfile, O_RDONLY);
   if (srcFd == -1) return -1;
+  SCOPE_EXIT { close(srcFd); };
+
+  struct stat st;
+  int ret = fstat(srcFd, &st);
+  if (ret == -1) {
+    Logger::Error("fstat failed: %s", folly::errnoStr(errno).c_str());
+    return -1;
+  }
+  if (!S_ISREG(st.st_mode)) {
+    Logger::Error("copy failed: the first argument must be a regular file");
+    return -1;
+  }
+
   int dstFd = open(dstfile, O_WRONLY | O_CREAT | O_TRUNC, 0666);
   if (dstFd == -1) return -1;
+  SCOPE_EXIT { close(dstFd); };
 
 #if defined(__APPLE__)
   fcntl(srcFd, F_NOCACHE, 1);
@@ -279,13 +296,9 @@ int FileUtil::directCopy(const char *srcfile, const char *dstfile) {
                     folly::errnoStr(errno).c_str());
     }
     if (err) {
-      close(srcFd);
-      close(dstFd);
       return -1;
     }
   }
-  close(srcFd);
-  close(dstFd);
   return 0;
 }
 
@@ -294,7 +307,10 @@ int FileUtil::rename(const char *oldname, const char *newname) {
   if (ret == 0) return 0;
   if (errno != EXDEV) return -1;
 
-  copy(oldname, newname);
+  ret = copy(oldname, newname);
+  if (ret != 0) {
+    return -1;
+  }
   unlink(oldname);
   return 0;
 }
@@ -304,7 +320,10 @@ int FileUtil::directRename(const char *oldname, const char *newname) {
   if (ret == 0) return 0;
   if (errno != EXDEV) return -1;
 
-  directCopy(oldname, newname);
+  ret = directCopy(oldname, newname);
+  if (ret != 0) {
+    return -1;
+  }
   unlink(oldname);
   return 0;
 }
@@ -320,7 +339,9 @@ int FileUtil::ssystem(const char* command) {
   return ret;
 }
 
-size_t FileUtil::dirname_helper(char *path, int len) {
+namespace {
+
+size_t dirname_impl(char *path, int len) {
   if (len == 0) {
     /* Illegal use of this function */
     return 0;
@@ -328,18 +349,18 @@ size_t FileUtil::dirname_helper(char *path, int len) {
 
   /* Strip trailing slashes */
   register char *end = path + len - 1;
-  while (end >= path && isDirSeparator(*end)) {
+  while (end >= path && FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
     /* The path only contained slashes */
-    path[0] = getDirSeparator();
+    path[0] = FileUtil::getDirSeparator();
     path[1] = '\0';
     return 1;
   }
 
   /* Strip filename */
-  while (end >= path && !isDirSeparator(*end)) {
+  while (end >= path && !FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
@@ -350,11 +371,11 @@ size_t FileUtil::dirname_helper(char *path, int len) {
   }
 
   /* Strip slashes which came before the file name */
-  while (end >= path && isDirSeparator(*end)) {
+  while (end >= path && FileUtil::isDirSeparator(*end)) {
     end--;
   }
   if (end < path) {
-    path[0] = getDirSeparator();
+    path[0] = FileUtil::getDirSeparator();
     path[1] = '\0';
     return 1;
   }
@@ -363,24 +384,13 @@ size_t FileUtil::dirname_helper(char *path, int len) {
   return end + 1 - path;
 }
 
-std::string FileUtil::safe_dirname(const char *path, int len) {
-  char* tmp_path = (char*)malloc(len+1);
-  memcpy(tmp_path, path, len);
-  tmp_path[len] = '\0';
-  size_t newLen = dirname_helper(tmp_path, len);
-  std::string ret;
-  ret.assign(tmp_path, newLen);
-  free((void *) tmp_path);
-  return ret;
 }
 
-std::string FileUtil::safe_dirname(const char *path) {
-  int len = strlen(path);
-  return safe_dirname(path, len);
-}
-
-std::string FileUtil::safe_dirname(const std::string& path) {
-  return safe_dirname(path.c_str(), path.size());
+String FileUtil::dirname(const String& path) {
+  String str{path, CopyString};
+  auto new_length = dirname_impl(str.mutableData(), str.length());
+  str.setSize(new_length);
+  return str;
 }
 
 String FileUtil::relativePath(const std::string& fromDir,
@@ -446,8 +456,8 @@ String FileUtil::relativePath(const std::string& fromDir,
   }
 
   // Ensure the result is null-terminated after the strcpy
-  assert(to_start - to_file <= toFile.size());
-  assert(path_end - path + strlen(to_start) <= ret.capacity());
+  assertx(to_start - to_file <= toFile.size());
+  assertx(path_end - path + strlen(to_start) <= ret.capacity());
 
   strcpy(path_end, to_start);
   return ret.setSize(strlen(path));
@@ -479,12 +489,13 @@ String FileUtil::canonicalize(const std::string &path) {
 
 String FileUtil::canonicalize(const char *addpath, size_t addlen,
                               bool collapse_slashes /* = true */) {
-  assert(strlen(addpath) <= addlen);
+  assertx(strlen(addpath) <= addlen);
   // 4 for slashes at start, after root, and at end, plus trailing
   // null
   size_t maxlen = addlen + 4;
   size_t pathlen = 0; // is the length of the result path
   size_t seglen;  // is the end of the current segment
+  auto pathend = addpath + addlen;
 
   /* Treat null as an empty path.
    */
@@ -521,8 +532,9 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
       if (!collapse_slashes) {
         path[pathlen++] = getDirSeparator();
       }
-    } else if (seglen == 1 && addpath[0] == '.') {
-      /* ./ */
+    } else if (seglen == 1 && addpath[0] == '.'
+               && (pathlen > 0 || (*next && *(next+1)))) {
+      /* ./ (safe to drop iff there is something before or after it) */
     } else if (seglen == 2 && addpath[0] == '.' && addpath[1] == '.') {
       /* backpath (../) */
       if (pathlen == 1 && isDirSeparator(path[0])) {
@@ -565,6 +577,9 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
     addpath = next;
   }
 
+  // If there are null bytes in the path, treat it as the empty string
+  if (addpath != pathend) pathlen = 0;
+
 #ifdef _MSC_VER
   // Need to normalize to Windows directory separators, as the underlying
   // system calls don't like unix path separators.
@@ -578,13 +593,32 @@ String FileUtil::canonicalize(const char *addpath, size_t addlen,
   return ret;
 }
 
+std::string FileUtil::expandUser(const std::string& path,
+                                 const std::string& sysUser) {
+  if (path.front() != '~') {
+    return path;
+  }
+
+  auto pos = std::min(path.find('/'), path.size());
+  auto user = (pos > 1) ? path.substr(1, pos - 1) : sysUser;
+
+  auto defaultUser = user.empty() || user == Process::GetCurrentUser();
+  auto home = defaultUser ? Process::GetHomeDirectory() : "/home/" + user + "/";
+
+  if (pos + 1 < path.size()) {
+    return home + path.substr(pos + 1);
+  } else {
+    return home;
+  }
+}
+
 std::string FileUtil::normalizeDir(const std::string &dirname) {
   /*
    * normalizeDir may be called before very early one, such as
    * in Runtime option parsing, when MemoryManager may not have been
    * initialized
    */
-  MemoryManager::TlsWrapper::getCheck();
+  tl_heap.getCheck();
   string ret = FileUtil::canonicalize(dirname).toCppString();
   if (!ret.empty() && !isDirSeparator(ret[ret.length() - 1])) {
     ret += getDirSeparator();
@@ -593,93 +627,55 @@ std::string FileUtil::normalizeDir(const std::string &dirname) {
 }
 
 void FileUtil::find(std::vector<std::string> &out,
-                    const std::string &root, const char *path, bool php,
+                    const std::string &root, const std::string& path, bool php,
                     const std::set<std::string> *excludeDirs /* = NULL */,
                     const std::set<std::string> *excludeFiles /* = NULL */) {
-  if (!path) path = "";
-  if (isDirSeparator(*path)) path++;
 
-  string spath = path;
-  if (spath.length() && !isDirSeparator(spath[spath.length() - 1])) {
-    spath += getDirSeparator();
+  find(root, path, php,
+       [&] (const std::string& rpath, bool isDir) {
+         if (isDir) {
+           return !excludeDirs || !excludeDirs->count(rpath);
+         }
+         if (!excludeFiles || !excludeFiles->count(rpath)) {
+           out.push_back(root + rpath);
+         }
+         return false;
+       });
+}
+
+bool FileUtil::isValidPath(const String& path) {
+  return path.size() == strlen(path.data());
+}
+
+bool FileUtil::checkPathAndWarn(const String& path,
+                                const char* func_name,
+                                int param_pos) {
+  if (!FileUtil::isValidPath(path)) {
+    raise_warning(
+      "%s() expects parameter %d to be a valid path, string given",
+      func_name,
+      param_pos
+    );
+    return false;
   }
-  if (excludeDirs && excludeDirs->find(spath) != excludeDirs->end()) {
-    return;
+  return true;
+}
+
+void FileUtil::checkPathAndError(const String& path,
+                                 const char* func_name,
+                                 int param_pos) {
+  if (!FileUtil::isValidPath(path)) {
+    raise_error(
+      "%s() expects parameter %d to be a valid path, string given",
+      func_name,
+      param_pos
+    );
   }
+}
 
-  string fullPath = root + path;
-  if (fullPath.empty()) {
-    return;
-  }
-  DIR *dir = opendir(fullPath.c_str());
-  if (dir == nullptr) {
-    Logger::Error("FileUtil::find(): unable to open directory %s",
-                  fullPath.c_str());
-    return;
-  }
-  if (!isDirSeparator(fullPath[fullPath.length() - 1])) {
-    fullPath += getDirSeparator();
-  }
-
-  dirent *e;
-  while ((e = readdir(dir))) {
-    char *ename = e->d_name;
-
-    // skipping .  .. hidden files
-    if (ename[0] == '.' || !*ename) {
-      continue;
-    }
-    string fe = fullPath + ename;
-    struct stat se;
-    if (stat(fe.c_str(), &se)) {
-      Logger::Error("FileUtil::find(): unable to stat %s", fe.c_str());
-      continue;
-    }
-
-    if ((se.st_mode & S_IFMT) == S_IFDIR) {
-      string subdir = spath + ename;
-      find(out, root, subdir.c_str(), php, excludeDirs, excludeFiles);
-      continue;
-    }
-
-    // skipping "tags" files
-    if (strcmp(ename, "tags") == 0) {
-      continue;
-    }
-
-    // skipping emacs leftovers
-    char last = ename[strlen(ename) - 1];
-    if (last == '~' || last == '#') {
-      continue;
-    }
-
-    bool isPHP = false;
-    const char *p = strrchr(ename, '.');
-    if (p) {
-      isPHP = (strncmp(p + 1, "php", 3) == 0);
-    } else {
-      try {
-        string line;
-        std::ifstream fin(fe.c_str());
-        if (std::getline(fin, line)) {
-          if (line[0] == '#' && line[1] == '!' &&
-              line.find("php") != string::npos) {
-            isPHP = true;
-          }
-        }
-      } catch (...) {
-        Logger::Error("FileUtil::find(): unable to read %s", fe.c_str());
-      }
-    }
-
-    if (isPHP == php &&
-        (!excludeFiles ||
-         excludeFiles->find(spath + ename) == excludeFiles->end())) {
-      out.push_back(fe);
-    }
-  }
-
-  closedir(dir);
+bool FileUtil::isSystemName(folly::StringPiece path) {
+  static const char prefix[] = "/:systemlib";
+  return !strncmp(path.begin(), prefix, sizeof prefix - 1);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

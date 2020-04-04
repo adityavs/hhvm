@@ -1,5 +1,5 @@
-<?php
-$dirs = array();
+<?hh <<__EntryPoint>> function main(): void {
+$dirs = varray[];
 $empty_dir = __DIR__ . "/empty";
 @mkdir($empty_dir);
 
@@ -10,6 +10,6 @@ foreach ($i as $key => $value) {
 
 @rmdir($empty_dir);
 
-sort($dirs);
+sort(inout $dirs);
 print_r($dirs);
-?>
+}

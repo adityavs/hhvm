@@ -34,12 +34,11 @@ FILE_RCSID("@(#)$File: readelf.c,v 1.97 2013/03/06 03:35:30 christos Exp $")
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
-#ifdef HAVE_UNISTD_H
-#include <unistd.h>
-#endif
 
 #include "readelf.h"
 #include "magic.h"
+
+#include <folly/portability/Unistd.h>
 
 #ifdef  ELFCORE
 private int dophn_core(struct magic_set *, int, int, int, off_t, int, size_t,
@@ -857,10 +856,9 @@ static const cap_desc_t cap_desc_386[] = {
   { 0, NULL }
 };
 
-private int
-doshn(struct magic_set *ms, int clazz, int swap, int fd, off_t off, int num,
-    size_t size, off_t fsize, int *flags, int mach, int strtab)
-{
+private
+int doshn(struct magic_set* ms, int clazz, int swap, int fd, off_t off, int num,
+          size_t size, off_t fsize, int* flags, int mach, int /*strtab*/) {
   Elf32_Shdr sh32;
   Elf64_Shdr sh64;
   int stripped = 1;

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class RecursiveArrayIteratorIterator extends RecursiveIteratorIterator
 {
@@ -18,9 +18,9 @@ class RecursiveArrayIteratorIterator extends RecursiveIteratorIterator
   }
 
 }
-
-$arr = array("a",
-      array("ca"));
+<<__EntryPoint>> function main(): void {
+$arr = varray["a",
+      varray["ca"]];
 $obj = new RecursiveArrayIterator($arr);
 $rit = new RecursiveArrayIteratorIterator($obj);
 echo "Rewind: \n";
@@ -29,6 +29,5 @@ echo "\nNext:\n";
 $rit->next();
 $rit->next();
 
-?>
-===DONE===
-<?php exit(0); ?>
+echo "===DONE===\n";
+}

@@ -1,5 +1,5 @@
-<?php
-/* 
+<?hh
+/*
  * Prototype  : object dir(string $directory[, resource $context])
  * Description: Directory class with properties, handle and class and methods read, rewind and close
  * Source code: ext/standard/dir.c
@@ -10,6 +10,14 @@
  * that the function outputs proper warning messages wherever expected.
  */
 
+class classA
+{
+  public $var;
+  public function init() {
+    $this->var = 10;
+  }
+}
+<<__EntryPoint>> function main(): void {
 echo "*** Testing dir() : unexpected values for \$context argument ***\n";
 
 // create the temporary directory
@@ -21,21 +29,13 @@ $directory = $file_path."/dir_variation2";
 $unset_var = stream_context_create();
 unset($unset_var);
 
-class classA
-{
-  public $var;
-  public function init() {
-    $this->var = 10;
-  }
-}
-
 // heredoc string
 $heredoc = <<<EOT
 hello world
 EOT;
 
 // unexpected values to be passed to $directory argument
-$unexpected_values = array (
+$unexpected_values = varray [
        // int data
 /*1*/  0,
        1,
@@ -50,11 +50,11 @@ $unexpected_values = array (
        .5,
 
        // array data
-/*10*/ array(),
-       array(0),
-       array(1),
-       array(1, 2),
-       array('color' => 'red', 'item' => 'pen'),
+/*10*/ varray[],
+       varray[0],
+       varray[1],
+       varray[1, 2],
+       darray['color' => 'red', 'item' => 'pen'],
 
 
        // null data
@@ -84,22 +84,20 @@ $unexpected_values = array (
 
        // unset data
 /*28*/ @$unset_var
-);
+];
 
 // loop through various elements of $unexpected_values to check the behavior of dir()
 $iterator = 1;
 foreach( $unexpected_values as $unexpected_value ) {
   echo "\n-- Iteration $iterator --";
-  var_dump( dir($directory, $unexpected_value) );
+  try { var_dump( dir($directory, $unexpected_value) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
   $iterator++;
 }
 
 echo "Done";
-?>
-<?php error_reporting(0); ?>
-<?php
+error_reporting(0);
 $file_path = dirname(__FILE__);
 $directory = $file_path."/dir_variation2";
 
 rmdir($directory);
-?>
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,106 +15,136 @@
 */
 
 #include "hphp/runtime/base/variable-serializer.h"
-#include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/comparisons.h"
-#include "hphp/util/exception.h"
-#include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/zend-functions.h"
-#include "hphp/runtime/base/zend-string.h"
-#include <cmath>
-#include "hphp/runtime/base/runtime-option.h"
+
 #include "hphp/runtime/base/array-iterator.h"
-#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/backtrace.h"
+#include "hphp/runtime/base/collections.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/execution-context.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/packed-array-defs.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/tv-refcount.h"
+#include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/base/utf8-decode.h"
+#include "hphp/runtime/base/zend-functions.h"
+#include "hphp/runtime/base/zend-printf.h"
+#include "hphp/runtime/base/zend-string.h"
+
+#include "hphp/runtime/ext/collections/ext_collections.h"
 #include "hphp/runtime/ext/json/JSON_parser.h"
 #include "hphp/runtime/ext/json/ext_json.h"
-#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
+
 #include "hphp/runtime/vm/native-data.h"
-#include "hphp/runtime/ext/closure/ext_closure.h"
+#include "hphp/runtime/vm/class-meth-data-ref.h"
+
+#include "hphp/util/exception.h"
+#include "hphp/util/rds-local.h"
+
+#include <cmath>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-extern const StaticString
-  s_serializedNativeDataKey(std::string("\0native", 7));
-
 const StaticString
+  s_serializedNativeDataKey("\0native"),
   s_JsonSerializable("JsonSerializable"),
   s_jsonSerialize("jsonSerialize"),
   s_serialize("serialize"),
-  s_zero("\0", 1),
-  s_protected_prefix("\0*\0", 3),
+  s_zero("\0"),
+  s_protected_prefix("\0*\0"),
   s_PHP_DebugDisplay("__PHP_DebugDisplay"),
   s_PHP_Incomplete_Class("__PHP_Incomplete_Class"),
   s_PHP_Incomplete_Class_Name("__PHP_Incomplete_Class_Name"),
-  s_debugInfo("__debugInfo");
+  s_debugInfo("__debugInfo"),
+  s_message("message");
 
-/*
- * Serialize a Variant recursively.
- * The last param noQuotes indicates to serializer to not put the output in
- * double quotes (used when printing the output of a __toDebugDisplay() of
- * an object when it is a string.
- */
-static void serializeVariant(const Variant&,
-                             VariableSerializer *serializer,
-                             bool isArrayKey = false,
-                             bool skipNestCheck = false,
-                             bool noQuotes = false);
-static void serializeObject(const Object&, VariableSerializer*);
-static void serializeObject(const ObjectData*, VariableSerializer*);
-static void serializeCollection(ObjectData* obj, VariableSerializer*);
-static void serializeArray(const Array&, VariableSerializer*,
-                           bool isObject = false);
-static void serializeArray(const ArrayData*, VariableSerializer*,
-                           bool skipNestCheck = false);
-static void serializeResource(const ResourceData*, VariableSerializer*);
-static void serializeString(const String&, VariableSerializer*);
-
-NEVER_INLINE ATTRIBUTE_NORETURN
+[[noreturn]] NEVER_INLINE
 static void throwNestingException() {
   throw ExtendedException("Nesting level too deep - recursive dependency?");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
+VariableSerializer::SavedRefMap::~SavedRefMap() {
+  for (auto& i : m_mapping) {
+    tvDecRefGen(const_cast<TypedValue*>(&i.first));
+  }
+}
+
+VariableSerializer::~VariableSerializer() {
+}
+
 VariableSerializer::VariableSerializer(Type type, int option /* = 0 */,
                                        int maxRecur /* = 3 */)
   : m_type(type)
   , m_option(option)
-  , m_buf(nullptr)
-  , m_indent(0)
-  , m_valueCount(0)
-  , m_referenced(false)
-  , m_refCount(1)
-  , m_objId(0)
-  , m_objCode(0)
-  , m_rsrcId(0)
+  , m_keepDVArrays{type != Type::Serialize}
   , m_maxCount(maxRecur)
-  , m_levelDebugger(0)
-  , m_currentDepth(0)
-  , m_maxDepth(0)
 {
-  switch (type) {
-    case Type::DebuggerSerialize:
-       m_maxLevelDebugger = g_context->debuggerSettings.printLevel;
-       // fall-through
-    case Type::Serialize:
-    case Type::APCSerialize:
-       m_arrayIds = new ReqPtrCtrMap();;
-       break;
-    default:
-       m_arrayIds = nullptr;
+  if (type == Type::DebuggerSerialize) {
+    m_maxLevelDebugger = g_context->debuggerSettings.printLevel;
   }
 }
 
-void VariableSerializer::pushObjectInfo(const String& objClass, int objId,
-                                        char objCode) {
-  assert(objCode == 'O' || objCode == 'V' || objCode == 'K');
+VariableSerializer::ArrayKind
+VariableSerializer::getKind(const ArrayData* arr) const {
+  assertx(!RuntimeOption::EvalHackArrDVArrs || arr->isNotDVArray());
+  if (UNLIKELY(m_forcePHPArrays)) {
+    return VariableSerializer::ArrayKind::PHP;
+  }
+
+  auto const respectsLegacyBit = [&] {
+    switch (getType()) {
+    case Type::PrintR:
+    case Type::VarExport:
+    case Type::Serialize:
+    case Type::JSON:
+      return true;
+    case Type::Internal:
+    case Type::VarDump:
+    case Type::DebugDump:
+    case Type::DebuggerDump:
+    case Type::PHPOutput:
+    case Type::APCSerialize:
+    case Type::DebuggerSerialize:
+      return false;
+    }
+    always_assert(false);
+  }();
+
+  if (RuntimeOption::EvalHackArrDVArrs &&
+      respectsLegacyBit &&
+      !arr->isLegacyArray()) {
+    return VariableSerializer::ArrayKind::PHP;
+  }
+  if (arr->isDictType()) {
+    return getType() == Type::Internal && arr->isLegacyArray()
+      ? VariableSerializer::ArrayKind::LegacyDict
+      : VariableSerializer::ArrayKind::Dict;
+  }
+  if (arr->isVecArrayType()) {
+    return getType() == Type::Internal && arr->isLegacyArray()
+      ? VariableSerializer::ArrayKind::LegacyVec
+      : VariableSerializer::ArrayKind::Vec;
+  }
+  if (arr->isKeysetType())   return VariableSerializer::ArrayKind::Keyset;
+  assertx(arr->isPHPArrayType());
+  if (m_keepDVArrays) {
+    if (arr->isVArray()) return VariableSerializer::ArrayKind::VArray;
+    if (arr->isDArray()) return VariableSerializer::ArrayKind::DArray;
+  }
+  return VariableSerializer::ArrayKind::PHP;
+}
+
+void VariableSerializer::pushObjectInfo(const String& objClass, char objCode) {
+  assertx(objCode == 'O' || objCode == 'V' || objCode == 'K');
   m_objectInfos.emplace_back(
-    ObjectInfo { m_objClass, m_objId, m_objCode, m_rsrcName, m_rsrcId }
+    ObjectInfo { m_objClass, m_objCode, m_rsrcName, m_rsrcId }
   );
   m_objClass = objClass;
-  m_objId = objId;
   m_objCode = objCode;
   m_rsrcName.reset();
   m_rsrcId = 0;
@@ -122,10 +152,9 @@ void VariableSerializer::pushObjectInfo(const String& objClass, int objId,
 
 void VariableSerializer::pushResourceInfo(const String& rsrcName, int rsrcId) {
   m_objectInfos.emplace_back(
-    ObjectInfo { m_objClass, m_objId, m_objCode, m_rsrcName, m_rsrcId }
+    ObjectInfo { m_objClass, m_objCode, m_rsrcName, m_rsrcId }
   );
   m_objClass.reset();
-  m_objId = 0;
   m_objCode = 0;
   m_rsrcName = rsrcName;
   m_rsrcId = rsrcId;
@@ -134,26 +163,25 @@ void VariableSerializer::pushResourceInfo(const String& rsrcName, int rsrcId) {
 void VariableSerializer::popObjectInfo() {
   ObjectInfo &info = m_objectInfos.back();
   m_objClass = info.objClass;
-  m_objId = info.objId;
   m_objCode = info.objCode;
   m_rsrcName = info.rsrcName;
   m_rsrcId = info.rsrcId;
   m_objectInfos.pop_back();
 }
 
-__thread int64_t VariableSerializer::serializationSizeLimit =
-  StringData::MaxSize;
+RDS_LOCAL(VariableSerializer::SerializationLimitWrapper,
+    VariableSerializer::serializationSizeLimit);
 
 void VariableSerializer::popResourceInfo() {
   popObjectInfo();
 }
 
-String VariableSerializer::serialize(const Variant& v, bool ret,
+String VariableSerializer::serialize(const_variant_ref v, bool ret,
                                      bool keepCount /* = false */) {
   StringBuffer buf;
   m_buf = &buf;
   if (ret) {
-    buf.setOutputLimit(serializationSizeLimit);
+    buf.setOutputLimit(serializationSizeLimit->value);
   } else {
     buf.setOutputLimit(StringData::MaxSize);
   }
@@ -172,7 +200,7 @@ String VariableSerializer::serializeValue(const Variant& v, bool limit) {
   StringBuffer buf;
   m_buf = &buf;
   if (limit) {
-    buf.setOutputLimit(serializationSizeLimit);
+    buf.setOutputLimit(serializationSizeLimit->value);
   }
   m_valueCount = 1;
   write(v);
@@ -180,22 +208,23 @@ String VariableSerializer::serializeValue(const Variant& v, bool limit) {
 }
 
 String VariableSerializer::serializeWithLimit(const Variant& v, int limit) {
-  if (m_type == Type::Serialize || m_type == Type::JSON ||
-      m_type == Type::APCSerialize || m_type == Type::DebuggerSerialize) {
-    assert(false);
+  if (m_type == Type::Serialize || m_type == Type::Internal ||
+      m_type == Type::JSON || m_type == Type::APCSerialize ||
+      m_type == Type::DebuggerSerialize) {
+    assertx(false);
     return String();
   }
   StringBuffer buf;
   m_buf = &buf;
-  if (serializationSizeLimit > 0 &&
-      (limit <= 0 || limit > serializationSizeLimit)) {
-    limit = serializationSizeLimit;
+  if (serializationSizeLimit->value > 0 &&
+      (limit <= 0 || limit > serializationSizeLimit->value)) {
+    limit = serializationSizeLimit->value;
   }
   buf.setOutputLimit(limit);
   //Does not need m_valueCount, which is only useful with the unsupported types
   try {
     write(v);
-  } catch (StringBufferLimitException &e) {
+  } catch (StringBufferLimitException& e) {
     return e.m_result;
   }
   return m_buf->detach();
@@ -222,12 +251,13 @@ void VariableSerializer::write(bool v) {
     m_buf->append('\n');
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append(v ? "b:1;" : "b:0;");
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
@@ -256,6 +286,7 @@ void VariableSerializer::write(int64_t v) {
     m_buf->append('\n');
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append("i:");
@@ -263,7 +294,7 @@ void VariableSerializer::write(int64_t v) {
     m_buf->append(';');
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
@@ -319,6 +350,7 @@ void VariableSerializer::write(double v) {
     }
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append("d:");
@@ -336,7 +368,7 @@ void VariableSerializer::write(double v) {
     m_buf->append(';');
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
@@ -410,7 +442,7 @@ utf8_decode:
       sb.append("null", 4);
       break;
     }
-    assert(c >= 0);
+    assertx(c >= 0);
     unsigned short us = (unsigned short)c;
     switch (us) {
     case '"':
@@ -533,6 +565,7 @@ void VariableSerializer::write(const char *v, int len /* = -1 */,
     break;
   }
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append("s:");
@@ -587,13 +620,16 @@ void VariableSerializer::write(const char *v, int len /* = -1 */,
     break;
   }
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
 
 void VariableSerializer::write(const String& v) {
-  if (m_type == Type::APCSerialize && !v.isNull() && v.get()->isStatic()) {
+  if (m_type == Type::APCSerialize &&
+      !(m_option & kAPC_PRIME_SERIALIZE) &&
+      !v.isNull() &&
+      v.get()->isStatic()) {
     union {
       char buf[8];
       StringData *sd;
@@ -603,7 +639,7 @@ void VariableSerializer::write(const String& v) {
     m_buf->append(u.buf, 8);
     m_buf->append(';');
   } else {
-    serializeString(v, this);
+    serializeString(v);
   }
 }
 
@@ -611,10 +647,10 @@ void VariableSerializer::write(const Object& v) {
   if (!v.isNull() && m_type == Type::JSON) {
 
     if (v.instanceof(s_JsonSerializable)) {
-      assert(!v->isCollection());
+      assertx(!v->isCollection());
       Variant ret = v->o_invoke_few_args(s_jsonSerialize, 0);
       // for non objects or when $this is not returned
-      if (!ret.isObject() || (ret.isObject() && !same(ret, v))) {
+      if (!ret.isObject() || ret.getObjectData() != v.get()) {
         if (ret.isArray() || ret.isObject()) {
           preventOverflow(v, [&ret, this]() {
             write(ret);
@@ -629,41 +665,36 @@ void VariableSerializer::write(const Object& v) {
     }
     preventOverflow(v, [&v, this]() {
       if (v->isCollection()) {
-        serializeCollection(v.get(), this);
-      } else if (v->instanceof(SystemLib::s_ClosureClass)) {
-        // We serialize closures as "{}" in JSON mode to be compatible
-        // with PHP. And issue a warning in HipHop syntax.
-        if (RuntimeOption::EnableHipHopSyntax) {
-          m_buf->append("null");
-          json_set_last_error_code(
-            json_error_codes::JSON_ERROR_UNSUPPORTED_TYPE);
-          return;
-        }
-        m_buf->append("{}");
+        serializeCollection(v.get());
+      } else if (v->instanceof(c_Closure::classof())) {
+        m_buf->append("null");
+        json_set_last_error_code(
+          json_error_codes::JSON_ERROR_UNSUPPORTED_TYPE);
+        return;
       } else {
-        auto props = v->toArray(true);
-        pushObjectInfo(v->getClassName(), v->getId(), 'O');
-        serializeArray(props, this);
+        auto props = v->toArray(true, m_ignoreLateInit);
+        pushObjectInfo(v->getClassName(), 'O');
+        serializeArray(props, true);
         popObjectInfo();
       }
     });
   } else {
-    serializeObject(v, this);
+    serializeObject(v);
   }
 }
 
 void VariableSerializer::preventOverflow(const Object& v,
                                          const std::function<void()>& func) {
-  if (incNestedLevel(v.get(), true)) {
-    writeOverflow(v.get(), true);
+  TypedValue tv = make_tv<KindOfObject>(const_cast<ObjectData*>(v.get()));
+  if (incNestedLevel(&tv)) {
+    writeOverflow(&tv);
   } else {
     func();
   }
-  decNestedLevel(v.get());
+  decNestedLevel(&tv);
 }
 
-void VariableSerializer::write(const Variant& v, bool isArrayKey /*= false */) {
-  setReferenced(v.isReferenced());
+void VariableSerializer::write(const_variant_ref v, bool isArrayKey) {
   if (m_type == Type::DebugDump) {
     setRefCount(v.getRefCount());
   }
@@ -671,7 +702,7 @@ void VariableSerializer::write(const Variant& v, bool isArrayKey /*= false */) {
     write(v.toObject());
     return;
   }
-  serializeVariant(v, this, isArrayKey);
+  serializeVariant(v.rval(), isArrayKey);
 }
 
 void VariableSerializer::writeNull() {
@@ -691,6 +722,7 @@ void VariableSerializer::writeNull() {
     m_buf->append('\n');
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append("N;");
@@ -700,14 +732,12 @@ void VariableSerializer::writeNull() {
     m_buf->append("null");
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
 
-void VariableSerializer::writeOverflow(void* ptr, bool isObject /* = false */) {
-  bool wasRef = m_referenced;
-  setReferenced(false);
+void VariableSerializer::writeOverflow(tv_rval tv) {
   switch (m_type) {
   case Type::PrintR:
     if (!m_objClass.empty()) {
@@ -735,19 +765,15 @@ void VariableSerializer::writeOverflow(void* ptr, bool isObject /* = false */) {
     }
     // fall through
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
     {
-      assert(m_arrayIds);
-      ReqPtrCtrMap::const_iterator iter = m_arrayIds->find(ptr);
-      assert(iter != m_arrayIds->end());
-      int id = iter->second;
+      int optId = m_refs[tv].m_id;
+      assertx(optId != NO_ID);
+      bool isObject = tvIsResource(tv) || tvIsObject(tv);
       if (isObject) {
         m_buf->append("r:");
-        m_buf->append(id);
-        m_buf->append(';');
-      } else if (wasRef) {
-        m_buf->append("R:");
-        m_buf->append(id);
+        m_buf->append(optId);
         m_buf->append(';');
       } else {
         m_buf->append("N;");
@@ -759,7 +785,7 @@ void VariableSerializer::writeOverflow(void* ptr, bool isObject /* = false */) {
     m_buf->append("null");
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
@@ -773,7 +799,8 @@ void VariableSerializer::writeRefCount() {
   }
 }
 
-void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
+void VariableSerializer::writeArrayHeader(int size, bool isVectorData,
+                                          VariableSerializer::ArrayKind kind) {
   m_arrayInfos.push_back(ArrayInfo());
   ArrayInfo &info = m_arrayInfos.back();
   info.first_element = true;
@@ -795,7 +822,24 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
       m_buf->append(m_objClass);
       m_buf->append(" Object\n");
     } else {
-      m_buf->append("Array\n");
+      switch (kind) {
+      case ArrayKind::Dict:
+      case ArrayKind::LegacyDict:
+        m_buf->append("Dict\n");
+        break;
+      case ArrayKind::Vec:
+      case ArrayKind::LegacyVec:
+        m_buf->append("Vec\n");
+        break;
+      case ArrayKind::Keyset:
+        m_buf->append("Keyset\n");
+        break;
+      case ArrayKind::PHP:
+      case ArrayKind::VArray:
+      case ArrayKind::DArray:
+        m_buf->append("Array\n");
+        break;
+      }
     }
     if (m_indent > 0) {
       m_indent += 4;
@@ -806,7 +850,7 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
     break;
   case Type::VarExport:
   case Type::PHPOutput:
-    if (m_indent > 0) {
+    if (m_indent > 0 && m_rsrcName.empty() && m_keyPrinted) {
       m_buf->append('\n');
       indent();
     }
@@ -815,11 +859,48 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
       if (m_objCode == 'O') {
         m_buf->append("::__set_state(array(\n");
       } else {
-        assert(m_objCode == 'V' || m_objCode == 'K');
+        assertx(m_objCode == 'V' || m_objCode == 'K');
         m_buf->append(" {\n");
       }
+    } else if (!m_rsrcName.empty()) {
+      m_buf->append("NULL");
     } else {
-      m_buf->append("array (\n");
+      switch (kind) {
+      case ArrayKind::Dict:
+      case ArrayKind::LegacyDict:
+        if (m_type == Type::PHPOutput && m_dvOverrides) {
+          m_buf->append(
+            (*m_dvOverrides)[m_dvOverridesIndex] ? "darray [\n" : "dict [\n"
+          );
+          m_dvOverridesIndex++;
+        } else {
+          m_buf->append("dict [\n");
+        }
+        break;
+      case ArrayKind::Vec:
+      case ArrayKind::LegacyVec:
+        if (m_type == Type::PHPOutput && m_dvOverrides) {
+          m_buf->append(
+            (*m_dvOverrides)[m_dvOverridesIndex] ? "varray [\n" : "vec [\n"
+          );
+          m_dvOverridesIndex++;
+        } else {
+          m_buf->append("vec [\n");
+        }
+        break;
+      case ArrayKind::Keyset:
+        m_buf->append("keyset [\n");
+        break;
+      case ArrayKind::PHP:
+        m_buf->append("array (\n");
+        break;
+      case ArrayKind::VArray:
+        m_buf->append(m_type == Type::PHPOutput ? "varray [\n" : "array (\n");
+        break;
+      case ArrayKind::DArray:
+        m_buf->append(m_type == Type::PHPOutput ? "darray [\n" : "array (\n");
+        break;
+      }
     }
     m_indent += (info.indent_delta = 2);
     break;
@@ -836,11 +917,26 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
     } else if (!m_objClass.empty()) {
       m_buf->append("object(");
       m_buf->append(m_objClass);
-      m_buf->append(")#");
-      m_buf->append(m_objId);
-      m_buf->append(' ');
+      m_buf->append(") ");
     } else {
-      m_buf->append("array");
+      switch (kind) {
+      case ArrayKind::Dict:
+      case ArrayKind::LegacyDict:
+        m_buf->append("dict");
+        break;
+      case ArrayKind::Vec:
+      case ArrayKind::LegacyVec:
+        m_buf->append("vec");
+        break;
+      case ArrayKind::Keyset:
+        m_buf->append("keyset");
+        break;
+      case ArrayKind::PHP:
+      case ArrayKind::VArray:
+      case ArrayKind::DArray:
+        m_buf->append("array");
+        break;
+      }
     }
     m_buf->append('(');
     m_buf->append(size);
@@ -857,6 +953,7 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
     m_indent += (info.indent_delta = 2);
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     if (!m_rsrcName.empty() && m_type == Type::DebuggerSerialize) {
@@ -877,7 +974,32 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
       m_buf->append(size);
       m_buf->append(":{");
     } else {
-      m_buf->append("a:");
+      switch (kind) {
+      case ArrayKind::Dict:
+        m_buf->append("D:");
+        break;
+      case ArrayKind::Vec:
+        m_buf->append("v:");
+        break;
+      case ArrayKind::LegacyDict:
+        m_buf->append("x:");
+        break;
+      case ArrayKind::LegacyVec:
+        m_buf->append("X:");
+        break;
+      case ArrayKind::Keyset:
+        m_buf->append("k:");
+        break;
+      case ArrayKind::PHP:
+        m_buf->append("a:");
+        break;
+      case ArrayKind::VArray:
+        m_buf->append("y:");
+        break;
+      case ArrayKind::DArray:
+        m_buf->append("Y:");
+        break;
+      }
       m_buf->append(size);
       m_buf->append(":{");
     }
@@ -885,15 +1007,32 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
   case Type::JSON:
     info.is_vector =
       (m_objClass.empty() || m_objCode == 'V' || m_objCode == 'K') &&
-      isVectorData;
+      isVectorData &&
+      kind != ArrayKind::Dict;
+
     if (info.is_vector && m_type == Type::JSON) {
       info.is_vector = (m_option & k_JSON_FORCE_OBJECT)
                        ? false : info.is_vector;
     }
 
-    if (info.is_vector) {
+    if (info.is_vector || kind == ArrayKind::Keyset) {
+      if (UNLIKELY(RuntimeOption::EvalHackArrCompatSerializeNotices) &&
+          kind == ArrayKind::DArray) {
+        if (size == 0 && m_edWarn && !m_hasEDWarned) {
+          raise_hackarr_compat_notice("JSON encoding empty darray");
+          m_hasEDWarned = true;
+        } else if (size != 0 && m_vdWarn && !m_hasVDWarned) {
+          raise_hackarr_compat_notice("JSON encoding vec-like darray");
+          m_hasVDWarned = true;
+        }
+      }
       m_buf->append('[');
     } else {
+      if (UNLIKELY(RuntimeOption::EvalHackArrCompatSerializeNotices) &&
+          kind == ArrayKind::DArray && m_ddWarn && !m_hasDDWarned) {
+        raise_hackarr_compat_notice("JSON encoding dict-like darray");
+        m_hasDDWarned = true;
+      }
       m_buf->append('{');
     }
 
@@ -905,7 +1044,7 @@ void VariableSerializer::writeArrayHeader(int size, bool isVectorData) {
 
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 
@@ -924,7 +1063,7 @@ void VariableSerializer::writePropertyKey(const String& prop) {
   if (!*key && kl) {
     const char *cls = key + 1;
     if (*cls == '*') {
-      assert(key[2] == 0);
+      assertx(key[2] == 0);
       m_buf->append(key + 3, kl - 3);
       const char prot[] = "\":protected";
       int o = m_type == Type::PrintR ? 1 : 0;
@@ -947,8 +1086,12 @@ void VariableSerializer::writePropertyKey(const String& prop) {
 }
 
 /* key MUST be a non-reference string or int */
-void VariableSerializer::writeArrayKey(const Variant& key) {
-  auto const keyCell = tvAssertCell(key.asTypedValue());
+void VariableSerializer::writeArrayKey(
+  const Variant& key,
+  VariableSerializer::ArrayKind kind
+) {
+  using AK = VariableSerializer::ArrayKind;
+  auto const keyCell = tvAssertPlausible(key.asTypedValue());
   bool const skey = isStringType(keyCell->m_type);
 
   ArrayInfo &info = m_arrayInfos.back();
@@ -957,6 +1100,7 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
   case Type::DebuggerDump:
   case Type::PrintR: {
     indent();
+    if (kind == AK::Keyset) return;
     m_buf->append('[');
     if (info.is_object && skey) {
       writePropertyKey(String{keyCell->m_data.pstr});
@@ -970,12 +1114,15 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
   case Type::VarExport:
   case Type::PHPOutput:
     indent();
+    if (kind == AK::Vec || kind == AK::Keyset) return;
+    if (kind == AK::VArray && m_type == Type::PHPOutput) return;
     write(key, true);
     m_buf->append(" => ");
     break;
 
   case Type::VarDump:
   case Type::DebugDump:
+    if (kind == AK::Vec || kind == AK::Keyset) return;
     indent();
     m_buf->append('[');
     if (!skey) {
@@ -993,27 +1140,31 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
     break;
 
   case Type::APCSerialize:
+    if (kind == AK::Vec || kind == AK::Keyset || kind == AK::VArray) return;
     if (skey) {
       write(StrNR(keyCell->m_data.pstr).asString());
       return;
     }
 
   case Type::Serialize:
+  case Type::Internal:
   case Type::DebuggerSerialize:
+    if (kind == AK::Vec || kind == AK::LegacyVec ||
+        kind == AK::Keyset || kind == AK::VArray) return;
     write(key);
     break;
 
   case Type::JSON:
-    if (!info.first_element) {
-      m_buf->append(',');
-    }
-    if (UNLIKELY(m_option & k_JSON_PRETTY_PRINT)) {
+    if (!info.is_vector && kind != ArrayKind::Keyset) {
       if (!info.first_element) {
-        m_buf->append("\n");
+        m_buf->append(',');
       }
-      indent();
-    }
-    if (!info.is_vector) {
+      if (UNLIKELY(m_option & k_JSON_PRETTY_PRINT)) {
+        if (!info.first_element) {
+          m_buf->append("\n");
+        }
+        indent();
+      }
       if (skey) {
         auto const sdata = keyCell->m_data.pstr;
         const char *k = sdata->data();
@@ -1037,60 +1188,36 @@ void VariableSerializer::writeArrayKey(const Variant& key) {
     break;
 
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 }
 
-void VariableSerializer::writeCollectionKey(const Variant& key) {
-  if (m_type == Type::Serialize || m_type == Type::APCSerialize ||
+void VariableSerializer::writeCollectionKey(
+  const Variant& key,
+  VariableSerializer::ArrayKind kind
+) {
+  if (m_type == Type::Serialize ||
+      m_type == Type::Internal ||
+      m_type == Type::APCSerialize ||
       m_type == Type::DebuggerSerialize) {
     m_valueCount++;
   }
-  writeArrayKey(key);
+  writeArrayKey(key, kind);
 }
 
-void VariableSerializer::writeCollectionKeylessPrefix() {
-  switch (m_type) {
-  case Type::PrintR:
-  case Type::VarExport:
-  case Type::PHPOutput:
-  case Type::DebuggerDump:
-    indent();
-    break;
-  case Type::VarDump:
-  case Type::DebugDump:
-  case Type::APCSerialize:
-  case Type::Serialize:
-  case Type::DebuggerSerialize:
-    break;
-  case Type::JSON: {
-    ArrayInfo &info = m_arrayInfos.back();
-    if (!info.first_element) {
-      m_buf->append(',');
-    }
-    if (m_type == Type::JSON && m_option & k_JSON_PRETTY_PRINT) {
-      if (!info.first_element) {
-        m_buf->append("\n");
-      }
-      indent();
-    }
-    break;
-  }
-  default:
-    assert(false);
-    break;
-  }
-}
-
-void VariableSerializer::writeArrayValue(const Variant& value) {
+void VariableSerializer::writeArrayValue(
+  const Variant& value,
+  VariableSerializer::ArrayKind kind
+) {
   switch (m_type) {
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
-  // Do not count referenced values after the first
-    if (!(value.isReferenced() &&
-          m_arrayIds->find(value.getRefData()) != m_arrayIds->end())) {
+    // Do not count values in keysets because they're also keys, and it's not
+    // possible to have back references to keys.
+    if (kind != VariableSerializer::ArrayKind::Keyset) {
       m_valueCount++;
     }
     write(value);
@@ -1103,21 +1230,46 @@ void VariableSerializer::writeArrayValue(const Variant& value) {
     break;
 
   case Type::VarExport:
-  case Type::PHPOutput:
+  case Type::PHPOutput: {
+    auto const oldKeyPrinted = m_keyPrinted;
+    m_keyPrinted =
+      (kind != ArrayKind::Vec && kind != ArrayKind::Keyset) &&
+      (kind != ArrayKind::VArray || m_type != Type::PHPOutput);
+    SCOPE_EXIT { m_keyPrinted = oldKeyPrinted; };
     write(value);
     m_buf->append(",\n");
     break;
+  }
+
+  case Type::JSON: {
+    ArrayInfo &info = m_arrayInfos.back();
+    if (info.is_vector || kind == ArrayKind::Keyset) {
+      if (!info.first_element) {
+        m_buf->append(',');
+      }
+      if (UNLIKELY(m_option & k_JSON_PRETTY_PRINT)) {
+        if (!info.first_element) {
+          m_buf->append("\n");
+        }
+        indent();
+      }
+    }
+    write(value);
+    break;
+  }
 
   default:
     write(value);
     break;
   }
 
-  ArrayInfo &info = m_arrayInfos.back();
-  info.first_element = false;
+  ArrayInfo &last_info = m_arrayInfos.back();
+  last_info.first_element = false;
 }
 
-void VariableSerializer::writeArrayFooter() {
+void VariableSerializer::writeArrayFooter(
+  VariableSerializer::ArrayKind kind
+) {
   ArrayInfo &info = m_arrayInfos.back();
 
   m_indent -= info.indent_delta;
@@ -1134,16 +1286,32 @@ void VariableSerializer::writeArrayFooter() {
     break;
   case Type::VarExport:
   case Type::PHPOutput:
-    indent();
+    if (m_rsrcName.empty()) {
+      indent();
+    }
     if (info.is_object && m_objCode) {
       if (m_objCode == 'O') {
         m_buf->append("))");
       } else {
-        assert(m_objCode == 'V' || m_objCode == 'K');
+        assertx(m_objCode == 'V' || m_objCode == 'K');
         m_buf->append("}");
       }
-    } else {
-      m_buf->append(')');
+    } else if (m_rsrcName.empty()) { // for rsrc, only write NULL in arrayHeader
+      switch (kind) {
+      case ArrayKind::Dict:
+      case ArrayKind::LegacyDict:
+      case ArrayKind::Vec:
+      case ArrayKind::LegacyVec:
+      case ArrayKind::Keyset:
+        m_buf->append(']');
+        break;
+      case ArrayKind::PHP:
+        m_buf->append(')');
+        break;
+      case ArrayKind::VArray:
+      case ArrayKind::DArray:
+        m_buf->append(m_type == Type::PHPOutput ? ']' : ')');
+      }
     }
     break;
   case Type::VarDump:
@@ -1154,6 +1322,7 @@ void VariableSerializer::writeArrayFooter() {
     }
     break;
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
   case Type::DebuggerSerialize:
     m_buf->append('}');
@@ -1164,14 +1333,14 @@ void VariableSerializer::writeArrayFooter() {
       m_buf->append("\n");
       indent();
     }
-    if (info.is_vector) {
+    if (info.is_vector || kind == ArrayKind::Keyset) {
       m_buf->append(']');
     } else {
       m_buf->append('}');
     }
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
 
@@ -1197,14 +1366,9 @@ void VariableSerializer::indent() {
   for (int i = 0; i < m_indent; i++) {
     m_buf->append(' ');
   }
-  if (m_referenced) {
-    if (m_indent > 0 && m_type == Type::VarDump) m_buf->append('&');
-    m_referenced = false;
-  }
 }
 
-bool VariableSerializer::incNestedLevel(void *ptr,
-                                        bool isObject /* = false */) {
+bool VariableSerializer::incNestedLevel(tv_rval tv) {
   ++m_currentDepth;
 
   switch (m_type) {
@@ -1214,238 +1378,484 @@ bool VariableSerializer::incNestedLevel(void *ptr,
   case Type::VarDump:
   case Type::DebugDump:
   case Type::DebuggerDump:
-    return ++m_counts[ptr] >= m_maxCount;
+    return ++m_refs[tv].m_count >= m_maxCount;
   case Type::JSON:
     if (m_currentDepth > m_maxDepth) {
       json_set_last_error_code(json_error_codes::JSON_ERROR_DEPTH);
     }
-
-    return ++m_counts[ptr] >= m_maxCount;
+    return ++m_refs[tv].m_count >= m_maxCount;
   case Type::DebuggerSerialize:
     if (m_maxLevelDebugger > 0 && ++m_levelDebugger > m_maxLevelDebugger) {
       return true;
     }
     // fall through
   case Type::Serialize:
+  case Type::Internal:
   case Type::APCSerialize:
     {
-      assert(m_arrayIds);
-      int ct = ++m_counts[ptr];
-      if (m_arrayIds->find(ptr) != m_arrayIds->end() &&
-          (m_referenced || isObject)) {
+      auto& ref = m_refs[tv];
+      int ct = ++ref.m_count;
+      bool isObject = tvIsResource(tv) || tvIsObject(tv);
+      if (ref.m_id != NO_ID && isObject) {
         return true;
-      } else {
-        (*m_arrayIds)[ptr] = m_valueCount;
       }
+      ref.m_id = m_valueCount;
       return ct >= (m_maxCount - 1);
     }
     break;
   default:
-    assert(false);
+    assertx(false);
     break;
   }
   return false;
 }
 
-void VariableSerializer::decNestedLevel(void *ptr) {
+void VariableSerializer::decNestedLevel(tv_rval tv) {
   --m_currentDepth;
-  --m_counts[ptr];
+  --m_refs[tv].m_count;
   if (m_type == Type::DebuggerSerialize && m_maxLevelDebugger > 0) {
     --m_levelDebugger;
   }
 }
 
-static void serializeRef(const TypedValue* tv,
-                         VariableSerializer* serializer,
-                         bool isArrayKey) {
-  assert(tv->m_type == KindOfRef);
-  // Ugly, but behavior is different for serialize
-  if (serializer->getType() == VariableSerializer::Type::Serialize ||
-      serializer->getType() == VariableSerializer::Type::APCSerialize ||
-      serializer->getType() == VariableSerializer::Type::DebuggerSerialize) {
-    if (serializer->incNestedLevel(tv->m_data.pref->var())) {
-      serializer->writeOverflow(tv->m_data.pref->var());
-    } else {
-      // Tell the inner variant to skip the nesting check for data inside
-      serializeVariant(*tv->m_data.pref->var(), serializer, isArrayKey, true);
-    }
-    serializer->decNestedLevel(tv->m_data.pref->var());
-  } else {
-    serializeVariant(*tv->m_data.pref->var(), serializer, isArrayKey);
+void VariableSerializer::serializeFunc(const Func* func) {
+  auto const name = func->fullName();
+  switch (getType()) {
+    case Type::VarExport:
+    case Type::PHPOutput:
+      m_buf->append("fun(");
+      write(name->data(), name->size());
+      m_buf->append(')');
+      break;
+    case Type::VarDump:
+    case Type::DebugDump:
+      // TODO (T29639296)
+      // For now we use function(foo) to dump function pointers in most cases,
+      // and this can be changed in the future.
+      indent();
+      m_buf->append("function(");
+      m_buf->append(name->data());
+      m_buf->append(")\n");
+      break;
+    case Type::PrintR:
+    case Type::DebuggerDump:
+      m_buf->append("function(");
+      m_buf->append(name->data());
+      m_buf->append(')');
+      break;
+    case Type::JSON:
+      write(StrNR(funcToStringHelper(func)));
+      break;
+    case Type::Serialize:
+    case Type::Internal:
+    case Type::APCSerialize:
+    case Type::DebuggerSerialize:
+      write(StrNR(funcToStringHelper(func)));
+      break;
   }
 }
 
-NEVER_INLINE static
-void serializeVariant(const Variant& self, VariableSerializer *serializer,
-                      bool isArrayKey /* = false */,
-                      bool skipNestCheck /* = false */,
-                      bool noQuotes /* = false */) {
-  auto tv = self.asTypedValue();
+void VariableSerializer::serializeClass(const Class* cls) {
+  switch (getType()) {
+    case Type::VarExport:
+    case Type::PHPOutput:
+      m_buf->append("class(");
+      write(cls->name()->data(), cls->name()->size());
+      m_buf->append(')');
+      break;
+    case Type::VarDump:
+    case Type::DebugDump:
+      // TODO (T29639296)
+      // For now we use function(foo) to dump function pointers in most cases,
+      // and this can be changed in the future.
+      indent();
+      m_buf->append("class(");
+      m_buf->append(cls->name());
+      m_buf->append(")\n");
+      break;
+    case Type::PrintR:
+    case Type::DebuggerDump:
+      m_buf->append("class(");
+      m_buf->append(cls->name());
+      m_buf->append(')');
+      break;
+    case Type::JSON:
+      write(StrNR(classToStringHelper(cls)));
+      break;
+    case Type::Serialize:
+    case Type::Internal:
+    case Type::APCSerialize:
+    case Type::DebuggerSerialize:
+      write(StrNR(classToStringHelper(cls)));
+      break;
+  }
+}
 
-  switch (tv->m_type) {
+void VariableSerializer::serializeClsMeth(
+  ClsMethDataRef clsMeth, bool skipNestCheck /* = false */) {
+  auto const clsName = clsMeth->getCls()->name();
+  auto const funcName = clsMeth->getFunc()->name();
+  switch (getType()) {
+    case Type::DebuggerDump:
+    case Type::PrintR:
+      m_buf->append("classMeth{\n    class(");
+      m_buf->append(clsName->data());
+      m_buf->append(")\n    function(");
+      m_buf->append(funcName->data());
+      m_buf->append(")\n}");
+      break;
+
+    case Type::VarExport:
+    case Type::PHPOutput:
+      m_buf->append("class_meth(");
+      write(clsName->data(), clsName->size());
+      m_buf->append(", ");
+      write(funcName->data(), funcName->size());
+      m_buf->append(')');
+      break;
+
+    case Type::VarDump:
+    case Type::DebugDump:
+      m_buf->append("classMeth{\n    class(");
+      m_buf->append(clsName->data());
+      m_buf->append(")\n    function(");
+      m_buf->append(funcName->data());
+      m_buf->append(")\n}\n");
+      break;
+
+    case Type::Serialize:
+    case Type::Internal:
+    case Type::APCSerialize:
+    case Type::DebuggerSerialize:
+      raiseClsMethToVecWarningHelper();
+      serializeArray(clsMethToVecHelper(clsMeth), skipNestCheck);
+      break;
+
+    case Type::JSON:
+      raiseClsMethToVecWarningHelper();
+      serializeArray(clsMethToVecHelper(clsMeth), skipNestCheck);
+      break;
+  }
+}
+
+NEVER_INLINE
+void VariableSerializer::serializeVariant(tv_rval tv,
+                                          bool isArrayKey /* = false */,
+                                          bool skipNestCheck /* = false */,
+                                          bool noQuotes /* = false */) {
+  switch (type(tv)) {
     case KindOfUninit:
     case KindOfNull:
-      assert(!isArrayKey);
-      serializer->writeNull();
+      assertx(!isArrayKey);
+      writeNull();
       return;
 
     case KindOfBoolean:
-      assert(!isArrayKey);
-      serializer->write(tv->m_data.num != 0);
+      assertx(!isArrayKey);
+      write(val(tv).num != 0);
       return;
 
     case KindOfInt64:
-      serializer->write(tv->m_data.num);
+      write(val(tv).num);
       return;
 
     case KindOfDouble:
-      serializer->write(tv->m_data.dbl);
+      write(val(tv).dbl);
       return;
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
-      serializer->write(tv->m_data.pstr->data(),
-                        tv->m_data.pstr->size(), isArrayKey, noQuotes);
+      write(val(tv).pstr->data(),
+            val(tv).pstr->size(), isArrayKey, noQuotes);
       return;
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+      assertx(!isArrayKey);
+      assertx(val(tv).parr->isVecArrayType());
+      serializeArray(val(tv).parr, skipNestCheck);
+      return;
+
+    case KindOfPersistentDict:
+    case KindOfDict:
+      assertx(!isArrayKey);
+      assertx(val(tv).parr->isDictType());
+      serializeArray(val(tv).parr, skipNestCheck);
+      return;
+
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+      assertx(!isArrayKey);
+      assertx(val(tv).parr->isKeysetType());
+      serializeArray(val(tv).parr, skipNestCheck);
+      return;
+
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:
-      assert(!isArrayKey);
-      serializeArray(tv->m_data.parr, serializer, skipNestCheck);
+      assertx(!isArrayKey);
+      assertx(val(tv).parr->isPHPArrayType());
+      serializeArray(val(tv).parr, skipNestCheck);
       return;
 
     case KindOfObject:
-      assert(!isArrayKey);
-      serializeObject(tv->m_data.pobj, serializer);
+      assertx(!isArrayKey);
+      serializeObject(val(tv).pobj);
       return;
 
     case KindOfResource:
-      assert(!isArrayKey);
-      serializeResource(tv->m_data.pres->data(), serializer);
+      assertx(!isArrayKey);
+      serializeResource(val(tv).pres->data());
       return;
 
-    case KindOfRef:
-      serializeRef(tv, serializer, isArrayKey);
+    case KindOfFunc:
+      assertx(!isArrayKey);
+      serializeFunc(val(tv).pfunc);
       return;
 
     case KindOfClass:
-      break;
+      assertx(!isArrayKey);
+      serializeClass(val(tv).pclass);
+      return;
+
+    case KindOfClsMeth:
+      assertx(!isArrayKey);
+      serializeClsMeth(val(tv).pclsmeth, skipNestCheck);
+      return;
+
+    case KindOfRecord:
+      // TODO(T41025646): implement serialization of record
+      always_assert(false);
   }
   not_reached();
 }
 
-static void serializeResourceImpl(const ResourceData* res,
-                                  VariableSerializer* serializer) {
-  serializer->pushResourceInfo(res->o_getResourceName(), res->getId());
-  serializeArray(empty_array(), serializer);
-  serializer->popResourceInfo();
+void VariableSerializer::serializeResourceImpl(const ResourceData* res) {
+  pushResourceInfo(res->o_getResourceName(), res->getId());
+  serializeArray(empty_array());
+  popResourceInfo();
 }
 
-static void serializeResource(const ResourceData* res,
-                              VariableSerializer* serializer) {
-  if (UNLIKELY(serializer->incNestedLevel((void*)res, true))) {
-    serializer->writeOverflow((void*)res, true);
+void VariableSerializer::serializeResource(const ResourceData* res) {
+  TypedValue tv = make_tv<KindOfResource>(const_cast<ResourceHdr*>(res->hdr()));
+  if (UNLIKELY(incNestedLevel(&tv))) {
+    writeOverflow(&tv);
+  } else if (auto trace = dynamic_cast<const CompactTrace*>(res)) {
+    serializeArray(trace->extract());
   } else {
-    serializeResourceImpl(res, serializer);
+    serializeResourceImpl(res);
   }
-  serializer->decNestedLevel((void*)res);
+  decNestedLevel(&tv);
 }
 
-static void serializeString(const String& str, VariableSerializer* serializer) {
+void VariableSerializer::serializeString(const String& str) {
   if (str) {
-    serializer->write(str.data(), str.size());
+    write(str.data(), str.size());
   } else {
-    serializer->writeNull();
+    writeNull();
   }
 }
 
-static void serializeArrayImpl(const ArrayData* arr,
-                               VariableSerializer* serializer) {
-  serializer->writeArrayHeader(arr->size(), arr->isVectorData());
-  for (ArrayIter iter(arr); iter; ++iter) {
-    serializer->writeArrayKey(iter.first());
-    serializer->writeArrayValue(iter.secondRef());
+void VariableSerializer::serializeArrayImpl(const ArrayData* arr) {
+  using AK = VariableSerializer::ArrayKind;
+  AK kind = getKind(arr);
+  writeArrayHeader(
+    arr->size(),
+    arr->isVectorData(),
+    kind
+  );
+
+  auto const write_filename = [&](const StringData* name) {
+    if (m_unitFilename == name) {
+      m_buf->append("t;");
+    } else {
+      write(name->data(), name->size());
+    }
+  };
+
+  if (m_type == Type::Internal &&
+      RuntimeOption::EvalArrayProvenance &&
+      arrprov::arrayWantsTag(arr)) {
+    auto const tag = arrprov::getTag(arr);
+    if (tag.valid()) {
+      switch (tag.kind()) {
+      case arrprov::Tag::Kind::Invalid: always_assert(false);
+      case arrprov::Tag::Kind::Known: {
+        auto const line = tag.line();
+        auto const filename = tag.filename();
+        m_buf->append("p:");
+        write(line);
+        write_filename(filename);
+        break;
+      };
+      case arrprov::Tag::Kind::UnknownRepo: {
+        m_buf->append("P;");
+        break;
+      }
+      case arrprov::Tag::Kind::KnownTraitMerge: {
+        m_buf->append("r:");
+        write_filename(tag.filename());
+        break;
+      }
+      case arrprov::Tag::Kind::KnownLargeEnum: {
+        m_buf->append("e:");
+        write_filename(tag.filename());
+        break;
+      }
+      case arrprov::Tag::Kind::RuntimeLocation:
+      case arrprov::Tag::Kind::RuntimeLocationPoison:
+        break;
+      }
+    }
   }
-  serializer->writeArrayFooter();
+
+  IterateKV(
+    arr,
+    [&](TypedValue k, TypedValue v) {
+      writeArrayKey(VarNR(k), kind);
+      writeArrayValue(VarNR(v), kind);
+    }
+  );
+
+  writeArrayFooter(kind);
 }
 
-static void serializeArray(const ArrayData* arr, VariableSerializer* serializer,
-                           bool skipNestCheck /* = false */) {
-  if (arr->size() == 0) {
-    serializer->writeArrayHeader(0, arr->isVectorData());
-    serializer->writeArrayFooter();
+void VariableSerializer::serializeArray(const ArrayData* arr,
+                                        bool skipNestCheck /* = false */) {
+  if (UNLIKELY(RuntimeOption::EvalHackArrCompatSerializeNotices)) {
+    if (UNLIKELY(m_hackWarn && !m_hasHackWarned && arr->isHackArrayType())) {
+      raise_hack_arr_compat_serialize_notice(arr);
+      m_hasHackWarned = true;
+    }
+    if (UNLIKELY(m_dictWarn && !m_hasDictWarned && arr->isDictType())) {
+      raise_hack_arr_compat_serialize_notice(arr);
+      m_hasDictWarned = true;
+    }
+    if (UNLIKELY(m_keysetWarn && !m_hasKeysetWarned && arr->isKeysetType())) {
+      raise_hack_arr_compat_serialize_notice(arr);
+      m_hasKeysetWarned = true;
+    }
+    if (UNLIKELY(m_phpWarn && !m_hasPHPWarned && arr->isPHPArrayType())) {
+      raise_hack_arr_compat_serialize_notice(arr);
+      m_hasPHPWarned = true;
+    }
+  }
+
+  if (UNLIKELY(RuntimeOption::EvalLogArrayProvenance &&
+               !m_forcePHPArrays &&
+               arrprov::arrayWantsTag(arr))) {
+    auto const source = [&]() -> folly::Optional<SerializationSite> {
+      switch (getType()) {
+      case VariableSerializer::Type::JSON:
+        return arr->isVecArrayType()
+          ? folly::none
+          : folly::make_optional(SerializationSite::JsonEncode);
+      case VariableSerializer::Type::Serialize:
+        return SerializationSite::Serialize;
+      case VariableSerializer::Type::VarExport:
+        return SerializationSite::VarExport;
+      case VariableSerializer::Type::PrintR:
+        return SerializationSite::PrintR;
+      default:
+        return folly::none;
+      }
+    }();
+    if (source) raise_array_serialization_notice(*source, arr);
+  }
+
+  if (arr->size() == 0 && LIKELY(!RuntimeOption::EvalArrayProvenance)) {
+    auto const kind = getKind(arr);
+    writeArrayHeader(0, arr->isVectorData(), kind);
+    writeArrayFooter(kind);
     return;
   }
+
   if (!skipNestCheck) {
-    if (serializer->incNestedLevel((void*)arr)) {
-      serializer->writeOverflow((void*)arr);
+    TypedValue tv = make_array_like_tv(const_cast<ArrayData*>(arr));
+    if (incNestedLevel(&tv)) {
+      writeOverflow(&tv);
     } else {
-      serializeArrayImpl(arr, serializer);
+      serializeArrayImpl(arr);
     }
-    serializer->decNestedLevel((void*)arr);
+    decNestedLevel(&tv);
   } else {
     // If isObject, the array is temporary and we should not check or save
     // its pointer.
-    serializeArrayImpl(arr, serializer);
+    serializeArrayImpl(arr);
   }
 }
 
-static void serializeArray(const Array& arr, VariableSerializer* serializer,
-                           bool isObject /* = false */) {
+void VariableSerializer::serializeArray(const Array& arr,
+                                        bool isObject /* = false */) {
   if (!arr.isNull()) {
-    serializeArray(arr.get(), serializer, isObject);
+    serializeArray(arr.get(), isObject);
   } else {
-    serializer->writeNull();
+    writeNull();
   }
 }
 
-static
-void serializeCollection(ObjectData* obj, VariableSerializer* serializer) {
-  int64_t sz = getCollectionSize(obj);
+void VariableSerializer::serializeCollection(ObjectData* obj) {
+  using AK = VariableSerializer::ArrayKind;
+  int64_t sz = collections::getSize(obj);
   auto type = obj->collectionType();
 
   if (isMapCollection(type)) {
-    serializer->pushObjectInfo(obj->getClassName(), obj->getId(), 'K');
-    serializer->writeArrayHeader(sz, false);
+    pushObjectInfo(obj->getClassName(),'K');
+    writeArrayHeader(sz, false, AK::PHP);
     for (ArrayIter iter(obj); iter; ++iter) {
-      serializer->writeCollectionKey(iter.first());
-      serializer->writeArrayValue(iter.second());
+      writeCollectionKey(iter.first(), AK::PHP);
+      writeArrayValue(iter.second(), AK::PHP);
     }
-    serializer->writeArrayFooter();
+    writeArrayFooter(AK::PHP);
 
   } else {
     assertx(isVectorCollection(type) ||
             isSetCollection(type) ||
             (type == CollectionType::Pair));
-    serializer->pushObjectInfo(obj->getClassName(), obj->getId(), 'V');
-    serializer->writeArrayHeader(sz, true);
-    auto ser_type = serializer->getType();
+    pushObjectInfo(obj->getClassName(), 'V');
+    writeArrayHeader(sz, true, AK::PHP);
+    auto ser_type = getType();
     if (ser_type == VariableSerializer::Type::Serialize ||
+        ser_type == VariableSerializer::Type::Internal ||
         ser_type == VariableSerializer::Type::APCSerialize ||
         ser_type == VariableSerializer::Type::DebuggerSerialize ||
         ser_type == VariableSerializer::Type::VarExport ||
         ser_type == VariableSerializer::Type::PHPOutput) {
       // For the 'V' serialization format, we don't print out keys
       // for Serialize, APCSerialize, DebuggerSerialize
+      bool const should_indent =
+        ser_type == VariableSerializer::Type::VarExport ||
+        ser_type == VariableSerializer::Type::PHPOutput;
       for (ArrayIter iter(obj); iter; ++iter) {
-        serializer->writeCollectionKeylessPrefix();
-        serializer->writeArrayValue(iter.second());
+        if (should_indent) {
+          indent();
+        }
+        writeArrayValue(iter.second(), AK::PHP);
       }
     } else {
       if (isSetCollection(type)) {
+        bool const should_indent =
+          ser_type == VariableSerializer::Type::PrintR ||
+          ser_type == VariableSerializer::Type::DebuggerDump;
         for (ArrayIter iter(obj); iter; ++iter) {
-          serializer->writeCollectionKeylessPrefix();
-          serializer->writeArrayValue(iter.second());
+          if (should_indent) {
+            indent();
+          }
+          writeArrayValue(iter.second(), AK::PHP);
         }
       } else {
         for (ArrayIter iter(obj); iter; ++iter) {
-          serializer->writeCollectionKey(iter.first());
-          serializer->writeArrayValue(iter.second());
+          writeCollectionKey(iter.first(), AK::PHP);
+          writeArrayValue(iter.second(), AK::PHP);
         }
       }
     }
-    serializer->writeArrayFooter();
+    writeArrayFooter(AK::PHP);
   }
-  serializer->popObjectInfo();
+  popObjectInfo();
 }
 
 /* Get properties from the actual object unless we're
@@ -1453,11 +1863,10 @@ void serializeCollection(ObjectData* obj, VariableSerializer* serializer) {
  * exports a __debugInfo() magic method.
  * In which case, call that and use the array it returns.
  */
-inline Array getSerializeProps(const ObjectData* obj,
-                               VariableSerializer* serializer) {
-  if (serializer->getType() == VariableSerializer::Type::VarExport) {
+Array VariableSerializer::getSerializeProps(const ObjectData* obj) const {
+  if (getType() == VariableSerializer::Type::VarExport) {
     Array props = Array::Create();
-    for (ArrayIter iter(obj->toArray()); iter; ++iter) {
+    for (ArrayIter iter(obj->toArray(false, true)); iter; ++iter) {
       auto key = iter.first().toString();
       // Jump over any class attribute mangling
       if (key[0] == '\0' && key.size() > 0) {
@@ -1467,13 +1876,18 @@ inline Array getSerializeProps(const ObjectData* obj,
         } while (key[sizeToCut] != '\0');
         key = key.substr(sizeToCut+1);
       }
-      props.setWithRef(key, iter.secondRef());
+      props.set(key, iter.secondVal());
     }
     return props;
   }
-  if ((serializer->getType() != VariableSerializer::Type::PrintR) &&
-      (serializer->getType() != VariableSerializer::Type::VarDump)) {
-    return obj->toArray();
+  if ((getType() != VariableSerializer::Type::PrintR) &&
+      (getType() != VariableSerializer::Type::VarDump)) {
+    auto const ignoreLateInit =
+      (m_ignoreLateInit ||
+       getType() == VariableSerializer::Type::DebugDump ||
+       getType() == VariableSerializer::Type::DebuggerDump ||
+       getType() == VariableSerializer::Type::DebuggerSerialize);
+    return obj->toArray(false, ignoreLateInit);
   }
   auto cls = obj->getVMClass();
   auto debuginfo = cls->lookupMethod(s_debugInfo.get());
@@ -1482,27 +1896,27 @@ inline Array getSerializeProps(const ObjectData* obj,
     // however when it's being var_dump'd or print_r'd, it shows its properties
     if (UNLIKELY(obj->instanceof(SystemLib::s_ArrayIteratorClass))) {
       auto ret = Array::Create();
-      obj->o_getArray(ret);
+      obj->o_getArray(ret, false, true);
       return ret;
     }
 
     // Same with Closure, since it's a dynamic object but still has its own
     // different behavior for var_dump and cast to array
-    if (UNLIKELY(obj->instanceof(SystemLib::s_ClosureClass))) {
+    if (UNLIKELY(obj->instanceof(c_Closure::classof()))) {
       auto ret = Array::Create();
-      obj->o_getArray(ret);
+      obj->o_getArray(ret, false, true);
       return ret;
     }
 
-    return obj->toArray();
+    return obj->toArray(false, true);
   }
   if (debuginfo->attrs() & (AttrPrivate|AttrProtected|
                             AttrAbstract|AttrStatic)) {
     raise_warning("%s::__debugInfo() must be public and non-static",
                   cls->name()->data());
-    return obj->toArray();
+    return obj->toArray(false, true);
   }
-  Variant ret = const_cast<ObjectData*>(obj)->o_invoke_few_args(s_debugInfo, 0);
+  auto ret = const_cast<ObjectData*>(obj)->invokeDebugInfo();
   if (ret.isArray()) {
     return ret.toArray();
   }
@@ -1513,24 +1927,28 @@ inline Array getSerializeProps(const ObjectData* obj,
   not_reached();
 }
 
-static void serializeObjectImpl(const ObjectData* obj,
-                                VariableSerializer* serializer) {
+void VariableSerializer::serializeObjectImpl(const ObjectData* obj) {
   bool handleSleep = false;
   Variant serializableNativeData = init_null();
   Variant ret;
-  auto const type = serializer->getType();
+  auto const type = getType();
+
+  if (obj->isCollection()) {
+    serializeCollection(const_cast<ObjectData*>(obj));
+    return;
+  }
 
   if (LIKELY(type == VariableSerializer::Type::Serialize ||
+             type == VariableSerializer::Type::Internal ||
              type == VariableSerializer::Type::APCSerialize)) {
     if (obj->instanceof(SystemLib::s_SerializableClass)) {
-      assert(!obj->isCollection());
-      Variant ret =
+      assertx(!obj->isCollection());
+      ret =
         const_cast<ObjectData*>(obj)->o_invoke_few_args(s_serialize, 0);
       if (ret.isString()) {
-        serializer->writeSerializableObject(obj->getClassName(),
-                                            ret.toString());
+        writeSerializableObject(obj->getClassName(), ret.toString());
       } else if (ret.isNull()) {
-        serializer->writeNull();
+        writeNull();
       } else {
         raise_error("%s::serialize() must return a string or NULL",
                     obj->getClassName().data());
@@ -1540,19 +1958,21 @@ static void serializeObjectImpl(const ObjectData* obj,
     // Only serialize CPP extension type instances which can actually
     // be deserialized.  Otherwise, raise a warning and serialize
     // null.
+    // Similarly, do not try to serialize WaitHandles
+    // as they contain internal state via non-NativeData means.
     auto cls = obj->getVMClass();
-    if (cls->instanceCtor() && !cls->isCppSerializable()) {
+    if ((cls->instanceCtor() && !cls->isCppSerializable()) ||
+        obj->isWaitHandle()) {
       raise_warning("Attempted to serialize unserializable builtin class %s",
                     obj->getVMClass()->preClass()->name()->data());
-      Variant placeholder = init_null();
-      serializeVariant(placeholder, serializer);
+      serializeVariant(init_null().asTypedValue());
       return;
     }
-    if (obj->getAttribute(ObjectData::HasSleep)) {
+    if (obj->getVMClass()->rtAttribute(Class::HasSleep)) {
       handleSleep = true;
       ret = const_cast<ObjectData*>(obj)->invokeSleep();
     }
-    if (obj->getAttribute(ObjectData::HasNativeData)) {
+    if (obj->hasNativeData()) {
       auto* ndi = cls->getNativeDataInfo();
       if (ndi->isSerializable()) {
         serializableNativeData = Native::nativeDataSleep(obj);
@@ -1561,18 +1981,21 @@ static void serializeObjectImpl(const ObjectData* obj,
   } else if (UNLIKELY(type == VariableSerializer::Type::DebuggerSerialize)) {
     // Don't try to serialize a CPP extension class which doesn't
     // support serialization. Just send the class name instead.
-    if (obj->getAttribute(ObjectData::IsCppBuiltin) &&
-        !obj->getVMClass()->isCppSerializable()) {
-      serializer->write(obj->getClassName());
+    if (obj->isCppBuiltin() && !obj->getVMClass()->isCppSerializable()) {
+      write(obj->getClassName());
       return;
+    }
+    if (obj->hasNativeData() &&
+        obj->getVMClass()->getNativeDataInfo()->isSerializable()) {
+      serializableNativeData = Native::nativeDataSleep(obj);
     }
   }
 
   if (UNLIKELY(handleSleep)) {
-    assert(!obj->isCollection());
+    assertx(!obj->isCollection());
     if (ret.isArray()) {
       Array wanted = Array::Create();
-      assert(ret.getRawType() == KindOfArray); // can't be KindOfRef
+      assertx(isArrayType(ret.getType()));
       const Array &props = ret.asCArrRef();
       for (ArrayIter iter(props); iter; ++iter) {
         String memberName = iter.second().toString();
@@ -1599,32 +2022,36 @@ static void serializeObjectImpl(const ObjectData* obj,
           }
         }
 
-        auto const lookup = obj_cls->getDeclPropIndex(ctx, memberName.get());
-        auto const propIdx = lookup.prop;
+        auto const lookup = obj_cls->getDeclPropSlot(ctx, memberName.get());
+        auto const slot = lookup.slot;
 
-        if (propIdx != kInvalidSlot) {
-          if (lookup.accessible) {
-            auto const prop = &obj->propVec()[propIdx];
-            if (prop->m_type != KindOfUninit) {
-              auto const attrs = obj_cls->declProperties()[propIdx].attrs;
-              if (attrs & AttrPrivate) {
-                memberName = concat4(s_zero, ctx->nameStr(),
-                                     s_zero, memberName);
-              } else if (attrs & AttrProtected) {
-                memberName = concat(s_protected_prefix, memberName);
-              }
-              if (!attrMask || (attrMask & attrs) == attrMask) {
-                wanted.set(memberName, tvAsCVarRef(prop));
-                continue;
-              }
+        if (slot != kInvalidSlot && lookup.accessible) {
+          auto propVal = const_cast<ObjectData*>(obj)->propLvalAtOffset(slot);
+          auto const& prop = obj_cls->declProperties()[slot];
+
+          if (propVal.type() != KindOfUninit) {
+            if (prop.attrs & AttrPrivate) {
+              memberName = concat4(s_zero, ctx->nameStr(),
+                                   s_zero, memberName);
+            } else if (prop.attrs & AttrProtected) {
+              memberName = concat(s_protected_prefix, memberName);
+            }
+            if (!attrMask || (attrMask & prop.attrs) == attrMask) {
+              wanted.set(memberName, propVal.tv());
+              continue;
+            }
+          } else if (prop.attrs & AttrLateInit) {
+            if (m_ignoreLateInit) {
+              continue;
+            } else {
+              throw_late_init_prop(prop.cls, memberName.get(), false);
             }
           }
         }
         if (!attrMask &&
             UNLIKELY(obj->getAttribute(ObjectData::HasDynPropArr))) {
-          const TypedValue* prop = obj->dynPropArray()->nvGet(propName.get());
-          if (prop) {
-            wanted.set(propName, tvAsCVarRef(prop));
+          if (auto const prop = obj->dynPropArray()->rval(propName.get())) {
+            wanted.set(propName, prop.tv());
             continue;
           }
         }
@@ -1632,95 +2059,120 @@ static void serializeObjectImpl(const ObjectData* obj,
                      "__sleep() but does not exist", propName.data());
         wanted.set(propName, init_null());
       }
-      serializer->pushObjectInfo(obj->getClassName(), obj->getId(), 'O');
+      pushObjectInfo(obj->getClassName(), 'O');
       if (!serializableNativeData.isNull()) {
         wanted.set(s_serializedNativeDataKey, serializableNativeData);
       }
-      serializeArray(wanted, serializer, true);
-      serializer->popObjectInfo();
+      serializeArray(wanted, true);
+      popObjectInfo();
     } else {
       raise_notice("serialize(): __sleep should return an array only "
                    "containing the names of instance-variables to "
                    "serialize");
-      serializeVariant(uninit_null(), serializer);
+      serializeVariant(uninit_null().asTypedValue());
     }
   } else {
-    if (obj->isCollection()) {
-      serializeCollection(const_cast<ObjectData*>(obj), serializer);
-    } else if (type == VariableSerializer::Type::VarExport &&
-               obj->instanceof(c_Closure::classof())) {
-      serializer->write(obj->getClassName());
+    if (type == VariableSerializer::Type::VarExport &&
+        obj->instanceof(c_Closure::classof())) {
+      write(obj->getClassName());
     } else {
       auto className = obj->getClassName();
-      Array properties = getSerializeProps(obj, serializer);
+      Array properties = getSerializeProps(obj);
       if (type == VariableSerializer::Type::DebuggerSerialize) {
         try {
            auto val = const_cast<ObjectData*>(obj)->invokeToDebugDisplay();
            if (val.isInitialized()) {
-             properties.lvalAt(s_PHP_DebugDisplay).assign(val);
+             properties.set(s_PHP_DebugDisplay, *val.asTypedValue());
            }
+        } catch (const Object &e) {
+          assertx(e->instanceof(SystemLib::s_ErrorClass) ||
+                  e->instanceof(SystemLib::s_ExceptionClass));
+          assertx(
+            SystemLib::s_ErrorClass->lookupDeclProp(s_message.get()) == 0 &&
+            SystemLib::s_ExceptionClass->lookupDeclProp(s_message.get()) == 0
+          );
+          auto const message_rval = e->propRvalAtOffset(Slot{0});
+          if (isStringType(message_rval.type())) {
+            raise_warning("%s::__toDebugDisplay() threw PHP exception "
+                          "of class %s with message '%s'",
+                          obj->getClassName().data(), e->getClassName().data(),
+                          message_rval.val().pstr->data());
+          } else {
+            raise_warning("%s::__toDebugDisplay() threw PHP exception "
+                          "of class %s with non-string message",
+                          obj->getClassName().data(), e->getClassName().data());
+          }
+        } catch (const std::exception &e) {
+          raise_warning("%s::__toDebugDisplay() threw C++ exception: %s",
+                        obj->getClassName().data(), e.what());
         } catch (...) {
-          raise_warning("%s::__toDebugDisplay() throws exception",
+          raise_warning("%s::__toDebugDisplay() threw unknown exception",
                         obj->getClassName().data());
         }
       }
       if (type == VariableSerializer::Type::DebuggerDump) {
         // Expect to display as their stringified classname.
-        if (obj->instanceof(SystemLib::s_ClosureClass)) {
-          serializer->write(obj->getVMClass()->nameStr());
+        if (obj->instanceof(c_Closure::classof())) {
+          write(obj->getVMClass()->nameStr());
           return;
         }
 
         // If we have a DebugDisplay prop saved, use it.
-        auto const debugDispVal = obj->o_realProp(s_PHP_DebugDisplay, 0);
-        if (debugDispVal) {
-          serializeVariant(*debugDispVal, serializer, false, false, true);
+        auto const debugDisp = obj->getProp(nullptr, s_PHP_DebugDisplay.get());
+        if (debugDisp) {
+          serializeVariant(debugDisp, false, false, true);
           return;
         }
         // Otherwise compute it if we have a __toDebugDisplay method.
         auto val = const_cast<ObjectData*>(obj)->invokeToDebugDisplay();
         if (val.isInitialized()) {
-          serializeVariant(val, serializer, false, false, true);
+          serializeVariant(val.asTypedValue(), false, false, true);
           return;
         }
       }
-      if (type != VariableSerializer::Type::VarDump &&
-          className.asString() == s_PHP_Incomplete_Class) {
-        auto const cname = obj->o_realProp(s_PHP_Incomplete_Class_Name, 0);
-        if (cname && cname->isString()) {
-          serializer->pushObjectInfo(cname->toCStrRef(), obj->getId(), 'O');
+      if (className.get() == s_PHP_Incomplete_Class.get() &&
+          (type == VariableSerializer::Type::Serialize ||
+           type == VariableSerializer::Type::Internal ||
+           type == VariableSerializer::Type::APCSerialize ||
+           type == VariableSerializer::Type::DebuggerSerialize ||
+           type == VariableSerializer::Type::DebuggerDump)) {
+        auto const cname = obj->getProp(
+          nullptr,
+          s_PHP_Incomplete_Class_Name.get()
+        );
+        if (cname && isStringType(cname.type())) {
+          pushObjectInfo(StrNR(cname.val().pstr), 'O');
           properties.remove(s_PHP_Incomplete_Class_Name, true);
-          serializeArray(properties, serializer, true);
-          serializer->popObjectInfo();
+          serializeArray(properties, true);
+          popObjectInfo();
           return;
         }
       }
-      serializer->pushObjectInfo(className, obj->getId(), 'O');
+      pushObjectInfo(className, 'O');
       if (!serializableNativeData.isNull()) {
         properties.set(s_serializedNativeDataKey, serializableNativeData);
       }
-      serializeArray(properties, serializer, true);
-      serializer->popObjectInfo();
+      serializeArray(properties, true);
+      popObjectInfo();
     }
   }
 }
 
-static
-void serializeObject(const ObjectData* obj, VariableSerializer* serializer) {
-  if (UNLIKELY(serializer->incNestedLevel((void*)obj, true))) {
-    serializer->writeOverflow((void*)obj, true);
+void VariableSerializer::serializeObject(const ObjectData* obj) {
+  TypedValue tv = make_tv<KindOfObject>(const_cast<ObjectData*>(obj));
+  if (UNLIKELY(incNestedLevel(&tv))) {
+    writeOverflow(&tv);
   } else {
-    serializeObjectImpl(obj, serializer);
+    serializeObjectImpl(obj);
   }
-  serializer->decNestedLevel((void*)obj);
+  decNestedLevel(&tv);
 }
 
-static
-void serializeObject(const Object& obj, VariableSerializer* serializer) {
+void VariableSerializer::serializeObject(const Object& obj) {
   if (obj) {
-    serializeObject(obj.get(), serializer);
+    serializeObject(obj.get());
   } else {
-    serializer->writeNull();
+    writeNull();
   }
 }
 

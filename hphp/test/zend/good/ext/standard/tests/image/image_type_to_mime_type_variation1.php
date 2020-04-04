@@ -1,4 +1,4 @@
-<?php
+<?hh
 /* Prototype  : string image_type_to_mime_type(int imagetype)
  * Description: Get Mime-Type for image-type returned by getimagesize, exif_read_data, exif_thumbnail, exif_imagetype 
  * Source code: ext/standard/image.c
@@ -20,7 +20,7 @@ class MyClass
 }
 
 //array of values to iterate over
-$values = array(
+$values = varray[
 
       // float data
       100.5,
@@ -30,8 +30,8 @@ $values = array(
       .5,
 
       // array data
-      array(),
-      array('color' => 'red', 'item' => 'pen'),
+      varray[],
+      darray['color' => 'red', 'item' => 'pen'],
 
       // null data
       NULL,
@@ -59,14 +59,13 @@ $values = array(
 
       // unset data
       @$unset_var,
-);
+];
 
 // loop through each element of the array for imagetype
 $iterator = 1;
 foreach($values as $value) {
       echo "\n-- Iteration $iterator --\n";
-      var_dump( image_type_to_mime_type($value) );
+      try { var_dump( image_type_to_mime_type($value) ); } catch (Exception $e) { echo "\n".'Warning: '.$e->getMessage().' in '.__FILE__.' on line '.__LINE__."\n"; }
       $iterator++;
 };
-?>
-===DONE===
+echo "===DONE===\n";

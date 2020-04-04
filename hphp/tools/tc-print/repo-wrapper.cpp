@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,26 +19,33 @@
 
 #include "hphp/hhvm/process-init.h"
 #include "hphp/util/hdf.h"
-#include "hphp/util/repo-schema.h"
+#include "hphp/util/build-info.h"
 #include "hphp/compiler/option.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/config.h"
-#include "hphp/runtime/ext_hhvm/ext_hhvm.h"
+#include "hphp/runtime/vm/native.h"
 #include "hphp/runtime/vm/runtime.h"
 
 namespace HPHP { namespace jit {
 
 RepoWrapper::RepoWrapper(const char* repoSchema,
-                         const std::string& configFile) {
-  kRepoSchemaId = repoSchema;
+                         const std::string& configFile,
+                         const bool shouldPrint) {
+  if (setenv("HHVM_RUNTIME_REPO_SCHEMA", repoSchema, 1 /* overwrite */)) {
+    fprintf(stderr, "Could not set repo schema");
+    exit(EXIT_FAILURE);
+  }
 
-  printf("# Config file: %s\n", configFile.c_str());
-  printf("# Repo schema: %s\n", kRepoSchemaId);
+  if (shouldPrint) {
+    printf("# Config file: %s\n", configFile.c_str());
+    printf("# Repo schema: %s\n", repoSchemaId().begin());
+  }
 
   register_process_init();
   initialize_repo();
   hphp_thread_init();
+  g_context.getCheck();
   IniSetting::Map ini = IniSetting::Map::object;
   Hdf config;
   if (!configFile.empty()) {
@@ -48,41 +55,38 @@ RepoWrapper::RepoWrapper(const char* repoSchema,
   }
   RuntimeOption::Load(ini, config);
   RuntimeOption::RepoCommit = false;
-  compile_file(nullptr, 0, MD5(), nullptr);
+  hphp_compiler_init();
 
   repo = &Repo::get();
 
   RuntimeOption::AlwaysUseRelativePath = false;
   RuntimeOption::SafeFileAccess = false;
   RuntimeOption::EvalAllowHhas = true;
+  RuntimeOption::SandboxMode = true; // So we get Unit::m_funcTable
   Option::WholeProgram = false;
 
   LitstrTable::init();
-  LitstrTable::get().setWriting();
-  RuntimeOption::RepoAuthoritative = true;
-  repo->loadGlobalData(true /* allowFailure */);
+  RuntimeOption::RepoAuthoritative = repo->hasGlobalData();
+  repo->loadGlobalData();
 
   std::string hhasLib;
   auto const phpLib = get_systemlib(&hhasLib);
-  always_assert(!hhasLib.empty() && !phpLib.empty());
-  auto phpUnit = compile_string(phpLib.c_str(), phpLib.size(),
-                                "systemlib.php");
-  addUnit(phpUnit);
-  auto hhasUnit = compile_string(hhasLib.c_str(), hhasLib.size(),
-                                 "systemlib.hhas");
-  addUnit(hhasUnit);
-
-  ClassInfo::Load();
-  auto nativeFunc = build_native_func_unit(hhbc_ext_funcs,
-                                           hhbc_ext_funcs_count);
-  addUnit(nativeFunc);
-  auto nativeClass = build_native_class_unit(hhbc_ext_classes,
-                                             hhbc_ext_class_count);
-  addUnit(nativeClass);
+  if (!phpLib.empty()) {
+    auto phpUnit = compile_string(phpLib.c_str(), phpLib.size(),
+                                  "systemlib.php",
+                                  Native::s_systemNativeFuncs,
+                                  RepoOptions::defaults());
+    addUnit(phpUnit);
+  }
+  if (!hhasLib.empty()) {
+    auto hhasUnit = compile_string(hhasLib.c_str(), hhasLib.size(),
+                                   "systemlib.hhas",
+                                   Native::s_systemNativeFuncs,
+                                   RepoOptions::defaults());
+    addUnit(hhasUnit);
+  }
 
   SystemLib::s_inited = true;
-
-  LitstrTable::get().setReading();
 }
 
 RepoWrapper::~RepoWrapper() {
@@ -91,15 +95,15 @@ RepoWrapper::~RepoWrapper() {
 }
 
 void RepoWrapper::addUnit(Unit* unit) {
-  unitCache.insert({unit->md5(), unit});
+  unitCache.insert({unit->sha1(), unit});
 }
 
-Unit* RepoWrapper::getUnit(MD5 md5) {
-  CacheType::const_iterator it = unitCache.find(md5);
+Unit* RepoWrapper::getUnit(SHA1 sha1) {
+  CacheType::const_iterator it = unitCache.find(sha1);
   if (it != unitCache.end()) return it->second;
-  auto unit = repo->loadUnit("", md5).release();
+  auto unit = repo->loadUnit("", sha1, Native::s_noNativeFuncs).release();
 
-  if (unit) unitCache.insert({md5, unit});
+  if (unit) unitCache.insert({sha1, unit});
   return unit;
 }
 

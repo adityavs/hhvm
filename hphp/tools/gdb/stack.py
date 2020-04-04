@@ -1,15 +1,45 @@
+#!/usr/bin/env python3
+
 """
 GDB commands related to the HHVM stack.
 """
-# @lint-avoid-python-3-compatibility-imports
-# @lint-avoid-pyflakes3
-# @lint-avoid-pyflakes2
 
 from compatibility import *
 
 import gdb
+import re
 from gdbutils import *
 import frame
+import unwind
+
+
+#------------------------------------------------------------------------------
+# Helpers.
+
+def _function_for(rip):
+    """Get the name of the function containing `rip', or None if `rip' does not
+    belong to a native function."""
+    try:
+        out = gdb.execute('x/i %s' % str(rip), False, True)
+        # [=>] 0xabc3210 <HPHP::foo<T>((*) Foo*(int))+789>: jmp 0xf0 <...>
+        return re.split(r'\+\d+>:', out.split('<', 1)[1], 1)[0]
+    except:
+        return None
+
+    # We really ought to be able to do this using the gdb.Block API, but in
+    # practice it sometimes produces an entirely unrelated block---maybe due to
+    # debuginfo corruption from LTO, or template folding, or something else
+    # entirely.  The code should look something like:
+    #
+    # block = gdb.block_for_pc(int(rip))
+    #
+    # while block is not None:
+    #     if block.function is not None:
+    #         return block.function.name
+    #
+    #     block = block.superblock
+    #
+    # return None
 
 
 #------------------------------------------------------------------------------
@@ -21,6 +51,8 @@ class WalkstkCommand(gdb.Command):
 The output backtrace has the following format:
 
     #<bt frame> <fp> @ <rip>: <function> [at <filename>:<line>]
+
+`walkstk' depends on the custom HHVM unwinder defined in unwind.py.
 """
 
     def __init__(self):
@@ -34,49 +66,30 @@ The output backtrace has the following format:
             print('Usage: walkstk [fp]')
             return
 
-        # Set fp = $rbp.
-        fp_type = T('uintptr_t').pointer()
-        fp = gdb.parse_and_eval('$rbp').cast(fp_type)
-        if len(argv) == 1:
-            fp = argv[0].cast(fp_type)[0]
-
-        # Set rip = $rip.
-        rip_type = T('uintptr_t')
-        rip = gdb.parse_and_eval('$rip').cast(rip_type)
-        if len(argv) == 1:
-            rip = argv[0].cast(fp_type)[1]
+        # Bail early if the custom unwinder has not been set up.
+        if not unwind.try_unwinder_init():
+            print('walkstk: Could not initialize the HHVM unwinder.')
 
         # Find the starting native frame.
         native_frame = gdb.newest_frame()
-
-        while (native_frame is not None
-               and rip != native_frame.pc()):
-            native_frame = native_frame.older()
-
         if native_frame is None:
-            if len(argv) == 0:
-                print('walkstk: Unknown error: corrupt stack?')
-            else:
-                print('walkstk: Invalid frame pointer')
+            print('walkstk: Cannot find any frames: corrupt stack?')
             return
 
-        # Get the address and value of `mcg', the global MCGenerator pointer.
-        # For some reason, gdb doesn't have debug info about the symbol, so we
-        # can't use V(); probably this is because we declare it extern "C" (and
-        # maybe also because we do so in a namespace).
-        mcg_type = T('HPHP::jit::MCGenerator').pointer()
-        mcg_addr = gdb.parse_and_eval('&::mcg').cast(mcg_type.pointer())
-        mcg = mcg_addr.dereference()
+        # Set fp = $rbp, rip = $rip.
+        fp_type = T('uintptr_t').pointer()
+        fp = native_frame.read_register(arch_regs()['fp']).cast(fp_type)
+        rip = native_frame.pc()
 
-        # Set the bounds of the TC.
-        try:
-            tc_base = mcg['code']['m_base']
-            tc_end = tc_base + mcg['code']['m_codeSize']
-        except:
-            # We can't access `mcg' for whatever reason.  Assume that the TC is
-            # above the data section, but restricted to low memory.
-            tc_base = mcg_addr.cast(T('uintptr_t'))
-            tc_end = 0x100000000
+        if len(argv) == 1:
+            # Start walking the stack from the user-provided `fp'.
+            fp = argv[0].cast(fp_type)[0]
+            rip = argv[0].cast(fp_type)[1]
+
+            # Try to find a corresponding native frame.
+            while (native_frame is not None
+                   and rip != native_frame.pc()):
+                native_frame = native_frame.older()
 
         i = 0
 
@@ -89,39 +102,127 @@ The output backtrace has the following format:
             rip = fp[1]
             fp = fp[0].cast(fp_type)
 
-            in_tc = rip >= tc_base and rip < tc_end
-
-            # Try to get the PHP function name from the ActRec at %fp if we're
+            # Try to get the PHP function name from the ActRec at `fp' if we're
             # executing in the TC.
-            if in_tc:
+            if frame.is_jitted(fp, rip):
                 ar_type = T('HPHP::ActRec').pointer()
                 try:
                     print(frame.stringify(frame.create_php(
-                        idx=i + 1, ar=fp.cast(ar_type), rip=rip)))
+                        idx=i, ar=fp.cast(ar_type), rip=rip)))
                 except gdb.MemoryError:
                     print(frame.stringify(frame.create_native(
-                        idx=i + 1, fp=fp, rip=rip, native_frame=native_frame)))
+                        idx=i, fp=fp, rip=rip, native_frame=native_frame)))
 
-            # Pop native frames until we hit our caller's rip.
-            else:
-                frames = []
-
-                while (native_frame is not None
-                       and fp[1] != native_frame.pc()):
-                    frames.append(frame.create_native(
-                        idx=i,
-                        fp='{inline frame}',
-                        rip=rip,
-                        native_frame=native_frame))
-
-                    i += 1
+                if native_frame is not None:
                     native_frame = native_frame.older()
+                i += 1
 
-                if frames:
-                    # Associate the frame pointer with the un-inlined frame.
-                    frames[-1]['fp'] = str(fp)
+            else:
+                if native_frame is None:
+                    # If we couldn't find a native frame, then `walkstk' was
+                    # invoked with a non-native `fp' argument.  Now that we
+                    # don't seem to be in the TC, try to find the corresponding
+                    # native frame.
+                    native_frame = gdb.newest_frame()
+                    while (native_frame is not None
+                           and rip != native_frame.pc()):
+                        native_frame = native_frame.older()
 
-                for f in frames:
-                    print(frame.stringify(f))
+                if native_frame is not None:
+                    # Pop native frames until we hit our caller's rip.
+                    frames = []
+
+                    while (native_frame is not None
+                           and (fp == 0x0 or fp[1] != native_frame.pc())):
+                        frames.append(frame.create_native(
+                            idx=i,
+                            fp='{inline frame}',
+                            rip=native_frame.pc(),
+                            native_frame=native_frame))
+
+                        native_frame = native_frame.older()
+                        i += 1
+
+                    if frames:
+                        # Associate the frame pointer with the un-inlined frame.
+                        frames[-1]['fp'] = str(fp)
+
+                    for f in frames:
+                        print(frame.stringify(f))
+                else:
+                    # We only hit this case if gdb undercounted the TC's
+                    # frames---which shouldn't happen unless the custom
+                    # unwinder (or gdb's unwinder API) is malfunctioning.
+                    #
+                    # Just guess that the name of the frame is the same as the
+                    # name of the block we're in.
+                    try:
+                        print(frame.stringify(frame.create_native(
+                            idx=i, fp=fp, rip=rip, name=_function_for(rip))))
+                    except:
+                        print(frame.stringify(frame.create_native(
+                            idx=i, fp=fp, rip=rip, native_frame=None)))
+                    i += 1
+
 
 WalkstkCommand()
+
+
+#------------------------------------------------------------------------------
+# `walkfp' command.
+
+class WalkfpCommand(gdb.Command):
+    """Traverse the interleaved VM and native stacks.
+
+This is a simplified version of `walkstk' which carries fewer dependencies.
+Its output is not as detailed, but it is more robust to failures (including
+internal gdb errors).
+
+The output backtrace has the following format:
+
+    #<idx> <fp> @ <rip>: <function> [at <filename>:<line>]
+"""
+
+    def __init__(self):
+        super(WalkfpCommand, self).__init__('walkfp', gdb.COMMAND_STACK)
+
+    @errorwrap
+    def invoke(self, args, from_tty):
+        argv = parse_argv(args)
+
+        if len(argv) > 2:
+            print('Usage: walkfp [fp] [rip]')
+            return
+
+        fp_type = T('uintptr_t').pointer()
+        fp = gdb.parse_and_eval('$' + arch_regs()['fp']).cast(fp_type)
+        rip = gdb.parse_and_eval('$' + arch_regs()['ip']).cast(T('uintptr_t'))
+
+        if len(argv) >= 1:
+            fp = argv[0].cast(fp_type)
+
+            if len(argv) == 2:
+                rip = argv[1].cast(T('uintptr_t'))
+
+        i = 0
+        fp = (fp, rip)
+
+        while fp:
+            rip = fp[1]
+            fp = fp[0].cast(fp_type)
+
+            try:
+                if frame.is_jitted(fp, rip):
+                    ar_type = T('HPHP::ActRec').pointer()
+                    print(frame.stringify(frame.create_php(
+                        idx=i, ar=fp.cast(ar_type), rip=rip)))
+                else:
+                    print(frame.stringify(frame.create_native(
+                        idx=i, fp=fp, rip=rip, name=_function_for(rip))))
+            except:
+                print(frame.stringify(frame.create_native(idx=i, fp=fp, rip=rip)))
+
+            i += 1
+
+
+WalkfpCommand()

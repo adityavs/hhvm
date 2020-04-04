@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class RecItIt extends RecursiveIteratorIterator {
 
@@ -15,5 +15,9 @@ class RecItIt extends RecursiveIteratorIterator {
 }
 
 
-$rii = new RecItIt(new RecursiveArrayIterator(array(1,2,3,4)));
+
+<<__EntryPoint>>
+function main_recursiveitit_rewind() {
+$rii = new RecItIt(new RecursiveArrayIterator(varray[1,2,3,4]));
 $rii->rewind();
+}

@@ -1,0 +1,60 @@
+# closure.good.php starts here
+
+.filepath "closure.good.php";
+
+.hh_file 1;
+.adata A_0 = """Y:1:{s:8:\"nullable\";b:1;}""";
+.adata A_1 = """Y:2:{s:4:\"kind\";i:20;s:13:\"generic_types\";y:1:{Y:1:{s:4:\"kind\";i:4;}}}""";
+.adata A_2 = """v:0:{}""";
+
+.main (1,1) {
+  .srcloc 4:7,4:7;
+  DefCls 0
+  Int 1
+  RetC
+}
+
+.class C (4,14) {
+  .method [public static] (10,13) <"HH\\void" N > derive(<"TE" "TE" extended_hint type_var> $field, <"HH\\mixed" N > $data) {
+    .declvars $_;
+    .srcloc 10:17,13:135;
+    VerifyParamType $field
+    .srcloc 12:12,12:16;
+    CGetL $data
+    SetL _3
+    Array @A_0
+    SetL _4
+    IsTypeStructC Resolve
+    JmpNZ L0
+    PushL _3
+    PushL _4
+    ThrowAsTypeStructException
+  L0:
+    PushL _3
+    UnsetL _4
+    .srcloc 12:7,12:39;
+    SetL $_
+    .srcloc 12:7,12:40;
+    PopC
+    .srcloc 13:6,13:6;
+    Null
+    RetC
+  }
+  .method [public static] (5,5) <"HH\\vec<HH\\string>" "HH\\vec" extended_hint> E##Members() {
+    .declvars $mems;
+    .srcloc 5:8,5:8;
+    Vec @A_2
+    .srcloc 5:8,5:8;
+    SetL $mems
+    .srcloc 5:8,5:8;
+    PopC
+    .srcloc 5:8,5:8;
+    CGetL $mems
+    .srcloc 5:8,5:8;
+    Array @A_1
+    VerifyRetTypeTS
+    RetC
+  }
+}
+
+# closure.good.php ends here

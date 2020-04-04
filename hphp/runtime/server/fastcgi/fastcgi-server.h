@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,7 +33,7 @@ namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class FastCGIServer;
+struct FastCGIServer;
 
 /*
  * FastCGIAcceptor accepts new connections from a listening socket, wrapping
@@ -46,10 +46,10 @@ struct FastCGIAcceptor : public wangle::Acceptor {
     , m_server(server)
   {}
 
-  virtual ~FastCGIAcceptor() {}
+  ~FastCGIAcceptor() override {}
 
   bool canAccept(const folly::SocketAddress& address) override;
-  void onNewConnection(folly::AsyncSocket::UniquePtr sock,
+  void onNewConnection(folly::AsyncTransportWrapper::UniquePtr sock,
                        const folly::SocketAddress* peerAddress,
                        const std::string& nextProtocolName,
                        SecureTransportType secureProtocolType,
@@ -90,17 +90,17 @@ struct FastCGIServer : public Server,
                 int port,
                 int workers,
                 bool useFileSocket);
-  ~FastCGIServer() {
+  ~FastCGIServer() override {
     waitForEnd();
   }
 
   // These are currently unimplemented (TODO(#4129))
-  void addTakeoverListener(TakeoverListener* lisener) override {}
-  void removeTakeoverListener(TakeoverListener* lisener) override {}
+  void addTakeoverListener(TakeoverListener* /*lisener*/) override {}
+  void removeTakeoverListener(TakeoverListener* /*lisener*/) override {}
 
   // Increases the size of the thread-pool for dispatching requests
-  void addWorkers(int numWorkers) override {
-    m_dispatcher.addWorkers(numWorkers);
+  void saturateWorkers() override {
+    m_dispatcher.saturateWorkers();
   }
 
   // Configures m_socket and starts accepting connections in the event base
@@ -114,8 +114,14 @@ struct FastCGIServer : public Server,
 
   // Query information about the worker pool
   JobQueueDispatcher<FastCGIWorker>& getDispatcher() { return m_dispatcher; }
+  size_t getMaxThreadCount() override {
+    return m_dispatcher.getMaxThreadCount();
+  }
   int getActiveWorker() override { return m_dispatcher.getActiveWorker(); }
   int getQueuedJobs()   override { return m_dispatcher.getQueuedJobs();   }
+  void updateMaxActiveWorkers(int num) override {
+    return m_dispatcher.updateMaxActiveWorkers(num);
+  }
 
   // Query the event manager
   folly::EventBaseManager *getEventBaseManager() { return &m_eventBaseManager; }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,6 +17,8 @@
 
 #include "hphp/runtime/ext/imagick/ext_imagick.h"
 
+#include <sstream>
+
 namespace HPHP {
 
 #define IMAGICKDRAW_THROW imagickThrow<ImagickDrawException>
@@ -28,12 +30,12 @@ using CUCString = const unsigned char*;
 ALWAYS_INLINE
 static void getAffineMatrixElement(
     const Array& array, const String& key, double& ret) {
-  const Variant& value = array.rvalAtRef(key);
-  if (value.isNull()) {
+  auto const value = array.rval(key);
+  if (isNullType(value.type())) {
     IMAGICKDRAW_THROW(
       "AffineMatrix must contain keys: sx, rx, ry, sy, tx and ty");
   } else {
-    ret = value.toDouble();
+    ret = tvCastToDouble(value.tv());
   }
 }
 
@@ -885,7 +887,7 @@ static bool HHVM_METHOD(ImagickDraw, translate,
 
 #undef IMAGICKDRAW_THROW
 
-void loadImagickDrawClass() {
+void ImagickExtension::loadImagickDrawClass() {
   HHVM_ME(ImagickDraw, affine);
   HHVM_ME(ImagickDraw, annotation);
   HHVM_ME(ImagickDraw, arc);

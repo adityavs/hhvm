@@ -1,5 +1,9 @@
-[1]intersect(shape<FieldsFullyKnown>(x => [2]intersect(Tint)), shape<FieldsFullyKnown>(y => [3]intersect(Tstring)))
-[4]intersect(shape<FieldsFullyKnown>(x => [5]intersect(Tstring, Tint)))
-[6]intersect(shape<FieldsPartiallyKnown(unset fields:)>(x => Tint), shape<FieldsPartiallyKnown(unset fields:)>(x => Tint, y => option(Tstring)))
-[7]intersect(shape<FieldsFullyKnown>(x => [8]intersect(Tint)), shape<FieldsPartiallyKnown(unset fields:)>(x => Tint, y => option(Tstring)))
+File "shape26.php", line 25, characters 3-13:
+  shape(?'x' => int, ?'y' => string)
+File "shape26.php", line 33, characters 3-13:
+  shape('x' => (int | string))
+File "shape26.php", line 41, characters 3-13:
+  shape('x' => int, ...)
+File "shape26.php", line 49, characters 3-13:
+  shape('x' => int, ?'y' => ?string, ...)
 No errors

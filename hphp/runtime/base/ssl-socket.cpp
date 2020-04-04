@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,13 +15,15 @@
 */
 
 #include "hphp/runtime/base/ssl-socket.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/server/server-stats.h"
+
 #include <folly/String.h>
-#include <poll.h>
-#include <sys/time.h>
+#include <folly/portability/Sockets.h>
+#include <folly/portability/SysTime.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -33,7 +35,9 @@ bool SSLSocketData::closeImpl() {
   }
   if (m_handle) {
     SSL_free(m_handle);
+    SSL_CTX_free(m_ctx);
     m_handle = nullptr;
+    m_ctx = nullptr;
   }
   return SocketData::closeImpl();
 }
@@ -52,7 +56,7 @@ int SSLSocket::GetSSLExDataIndex() {
   if (s_ex_data_index < 0) {
     s_ex_data_index = SSL_get_ex_new_index(0, (void*)"PHP stream index",
                                            nullptr, nullptr, nullptr);
-    assert(s_ex_data_index >= 0);
+    assertx(s_ex_data_index >= 0);
   }
   return s_ex_data_index;
 }
@@ -93,7 +97,7 @@ int SSLSocket::verifyCallback(int preverify_ok, X509_STORE_CTX *ctx) {
 
 const StaticString s_passphrase("passphrase");
 
-int SSLSocket::passwdCallback(char *buf, int num, int verify, void *data) {
+int SSLSocket::passwdCallback(char* buf, int num, int /*verify*/, void* data) {
   /* TODO: could expand this to make a callback into PHP user-space */
   SSLSocket *stream = (SSLSocket *)data;
   String passphrase = stream->m_context[s_passphrase].toString();
@@ -123,7 +127,13 @@ SSL *SSLSocket::createSSL(SSL_CTX *ctx) {
     String cafile = m_context[s_cafile].toString();
     String capath = m_context[s_capath].toString();
 
-    if (!cafile.empty() || !capath.empty()) {
+    if (!FileUtil::isValidPath(cafile)) {
+      raise_warning("cafile expected to be a path, string given");
+      return nullptr;
+    } else if (!FileUtil::isValidPath(capath)) {
+      raise_warning("capath expected to be a path, string given");
+      return nullptr;
+    } else if (!cafile.empty() || !capath.empty()) {
       const char* cafileptr = cafile.empty() ? nullptr : cafile.data();
       const char* capathptr = capath.empty() ? nullptr : capath.data();
       if (!SSL_CTX_load_verify_locations(ctx, cafileptr, capathptr)) {
@@ -158,7 +168,10 @@ SSL *SSLSocket::createSSL(SSL_CTX *ctx) {
   SSL_CTX_set_cipher_list(ctx, cipherlist.data());
 
   String certfile = m_context[s_local_cert].toString();
-  if (!certfile.empty()) {
+  if (!FileUtil::isValidPath(certfile)) {
+    raise_warning("local_cert expected to be a path, string given");
+    return nullptr;
+  } else if (!certfile.empty()) {
     String resolved_path_buff = File::TranslatePath(certfile);
     if (!resolved_path_buff.empty()) {
       /* a certificate to use for authentication */
@@ -202,8 +215,8 @@ SSL *SSLSocket::createSSL(SSL_CTX *ctx) {
 ///////////////////////////////////////////////////////////////////////////////
 // constructors and destructor
 
-SSLSocket::SSLSocket()
-: Socket(std::make_shared<SSLSocketData>()),
+SSLSocket::SSLSocket(bool nonblocking /* = true*/)
+: Socket(std::make_shared<SSLSocketData>(nonblocking)),
   m_data(static_cast<SSLSocketData*>(getSocketData()))
 {}
 
@@ -215,8 +228,10 @@ SSLSocket::SSLSocket(std::shared_ptr<SSLSocketData> data)
 StaticString s_ssl("ssl");
 
 SSLSocket::SSLSocket(int sockfd, int type, const req::ptr<StreamContext>& ctx,
-                     const char *address /* = NULL */, int port /* = 0 */)
-: Socket(std::make_shared<SSLSocketData>(port, type), sockfd, type, address, port),
+                     const char *address /* = NULL */, int port /* = 0 */,
+                     bool nonblocking /* = true*/)
+: Socket(std::make_shared<SSLSocketData>(port, type, nonblocking),
+        sockfd, type, address, port),
   m_data(static_cast<SSLSocketData*>(getSocketData()))
 {
   if (!ctx) {
@@ -279,7 +294,7 @@ bool SSLSocket::onAccept() {
       m_data->m_method = CryptoMethod::ServerTLS;
       break;
     default:
-      assert(false);
+      assertx(false);
     }
 
     if (setupCrypto() && enableCrypto()) {
@@ -368,7 +383,9 @@ bool SSLSocket::handleError(int64_t nr_bytes, bool is_init) {
 
 req::ptr<SSLSocket> SSLSocket::Create(
   int fd, int domain, const HostURL &hosturl, double timeout,
-  const req::ptr<StreamContext>& ctx) {
+  const req::ptr<StreamContext>& ctx,
+  bool nonblocking
+) {
   CryptoMethod method;
   const std::string scheme = hosturl.getScheme();
 
@@ -389,8 +406,17 @@ req::ptr<SSLSocket> SSLSocket::Create(
     return nullptr;
   }
 
+  return Create(fd, domain, method, hosturl.getHost(), hosturl.getPort(),
+                timeout, ctx, nonblocking);
+}
+
+req::ptr<SSLSocket> SSLSocket::Create(
+  int fd, int domain, CryptoMethod method, std::string address, int port,
+  double timeout, const req::ptr<StreamContext>& ctx,
+  bool nonblocking
+) {
   auto sock = req::make<SSLSocket>(
-    fd, domain, ctx, hosturl.getHost().c_str(), hosturl.getPort());
+    fd, domain, ctx, address.c_str(), port, nonblocking);
 
   sock->m_data->m_method = method;
   sock->m_data->m_connect_timeout = timeout;
@@ -456,7 +482,7 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
   }
 
   if (!m_context.exists(s_verify_peer)) {
-    m_context.add(s_verify_peer, true);
+    m_context.set(s_verify_peer, true);
   }
 
   /* need to do slightly different things, based on client/server method,
@@ -535,6 +561,8 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
     SSL_CTX_free(ctx);
     return false;
   }
+
+  m_data->m_ctx = ctx;
 
   if (!SSL_set_fd(m_data->m_handle, getFd())) {
     handleError(0, true);
@@ -758,6 +786,10 @@ bool SSLSocket::checkLiveness() {
     }
   }
   return true;
+}
+
+SSLSocket::CryptoMethod SSLSocket::getCryptoMethod() {
+  return m_data->m_method;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

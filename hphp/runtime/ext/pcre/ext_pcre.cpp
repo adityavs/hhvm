@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,8 +24,10 @@
 #include "hphp/runtime/ext/mbstring/ext_mbstring.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/base/container-functions.h"
 #include "hphp/runtime/base/ini-setting.h"
-#include "hphp/runtime/base/request-local.h"
+#include "hphp/util/rds-local.h"
 
 namespace HPHP {
 
@@ -33,75 +35,103 @@ namespace HPHP {
 
 static int s_pcre_has_jit = 0;
 
-Variant HHVM_FUNCTION(preg_grep, const String& pattern, const Array& input,
+Variant HHVM_FUNCTION(preg_grep, const String& pattern, const Variant& input,
                                  int flags /* = 0 */) {
-  return preg_grep(pattern, input, flags);
+  if (!isContainer(input)) {
+    raise_warning("input to preg_grep must be an array or collection");
+    return init_null();
+  }
+  return preg_grep(pattern, input.toArray(), flags);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 TypedValue HHVM_FUNCTION(preg_match,
                          StringArg pattern, StringArg subject,
-                         OutputArg matches /* = null */,
                          int flags /* = 0 */, int offset /* = 0 */) {
-  return tvReturn(preg_match(StrNR(pattern.get()), StrNR(subject.get()),
-                             matches.get() ? matches->var() : nullptr,
-                             flags, offset));
+  return tvReturn(preg_match(pattern.get(), subject.get(),
+                             nullptr, flags, offset));
+}
+
+TypedValue HHVM_FUNCTION(preg_match_with_matches,
+                         StringArg pattern, StringArg subject,
+                         Variant& matches,
+                         int flags /* = 0 */, int offset /* = 0 */) {
+  return tvReturn(preg_match(pattern.get(), subject.get(),
+                             &matches, flags, offset));
 }
 
 TypedValue HHVM_FUNCTION(preg_match_all,
-                         const String& pattern,
-                         const String& subject,
-                         OutputArg matches /* = null */,
+                         StringArg pattern,
+                         StringArg subject,
                          int flags /* = 0 */,
                          int offset /* = 0 */) {
-  return tvReturn(preg_match_all(pattern, subject,
-                                 matches.get() ? matches->var() : nullptr,
-                                 flags, offset));
+  return tvReturn(preg_match_all(pattern.get(), subject.get(),
+                                 nullptr, flags, offset));
+}
+
+TypedValue HHVM_FUNCTION(preg_match_all_with_matches,
+                         StringArg pattern,
+                         StringArg subject,
+                         Variant& matches,
+                         int flags /* = 0 */,
+                         int offset /* = 0 */) {
+  return tvReturn(preg_match_all(pattern.get(), subject.get(),
+                                 &matches, flags, offset));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 
 Variant HHVM_FUNCTION(preg_replace, const Variant& pattern, const Variant& replacement,
-                                    const Variant& subject, int limit /* = -1 */,
-                                    VRefParam count /* = null */) {
+                                    const Variant& subject, int limit /* = -1 */) {
   return preg_replace_impl(pattern, replacement, subject,
-                           limit, count.getVariantOrNull(), false, false);
+                           limit, nullptr, false, false);
+}
+
+Variant HHVM_FUNCTION(preg_replace_with_count,
+                      const Variant& pattern,
+                      const Variant& replacement,
+                      const Variant& subject,
+                      int limit,
+                      int64_t& count) {
+  return preg_replace_impl(pattern, replacement, subject,
+                           limit, &count, false, false);
 }
 
 Variant HHVM_FUNCTION(preg_replace_callback,
                       const Variant& pattern,
                       const Variant& callback,
                       const Variant& subject,
-                      int limit /* = -1 */,
-                      VRefParam count /* = null */) {
+                      int limit,
+                      int64_t& count) {
   if (!is_callable(callback)) {
     raise_warning("Not a valid callback function %s",
                   callback.toString().data());
     return empty_string_variant();
   }
   return preg_replace_impl(pattern, callback, subject,
-                           limit, count.getVariantOrNull(), true, false);
+                           limit, &count, true, false);
 }
 
 static Variant preg_replace_callback_array_impl(
   const Variant& patterns_and_callbacks,
   const Array& subjects,
   int limit,
-  VRefParam count) {
+  int64_t& total_count) {
 
   Array ret = Array::Create();
   auto key = 0;
-  auto total_replacement_count = 0;
+  total_count = 0;
   for (ArrayIter s_iter(subjects); s_iter; ++s_iter) {
-    assert(s_iter.second().isString());
+    assertx(s_iter.second().isString());
     auto subj = s_iter.second();
     for (ArrayIter pc_iter(patterns_and_callbacks.toArray());
                            pc_iter; ++pc_iter) {
       Variant pattern(pc_iter.first());
-      assert(pattern.isString());
+      assertx(pattern.isString());
       Variant callback(pc_iter.second());
+      int64_t count;
       subj = HHVM_FN(preg_replace_callback)(pattern, callback, subj, limit,
                                             count);
       // If we got an error on the replacement, the subject will be null,
@@ -110,16 +140,10 @@ static Variant preg_replace_callback_array_impl(
         return init_null();
       }
 
-      if (count.isReferenced()) {
-        total_replacement_count += count.toInt64();
-      }
+      total_count += count;
     }
-    ret.add(key++, subj);
+    ret.set(key++, subj);
   }
-
-  // If count was passed in as an explicit reference, we will assign it to our
-  // total replacement count; otherwise, count will just remained unassigned
-  count.assignIfRef(total_replacement_count);
 
   // If there were no replacements (i.e., matches) return original subject(s)
   if (ret.empty()) {
@@ -131,8 +155,8 @@ static Variant preg_replace_callback_array_impl(
 Variant HHVM_FUNCTION(preg_replace_callback_array,
                       const Variant& patterns_and_callbacks,
                       const Variant& subject,
-                      int limit /* = -1 */,
-                      VRefParam count /* = uninit_null() */) {
+                      int limit,
+                      int64_t& count) {
   if (!patterns_and_callbacks.isArray()) {
     raise_warning(
       "%s() expects parameter 1 to be an array, %s given",
@@ -155,7 +179,7 @@ Variant HHVM_FUNCTION(preg_replace_callback_array,
 
   if (subject.isString()) {
     Array subject_arr = Array::Create();
-    subject_arr.add(0, subject.toString());
+    subject_arr.set(0, subject.toString());
     Variant ret = preg_replace_callback_array_impl(
       patterns_and_callbacks, subject_arr, limit, count
     );
@@ -172,17 +196,18 @@ Variant HHVM_FUNCTION(preg_replace_callback_array,
 }
 
 Variant HHVM_FUNCTION(preg_filter, const Variant& pattern, const Variant& callback,
-                                   const Variant& subject, int limit /* = -1 */,
-                                   VRefParam count /* = null */) {
+                                   const Variant& subject, int limit,
+                                   int64_t& count) {
   return preg_replace_impl(pattern, callback, subject,
-                           limit, count.getVariantOrNull(), false, true);
+                           limit, &count, false, true);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant HHVM_FUNCTION(preg_split, const String& pattern, const String& subject,
-                                  int limit /* = -1 */, int flags /* = 0 */) {
-  return preg_split(pattern, subject, limit, flags);
+                                  const Variant& limit, int flags /* = 0 */) {
+  //NOTE: .toInt64() returns 0 for null
+  return preg_split(pattern, subject, limit.toInt64(), flags);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -206,23 +231,13 @@ int64_t HHVM_FUNCTION(preg_last_error) {
 String HHVM_FUNCTION(ereg_replace, const String& pattern,
                                    const String& replacement,
                                    const String& str) {
-  return HHVM_FN(mb_ereg_replace)(pattern, replacement, str);
+  return HHVM_FN(mb_ereg_replace)(pattern, replacement, str).toString();
 }
 
 String HHVM_FUNCTION(eregi_replace, const String& pattern,
                                     const String& replacement,
                                     const String& str) {
-  return HHVM_FN(mb_eregi_replace)(pattern, replacement, str);
-}
-
-Variant HHVM_FUNCTION(ereg, const String& pattern, const String& str,
-                            VRefParam regs /* = null */) {
-  return HHVM_FN(mb_ereg)(pattern, str, ref(regs));
-}
-
-Variant HHVM_FUNCTION(eregi, const String& pattern, const String& str,
-                             VRefParam regs /* = null */) {
-  return HHVM_FN(mb_eregi)(pattern, str, ref(regs));
+  return HHVM_FN(mb_eregi_replace)(pattern, replacement, str).toString();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -256,47 +271,61 @@ String HHVM_FUNCTION(sql_regcase, const String& str) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// The extern symbol would resolve at link time to the same RDS_LOCAL
+// as defined in hphp/runtime/base/preg.cpp
+extern RDS_LOCAL(PCREglobals, tl_pcre_globals);
 
-const StaticString s_PCRE_VERSION("PCRE_VERSION");
-
-extern IMPLEMENT_THREAD_LOCAL(PCREglobals, tl_pcre_globals);
-
-class PcreExtension final : public Extension {
-public:
+struct PcreExtension final : Extension {
   PcreExtension() : Extension("pcre", NO_EXTENSION_VERSION_YET) {}
 
   void moduleInit() override {
-    Native::registerConstant<KindOfString>(
-      s_PCRE_VERSION.get(), makeStaticString(pcre_version())
-    );
+    HHVM_RC_STR(PCRE_VERSION, pcre_version());
 
-#define PCRECNS(c) Native::registerConstant<KindOfInt64> \
-                    (makeStaticString("PREG_" #c), PHP_PCRE_##c);
-    PCRECNS(NO_ERROR);
-    PCRECNS(INTERNAL_ERROR);
-    PCRECNS(BACKTRACK_LIMIT_ERROR);
-    PCRECNS(RECURSION_LIMIT_ERROR);
-    PCRECNS(BAD_UTF8_ERROR);
-    PCRECNS(BAD_UTF8_OFFSET_ERROR);
-#undef PCRECNS
-#define PREGCNS(c) Native::registerConstant<KindOfInt64> \
-                    (makeStaticString("PREG_" #c), PREG_##c);
-    PREGCNS(PATTERN_ORDER);
-    PREGCNS(SET_ORDER);
-    PREGCNS(OFFSET_CAPTURE);
+    HHVM_RC_INT(PREG_NO_ERROR, PHP_PCRE_NO_ERROR);
+    HHVM_RC_INT(PREG_INTERNAL_ERROR, PHP_PCRE_INTERNAL_ERROR);
+    HHVM_RC_INT(PREG_BACKTRACK_LIMIT_ERROR, PHP_PCRE_BACKTRACK_LIMIT_ERROR);
+    HHVM_RC_INT(PREG_RECURSION_LIMIT_ERROR, PHP_PCRE_RECURSION_LIMIT_ERROR);
+    HHVM_RC_INT(PREG_BAD_UTF8_ERROR, PHP_PCRE_BAD_UTF8_ERROR);
+    HHVM_RC_INT(PREG_BAD_UTF8_OFFSET_ERROR, PHP_PCRE_BAD_UTF8_OFFSET_ERROR);
 
-    PREGCNS(SPLIT_NO_EMPTY);
-    PREGCNS(SPLIT_DELIM_CAPTURE);
-    PREGCNS(SPLIT_OFFSET_CAPTURE);
+    HHVM_RC_INT_SAME(PREG_PATTERN_ORDER);
+    HHVM_RC_INT_SAME(PREG_SET_ORDER);
+    HHVM_RC_INT_SAME(PREG_OFFSET_CAPTURE);
+    HHVM_RC_INT_SAME(PREG_FB_HACK_ARRAYS);
+    HHVM_RC_INT_SAME(PREG_FB__PRIVATE__HSL_IMPL);
+    HHVM_RC_INT(PREG_HACK_ARR, PREG_FB_HACK_ARRAYS); // legacy
 
-    PREGCNS(GREP_INVERT);
-#undef PREGCNS
+    HHVM_RC_INT_SAME(PREG_SPLIT_NO_EMPTY);
+    HHVM_RC_INT_SAME(PREG_SPLIT_DELIM_CAPTURE);
+    HHVM_RC_INT_SAME(PREG_SPLIT_OFFSET_CAPTURE);
+
+    HHVM_RC_INT_SAME(PREG_GREP_INVERT);
+
+#ifdef WNOHANG
+    HHVM_RC_INT_SAME(WNOHANG);
+#endif
+#ifdef WUNTRACED
+    HHVM_RC_INT_SAME(WUNTRACED);
+#endif
+
+#ifdef PRIO_PGRP
+    HHVM_RC_INT_SAME(PRIO_PGRP);
+#endif
+#ifdef PRIO_USER
+    HHVM_RC_INT_SAME(PRIO_USER);
+#endif
+#ifdef PRIO_PROCESS
+    HHVM_RC_INT_SAME(PRIO_PROCESS);
+#endif
 
     HHVM_FE(preg_filter);
     HHVM_FE(preg_grep);
     HHVM_FE(preg_match);
+    HHVM_FE(preg_match_with_matches);
     HHVM_FE(preg_match_all);
+    HHVM_FE(preg_match_all_with_matches);
     HHVM_FE(preg_replace);
+    HHVM_FE(preg_replace_with_count);
     HHVM_FE(preg_replace_callback);
     HHVM_FE(preg_replace_callback_array);
     HHVM_FE(preg_split);
@@ -304,8 +333,6 @@ public:
     HHVM_FE(preg_last_error);
     HHVM_FE(ereg_replace);
     HHVM_FE(eregi_replace);
-    HHVM_FE(ereg);
-    HHVM_FE(eregi);
     HHVM_FE(split);
     HHVM_FE(spliti);
     HHVM_FE(sql_regcase);

@@ -1,0 +1,8 @@
+
+(library
+  (name debug)
+  (wrapped false)
+  (modules
+    debug)
+  (libraries
+    full_fidelity sexplib))

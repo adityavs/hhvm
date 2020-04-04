@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -150,7 +150,7 @@ static Object HHVM_STATIC_METHOD(IntlTimeZone, createTimeZone,
 
 static Variant HHVM_STATIC_METHOD(IntlTimeZone, getCanonicalID,
                                   const String& zoneId,
-                                  VRefParam isSystemID) {
+                                  bool& isSystemID) {
   UErrorCode error = U_ZERO_ERROR;
   icu::UnicodeString id;
   if (!ustring_from_char(id, zoneId, error)) {
@@ -169,7 +169,7 @@ static Variant HHVM_STATIC_METHOD(IntlTimeZone, getCanonicalID,
     return false;
   }
 
-  isSystemID.assignIfRef((bool)system);
+  isSystemID = (bool)system;
   error = U_ZERO_ERROR;
   String ret(u8(result, error));
   if (U_FAILURE(error)) {
@@ -259,7 +259,7 @@ static Variant HHVM_METHOD(IntlTimeZone, getID) {
 
 static bool HHVM_METHOD(IntlTimeZone, getOffset,
                         double date, bool local,
-                        VRefParam rawOffset, VRefParam dstOffset) {
+                        int64_t& rawOffset, int64_t& dstOffset) {
   TZ_GET(data, this_, false);
   UErrorCode error = U_ZERO_ERROR;
   int32_t rawOff, dstOff;
@@ -268,8 +268,8 @@ static bool HHVM_METHOD(IntlTimeZone, getOffset,
     data->setError(error, "intltz_get_offset: error obtaining offset");
     return false;
   }
-  rawOffset.assignIfRef(rawOff);
-  dstOffset.assignIfRef(dstOff);
+  rawOffset = rawOff;
+  dstOffset = dstOff;
   return true;
 }
 
@@ -369,24 +369,19 @@ static Object HHVM_STATIC_METHOD(IntlTimeZone, getUnknown) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-#define DISP_CONST(v) Native::registerClassConstant<KindOfInt64>( \
-                      s_IntlTimeZone.get(), makeStaticString("DISPLAY_" #v), \
-                      icu::TimeZone::v)
-
-#define CAL_CONST(v) Native::registerClassConstant<KindOfInt64>( \
-                      s_IntlTimeZone.get(), makeStaticString(#v), \
-                      UCAL_ZONE_ ## v)
-
 void IntlExtension::initTimeZone() {
-  DISP_CONST(SHORT);
-  DISP_CONST(LONG);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_SHORT, icu::TimeZone::SHORT);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_LONG, icu::TimeZone::LONG);
 #if U_ICU_VERSION_MAJOR_NUM * 10 + U_ICU_VERSION_MINOR_NUM >= 44
-  DISP_CONST(SHORT_GENERIC);
-  DISP_CONST(LONG_GENERIC);
-  DISP_CONST(SHORT_GMT);
-  DISP_CONST(LONG_GMT);
-  DISP_CONST(SHORT_COMMONLY_USED);
-  DISP_CONST(GENERIC_LOCATION);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_SHORT_GENERIC,
+               icu::TimeZone::SHORT_GENERIC);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_LONG_GENERIC, icu::TimeZone::LONG_GENERIC);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_SHORT_GMT, icu::TimeZone::SHORT_GMT);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_LONG_GMT, icu::TimeZone::LONG_GMT);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_SHORT_COMMONLY_USED,
+               icu::TimeZone::SHORT_COMMONLY_USED);
+  HHVM_RCC_INT(IntlTimeZone, DISPLAY_GENERIC_LOCATION,
+               icu::TimeZone::GENERIC_LOCATION);
 #endif // ICU 4.4
 
   HHVM_STATIC_ME(IntlTimeZone, countEquivalentIDs);
@@ -408,9 +403,10 @@ void IntlExtension::initTimeZone() {
   HHVM_ME(IntlTimeZone, useDaylightTime);
 
 #if U_ICU_VERSION_MAJOR_NUM * 10 + U_ICU_VERSION_MINOR_NUM >= 48
-  CAL_CONST(TYPE_ANY);
-  CAL_CONST(TYPE_CANONICAL);
-  CAL_CONST(TYPE_CANONICAL_LOCATION);
+  HHVM_RCC_INT(IntlTimeZone, TYPE_ANY, UCAL_ZONE_TYPE_ANY);
+  HHVM_RCC_INT(IntlTimeZone, TYPE_CANONICAL, UCAL_ZONE_TYPE_CANONICAL);
+  HHVM_RCC_INT(IntlTimeZone, TYPE_CANONICAL_LOCATION,
+               UCAL_ZONE_TYPE_CANONICAL_LOCATION);
   HHVM_STATIC_ME(IntlTimeZone, createTimeZoneIDEnumeration);
   HHVM_STATIC_ME(IntlTimeZone, getRegion);
 #endif // ICU 4.8

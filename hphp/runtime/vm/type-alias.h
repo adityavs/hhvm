@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/datatype.h"
+#include "hphp/runtime/base/tv-array-like.h"
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/types.h"
@@ -29,9 +30,11 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-struct Class;
-struct StringData;
 struct ArrayData;
+struct Class;
+struct RecordDesc;
+struct StringData;
+struct Unit;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -52,27 +55,26 @@ struct TypeAlias {
   AnnotType type;
   bool nullable;  // null is allowed; for ?Foo aliases
   UserAttributeMap userAttrs;
-  Array typeStructure{Array::Create()};
+  Array typeStructure{ArrayData::CreateDArray(ARRPROV_HERE())};
 
   template<class SerDe>
   typename std::enable_if<!SerDe::deserializing>::type
   serde(SerDe& sd) {
-    sd(name)
-      (value)
+    sd(value)
       (type)
       (nullable)
       (userAttrs)
       (attrs)
       ;
-    TypedValue tv = make_tv<KindOfArray>(typeStructure.get());
+    // Can't use make_array_like_tv because of include ordering issues
+    auto tv = make_array_like_tv(typeStructure.get());
     sd(tv);
   }
 
   template<class SerDe>
   typename std::enable_if<SerDe::deserializing>::type
   serde(SerDe& sd) {
-    sd(name)
-      (value)
+    sd(value)
       (type)
       (nullable)
       (userAttrs)
@@ -81,7 +83,12 @@ struct TypeAlias {
 
     TypedValue tv;
     sd(tv);
-    assert(tv.m_type == KindOfArray);
+    assertx(tvIsPlausible(tv));
+    assertx(
+      RuntimeOption::EvalHackArrDVArrs
+        ? isDictType(tv.m_type)
+        : isArrayType(tv.m_type)
+    );
     typeStructure = tv.m_data.parr;
   }
 
@@ -100,9 +107,10 @@ struct TypeAliasReq {
   /////////////////////////////////////////////////////////////////////////////
   // Static constructors.
 
-  static TypeAliasReq Invalid();
-  static TypeAliasReq From(const TypeAlias& alias);
-  static TypeAliasReq From(TypeAliasReq req, const TypeAlias& alias);
+  static TypeAliasReq Invalid(Unit* unit);
+  static TypeAliasReq From(Unit* unit, const TypeAlias& alias);
+  static TypeAliasReq From(Unit* unit, TypeAliasReq req,
+                           const TypeAlias& alias);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -116,17 +124,20 @@ struct TypeAliasReq {
   // Data members.
 
   // The aliased type.
-  AnnotType type{AnnotType::Uninit};
+  AnnotType type{AnnotType::NoReturn};
   // Overrides `type' if the alias is invalid (e.g., for a nonexistent class).
   bool invalid{false};
   // For option types, like ?Foo.
   bool nullable{false};
   // Aliased Class; nullptr if type != Object.
   LowPtr<Class> klass{nullptr};
+  // Aliased RecordDesc; nullptr if type != Record.
+  LowPtr<RecordDesc> rec{nullptr};
   // Needed for error messages; nullptr if not defined.
   LowStringPtr name{nullptr};
-  Array typeStructure{Array::Create()};
+  Array typeStructure{ArrayData::CreateDArray(ARRPROV_HERE())};
   UserAttributeMap userAttrs;
+  Unit* unit{nullptr};
 };
 
 bool operator==(const TypeAliasReq& l, const TypeAliasReq& r);

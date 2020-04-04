@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,16 +16,15 @@
 
 #include "hphp/runtime/server/http-server.h"
 
-#include "hphp/runtime/base/class-info.h"
-#include "hphp/runtime/base/externals.h"
+#include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/http-client.h"
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/base/memory-manager.h"
-#include "hphp/runtime/base/pprof-server.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/debugger/debugger.h"
+#include "hphp/runtime/ext/apc/ext_apc.h"
 #include "hphp/runtime/server/admin-request-handler.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/replay-transport.h"
@@ -33,77 +32,113 @@
 #include "hphp/runtime/server/static-content-cache.h"
 #include "hphp/runtime/server/warmup-request-handler.h"
 #include "hphp/runtime/server/xbox-server.h"
+#include "hphp/runtime/vm/vm-regs.h"
 
-#include "hphp/util/boot_timer.h"
+#include "hphp/util/alloc.h"
+#include "hphp/util/boot-stats.h"
+#include "hphp/util/light-process.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 #include "hphp/util/ssl-init.h"
+#include "hphp/util/stack-trace.h"
+#include "hphp/util/struct-log.h"
+#include "hphp/util/sync-signal.h"
 
 #include <folly/Conv.h>
 #include <folly/Format.h>
+#include <folly/portability/Unistd.h>
 
-#include <sys/types.h>
 #include <signal.h>
+#include <fstream>
+
+#ifdef __linux__
+void DisableFork() __attribute__((__weak__));
+void EnableForkLogging() __attribute__((__weak__));
+extern "C" void __gcov_flush() __attribute__((__weak__));
+#endif
 
 namespace HPHP {
-
-using std::string;
-
 
 ///////////////////////////////////////////////////////////////////////////////
 // statics
 
 std::shared_ptr<HttpServer> HttpServer::Server;
 time_t HttpServer::StartTime;
+std::atomic<double> HttpServer::LoadFactor{1.0};
+std::atomic_int HttpServer::QueueDiscount{0};
+std::atomic_int HttpServer::SignalReceived{0};
+std::atomic_int_fast64_t HttpServer::PrepareToStopTime{0};
+time_t HttpServer::OldServerStopTime;
+std::vector<ShutdownStat> HttpServer::ShutdownStats;
+folly::MicroSpinLock HttpServer::StatsLock;
 
-const int kNumProcessors = sysconf(_SC_NPROCESSORS_ONLN);
+// signals upon which the server shuts down gracefully
+static const int kTermSignals[] = { SIGHUP, SIGINT, SIGTERM, SIGUSR1 };
 
-static void on_kill(int sig) {
-  // There is a small race condition here with HttpServer::reset in
-  // program-functions.cpp, but it can only happen if we get a signal while
-  // shutting down.  The fix is to add a lock to HttpServer::Server but it seems
-  // like overkill.
+static void on_kill_server(int sig) {   // runs in signal handler thread.
+  static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+  if (flag.test_and_set()) return;      // it was already called once.
+
   if (HttpServer::Server) {
-    HttpServer::Server->stopOnSignal(sig);
+    // Stop handling signals, because the
+    // server is already shutting down, and we don't want to use the default
+    // handlers which may immediately terminate the process.
+    ignore_sync_signals();
+
+    int zero = 0;
+    HttpServer::SignalReceived.compare_exchange_strong(zero, sig);
+    // SignalReceived may possibly be set in HttpServer::stopOnSignal().
+    HttpServer::Server->stop();
+  } else {
+    reset_sync_signals();
+    raise(sig);                         // invoke default handler
   }
-  signal(sig, SIG_DFL);
-  raise(sig);
+  pthread_exit(nullptr);                // terminate signal handler thread
+}
+
+static void exit_on_timeout(int sig) {
+  // Must only call async-signal-safe functions.
+  kill(getpid(), SIGKILL);
+  // we really shouldn't get here, but who knows.
+  // abort so we catch it as a crash.
+  abort();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-HttpServer::HttpServer()
-  : m_stopped(false), m_killed(false), m_stopReason(nullptr),
-    m_watchDog(this, &HttpServer::watchDog) {
+HttpServer::HttpServer() {
+  LoadFactor = RuntimeOption::EvalInitialLoadFactor;
 
   // enabling mutex profiling, but it's not turned on
   LockProfiler::s_pfunc_profile = server_stats_log_mutex;
 
   int startingThreadCount = RuntimeOption::ServerThreadCount;
-  uint32_t additionalThreads = 0;
-  if (RuntimeOption::ServerWarmupThrottleRequestCount > 0 &&
-      RuntimeOption::ServerThreadCount > kNumProcessors) {
-    startingThreadCount = kNumProcessors;
-    additionalThreads = RuntimeOption::ServerThreadCount - startingThreadCount;
+  if (RuntimeOption::ServerWarmupThrottleRequestCount > 0) {
+    startingThreadCount =
+      std::min(startingThreadCount,
+               RuntimeOption::ServerWarmupThrottleThreadCount);
   }
-
   auto serverFactory = ServerFactoryRegistry::getInstance()->getFactory
       (RuntimeOption::ServerType);
   const std::string address = RuntimeOption::ServerFileSocket.empty()
     ? RuntimeOption::ServerIP : RuntimeOption::ServerFileSocket;
-  ServerOptions options(
-      address, RuntimeOption::ServerPort, startingThreadCount);
+  ServerOptions options(address, RuntimeOption::ServerPort,
+    RuntimeOption::ServerThreadCount, startingThreadCount,
+    RuntimeOption::ServerQueueCount, RuntimeOption::ServerLegacyBehavior);
   options.m_useFileSocket = !RuntimeOption::ServerFileSocket.empty();
   options.m_serverFD = RuntimeOption::ServerPortFd;
   options.m_sslFD = RuntimeOption::SSLPortFd;
   options.m_takeoverFilename = RuntimeOption::TakeoverFilename;
-  m_pageServer = std::move(serverFactory->createServer(options));
+  options.m_hugeThreads = RuntimeOption::ServerHugeThreadCount;
+  options.m_hugeStackKb = RuntimeOption::ServerHugeStackKb;
+  options.m_loop_sample_rate = RuntimeOption::ServerLoopSampleRate;
+  m_pageServer = serverFactory->createServer(options);
   m_pageServer->addTakeoverListener(this);
   m_pageServer->addServerEventListener(this);
 
-  if (additionalThreads) {
+  if (startingThreadCount != RuntimeOption::ServerThreadCount) {
     auto handlerFactory = std::make_shared<WarmupRequestHandlerFactory>(
-      m_pageServer.get(), additionalThreads,
+      m_pageServer.get(),
       RuntimeOption::ServerWarmupThrottleRequestCount,
       RuntimeOption::RequestTimeoutSeconds);
     m_pageServer->setRequestHandlerFactory([handlerFactory] {
@@ -115,27 +150,30 @@ HttpServer::HttpServer()
   }
 
   if (RuntimeOption::EnableSSL) {
-    assert(SSLInit::IsInited());
+    assertx(SSLInit::IsInited());
     m_pageServer->enableSSL(RuntimeOption::SSLPort);
   }
 
-  ServerOptions admin_options
-    (RuntimeOption::ServerIP, RuntimeOption::AdminServerPort,
-     RuntimeOption::AdminThreadCount);
-  m_adminServer = std::move(serverFactory->createServer(admin_options));
+  if (RuntimeOption::EnableSSLWithPlainText) {
+    assertx(SSLInit::IsInited());
+    m_pageServer->enableSSLWithPlainText();
+  }
+
+  ServerOptions admin_options(RuntimeOption::AdminServerIP,
+                              RuntimeOption::AdminServerPort,
+                              RuntimeOption::AdminThreadCount);
+  m_adminServer = serverFactory->createServer(admin_options);
   m_adminServer->setRequestHandlerFactory<AdminRequestHandler>(
     RuntimeOption::RequestTimeoutSeconds);
+  if (RuntimeOption::AdminServerEnableSSLWithPlainText) {
+    assertx(SSLInit::IsInited());
+    m_adminServer->enableSSLWithPlainText();
+  }
 
-  for (unsigned int i = 0; i < RuntimeOption::SatelliteServerInfos.size();
-       i++) {
-    auto info = RuntimeOption::SatelliteServerInfos[i];
-    auto satellite(std::move(SatelliteServer::Create(info)));
+  for (auto const& info : RuntimeOption::SatelliteServerInfos) {
+    auto satellite(SatelliteServer::Create(info));
     if (satellite) {
-      if (info->getType() == SatelliteServer::Type::KindOfDanglingPageServer) {
-        m_danglings.push_back(std::move(satellite));
-      } else {
-        m_satellites.push_back(std::move(satellite));
-      }
+      m_satellites.push_back(std::move(satellite));
     }
   }
 
@@ -148,37 +186,25 @@ HttpServer::HttpServer()
   }
 
   StaticContentCache::TheCache.load();
-  hphp_process_init();
 
-  signal(SIGTERM, on_kill);
-  signal(SIGUSR1, on_kill);
-  signal(SIGHUP, on_kill);
+  m_counterCallback.init(
+    [this](std::map<std::string, int64_t>& counters) {
+      counters["ev_connections"] = m_pageServer->getLibEventConnectionCount();
+      counters["inflight_requests"] = m_pageServer->getActiveWorker();
+      counters["queued_requests"] = m_pageServer->getQueuedJobs();
 
-  if (!RuntimeOption::StartupDocument.empty()) {
-    Hdf hdf;
-    hdf["cmd"] = static_cast<int>(Transport::Method::GET);
-    hdf["url"] = RuntimeOption::StartupDocument;
-    hdf["remote_host"] = RuntimeOption::ServerIP;
-
-    ReplayTransport rt;
-    rt.replayInput(hdf);
-    HttpRequestHandler handler(0);
-    handler.run(&rt);
-    int code = rt.getResponseCode();
-    if (code == 200) {
-      Logger::Info("StartupDocument %s returned 200 OK: %s",
-                   RuntimeOption::StartupDocument.c_str(),
-                   rt.getResponse().c_str());
-    } else {
-      Logger::Error("StartupDocument %s failed %d: %s",
-                    RuntimeOption::StartupDocument.c_str(),
-                    code, rt.getResponse().data());
-      return;
+      auto const sat_requests = getSatelliteRequestCount();
+      counters["satellite_inflight_requests"] = sat_requests.first;
+      counters["satellite_queued_requests"] = sat_requests.second;
     }
+  );
+
+  for (auto const sig : kTermSignals) {
+    sync_signal(sig, on_kill_server);
   }
 }
 
-// Synchronously stop satellites and start danglings
+// Synchronously stop satellites
 void HttpServer::onServerShutdown() {
   InitFiniNode::ServerFini();
 
@@ -187,32 +213,21 @@ void HttpServer::onServerShutdown() {
     Logger::Info("debugger server stopped");
   }
 
-  XboxServer::Stop();
-
   // When a new instance of HPHP has taken over our page server socket,
-  // stop our admin server and satellites so it can acquire those ports.
+  // stop our admin server and satellites so it can acquire those
+  // ports.
+  if (RuntimeOption::AdminServerPort) {
+    m_adminServer->stop();
+  }
   for (unsigned int i = 0; i < m_satellites.size(); i++) {
     std::string name = m_satellites[i]->getName();
     m_satellites[i]->stop();
     Logger::Info("satellite server %s stopped", name.c_str());
   }
+  XboxServer::Stop();
   if (RuntimeOption::AdminServerPort) {
-    m_adminServer->stop();
     m_adminServer->waitForEnd();
     Logger::Info("admin server stopped");
-  }
-
-  // start dangling servers, so they can serve old version of pages
-  for (unsigned int i = 0; i < m_danglings.size(); i++) {
-    std::string name = m_danglings[i]->getName();
-    try {
-      m_danglings[i]->start();
-      Logger::Info("dangling server %s started", name.c_str());
-    } catch (Exception &e) {
-      Logger::Error("Unable to start danglings server %s: %s",
-                    name.c_str(), e.getMessage().c_str());
-      // it's okay not able to start them
-    }
   }
 }
 
@@ -225,26 +240,85 @@ void HttpServer::takeoverShutdown() {
 
 void HttpServer::serverStopped(HPHP::Server* server) {
   Logger::Info("Page server stopped");
-  assert(server == m_pageServer.get());
+  assertx(server == m_pageServer.get());
   removePid();
 
   auto sockFile = RuntimeOption::ServerFileSocket;
   if (!sockFile.empty()) {
     unlink(sockFile.c_str());
   }
+
+  LogShutdownStats();
+}
+
+void HttpServer::playShutdownRequest(const std::string& fileName) {
+  if (fileName.empty()) return;
+  Logger::Info("playing request upon shutdown %s", fileName.c_str());
+  try {
+    ReplayTransport rt;
+    rt.replayInput(fileName.c_str());
+    HttpRequestHandler handler(0);
+    handler.run(&rt);
+    if (rt.getResponseCode() == 200) {
+      Logger::Info("successfully finished request: %s", rt.getUrl());
+    } else {
+      Logger::Error("request unsuccessful: %s", rt.getUrl());
+    }
+    Logger::FlushAll();
+    HttpRequestHandler::GetAccessLog().flushAllWriters();
+  } catch (...) {
+    Logger::Error("got exception when playing request: %s",
+                  fileName.c_str());
+  }
 }
 
 HttpServer::~HttpServer() {
-  // XXX: why should we have to call stop here?  If we haven't already
-  // stopped (and joined all the threads), watchDog could still be
-  // running and leaving this destructor without a wait would be
-  // wrong...
+  m_counterCallback.deinit();
   stop();
 }
 
-void HttpServer::runOrExitProcess() {
-  StartTime = time(0);
+static StaticString s_file{"file"}, s_line{"line"};
 
+void HttpServer::runOrExitProcess() {
+  if (StaticContentCache::TheFileCache &&
+      StructuredLog::enabled() &&
+      StructuredLog::coinflip(RuntimeOption::EvalStaticContentsLogRate)) {
+    CacheManager::setLogger([](bool existsCheck, const std::string& name) {
+        auto record = StructuredLogEntry{};
+        record.setInt("existsCheck", existsCheck);
+        record.setStr("file", name);
+        bool needsCppStack = true;
+        if (!g_context.isNull()) {
+          VMRegAnchor _;
+          if (vmfp()) {
+            auto const bt =
+              createBacktrace(BacktraceArgs().withArgValues(false));
+            std::vector<std::string> frameStrings;
+            std::vector<folly::StringPiece> frames;
+            for (int i = 0; i < bt.size(); i++) {
+              auto f = tvCastToArrayLike(bt.rval(i).tv());
+              if (f.exists(s_file)) {
+                auto s = tvCastToString(f.rval(s_file).tv()).toCppString();
+                if (f.exists(s_line)) {
+                  s += folly::sformat(
+                    ":{}",
+                    tvCastToInt64(f.rval(s_line).tv())
+                  );
+                }
+                frameStrings.emplace_back(std::move(s));
+                frames.push_back(frameStrings.back());
+              }
+            }
+            record.setVec("stack", frames);
+            needsCppStack = false;
+          }
+        }
+        if (needsCppStack) {
+          record.setStackTrace("stack", StackTrace{StackTrace::Force{}});
+        }
+        StructuredLog::log("hhvm_file_cache", record);
+      });
+  }
   auto startupFailure = [] (const std::string& msg) {
     Logger::Error(msg);
     Logger::Error("Shutting down due to failure(s) to bind in "
@@ -254,7 +328,15 @@ void HttpServer::runOrExitProcess() {
     _Exit(1);
   };
 
-  m_watchDog.start();
+  if (!RuntimeOption::InstanceId.empty()) {
+    std::string msg = "Starting instance " + RuntimeOption::InstanceId;
+    if (!RuntimeOption::DeploymentId.empty()) {
+      msg += " from deployment " + RuntimeOption::DeploymentId;
+    }
+    Logger::Info(msg);
+  }
+
+  block_sync_signals_and_start_handler_thread();
 
   if (RuntimeOption::ServerPort) {
     if (!startServer(true)) {
@@ -263,6 +345,8 @@ void HttpServer::runOrExitProcess() {
     }
     Logger::Info("page server started");
   }
+
+  StartTime = time(nullptr);
 
   if (RuntimeOption::AdminServerPort) {
     if (!startServer(false)) {
@@ -277,23 +361,13 @@ void HttpServer::runOrExitProcess() {
     try {
       m_satellites[i]->start();
       Logger::Info("satellite server %s started", name.c_str());
-    } catch (Exception &e) {
+    } catch (Exception& e) {
       startupFailure(
         folly::format("Unable to start satellite server {}: {}",
                       name, e.getMessage()).str()
       );
       not_reached();
     }
-  }
-
-  if (RuntimeOption::HHProfServerEnabled) {
-    try {
-      HeapProfileServer::Server = std::make_shared<HeapProfileServer>();
-    } catch (FailedToListenException &e) {
-      startupFailure("Unable to start profiling server");
-      not_reached();
-    }
-    Logger::Info("profiling server started");
   }
 
   if (!Eval::Debugger::StartServer()) {
@@ -303,52 +377,99 @@ void HttpServer::runOrExitProcess() {
     Logger::Info("debugger server started");
   }
 
-  InitFiniNode::ServerInit();
+  try {
+    InitFiniNode::ServerInit();
+  } catch (std::exception& e) {
+    startupFailure(
+      folly::sformat("Exception in InitFiniNode::ServerInit(): {}",
+                     e.what()));
+  }
 
   {
-    BootTimer::mark("servers started");
+    BootStats::mark("servers started");
     Logger::Info("all servers started");
+    if (!RuntimeOption::ServerForkEnabled) {
+#ifdef __linux__
+      if (DisableFork) {
+        // We should not fork from the server process.  Use light process
+        // instead.  This will intercept subsequent fork() calls and make them
+        // fail immediately.
+        DisableFork();
+      } else {
+        // Otherwise, the binary we are building is not HHVM.  It is probably
+        // some tests, don't intercept fork().
+        Logger::Warning("ignored runtime option Server.Forking.Enabled=false");
+      }
+#else
+      Logger::Warning("ignored Server.Forking.Enabled=false "
+                      "as it only works on Linux");
+#endif
+    } else {
+#if FOLLY_HAVE_PTHREAD_ATFORK
+      pthread_atfork(nullptr, nullptr,
+                     [] {
+                       Process::OOMScoreAdj(1000);
+                     });
+#endif
+    }
+    if (RuntimeOption::ServerForkLogging) {
+#ifdef __linux__
+      if (EnableForkLogging) {
+        EnableForkLogging();
+      } else {
+        // the binary we are building is not HHVM.  It is probably
+        // some tests, don't intercept fork().
+        Logger::Warning("ignored runtime option Server.Forking.Log=true");
+      }
+#else
+      Logger::Warning("ignored Server.Forking.Log=true "
+                      "as it only works on Linux");
+#endif
+    }
+    if (RuntimeOption::EvalServerOOMAdj < 0) {
+      // Avoid HHVM getting killed when a forked process uses too much memory.
+      // A positive adjustment makes it more likely for the server to be killed,
+      // and that's not what we want.
+      Process::OOMScoreAdj(RuntimeOption::EvalServerOOMAdj);
+    }
     createPid();
     Lock lock(this);
-    BootTimer::done();
-    // continously running until /stop is received on admin server
+    BootStats::done();
+    // Play extended warmup requests after server starts running.
+    if (isJitSerializing() &&
+        RuntimeOption::ServerExtendedWarmupThreadCount > 0 &&
+        !RuntimeOption::ServerExtendedWarmupRequests.empty()) {
+      auto const threadCount = RuntimeOption::ServerExtendedWarmupThreadCount;
+      auto const delay = RuntimeOption::ServerExtendedWarmupDelaySeconds;
+      auto const nTimes = RuntimeOption::ServerExtendedWarmupRepeat;
+      InternalWarmupRequestPlayer{threadCount}.
+        runAfterDelay(RuntimeOption::ServerExtendedWarmupRequests,
+                      nTimes, delay);
+    }
+    // continously running until /stop is received on admin server, or
+    // takeover is requested.
     while (!m_stopped) {
       wait();
     }
+    Logger::Info("Server is stopping");
+
     if (m_stopReason) {
-      Logger::Warning("Server stopping with reason: %s\n", m_stopReason);
+      Logger::Warning("Server stopping with reason: %s", m_stopReason);
+    } else if (auto signo = SignalReceived.load(std::memory_order_acquire)) {
+      Logger::Warning("Server stopping with reason: %s", strsignal(signo));
     }
-    // if we were killed, bail out immediately
-    if (m_killed) {
-      Logger::Info("page server killed");
-      return;
-    }
-    Logger::Info("page server stopped");
   }
 
-  onServerShutdown(); // dangling server already started here
-  time_t t0 = time(0);
   if (RuntimeOption::ServerPort) {
+    Logger::Info("stopping page server");
     m_pageServer->stop();
   }
-  time_t t1 = time(0);
-  if (!m_danglings.empty() && RuntimeOption::ServerDanglingWait > 0) {
-    int elapsed = t1 - t0;
-    if (RuntimeOption::ServerDanglingWait > elapsed) {
-      sleep(RuntimeOption::ServerDanglingWait - elapsed);
-    }
-  }
+  onServerShutdown();
 
-  for (unsigned int i = 0; i < m_danglings.size(); i++) {
-    m_danglings[i]->stop();
-    Logger::Info("dangling server %s stopped",
-                 m_danglings[i]->getName().c_str());
-  }
+  EvictFileCache();
 
   waitForServers();
-  m_watchDog.waitForEnd();
-  hphp_process_exit();
-  Logger::Info("all servers stopped");
+  playShutdownRequest(RuntimeOption::ServerCleanupRequest);
 }
 
 void HttpServer::waitForServers() {
@@ -358,67 +479,114 @@ void HttpServer::waitForServers() {
   if (RuntimeOption::AdminServerPort) {
     m_adminServer->waitForEnd();
   }
-  if (RuntimeOption::HHProfServerEnabled) {
-    HeapProfileServer::Server.reset();
-  }
   // all other servers invoke waitForEnd on stop
 }
 
-static void exit_on_timeout(int sig) {
-  signal(sig, SIG_DFL);
-  kill(getpid(), SIGKILL);
-  // we really shouldn't get here, but who knows.
-  // abort so we catch it as a crash.
-  abort();
+void HttpServer::ProfileFlush() {
+  #ifdef __linux__
+  if (__gcov_flush) {
+    Logger::Info("Flushing profile");
+    __gcov_flush();
+  }
+  #endif
 }
 
 void HttpServer::stop(const char* stopReason) {
-  if (m_stopped) return;
+  if (m_stopping.exchange(true)) return;
 
-  if (RuntimeOption::ServerGracefulShutdownWait) {
-    signal(SIGALRM, exit_on_timeout);
-    alarm(RuntimeOption::ServerGracefulShutdownWait);
+  ProfileFlush();
+  // Let all worker threads know that the server is shutting down. If some
+  // request installed a PHP-level signal handler through `pcntl_signal(SIGTERM,
+  // handler_func)`, `handler_func()` will run in the corresponding request
+  // context, to perform cleanup tasks. If no handler is registered, it is
+  // ignored.
+  RequestInfo::BroadcastSignal(SIGTERM);
+
+  // we're shutting down flush http logs
+  Logger::Info("Flushing http logs");
+  Logger::FlushAll();
+  HttpRequestHandler::GetAccessLog().flushAllWriters();
+  Process::OOMScoreAdj(1000);
+  MarkShutdownStat(ShutdownEvent::SHUTDOWN_INITIATED);
+
+  if (RuntimeOption::ServerKillOnTimeout) {
+    int totalWait =
+      RuntimeOption::ServerPreShutdownWait +
+      RuntimeOption::ServerShutdownListenWait +
+      RuntimeOption::ServerGracefulShutdownWait;
+
+    if (totalWait > 0) {
+      // Use a killer thread to _Exit() after totalWait seconds.  If
+      // the main thread returns before that, the killer thread will
+      // exit.  So don't do join() on this thread.
+      auto killer = std::thread([totalWait] {
+#ifdef __linux__
+          sched_param param{};
+          param.sched_priority = 5;
+          pthread_setschedparam(pthread_self(), SCHED_RR, &param);
+          // It is OK if we fail to increase thread priority.
+#endif
+          /* sleep override */
+          std::this_thread::sleep_for(std::chrono::seconds{totalWait});
+          _Exit(1);
+        });
+      killer.detach();
+    }
   }
 
   Lock lock(this);
   m_stopped = true;
   m_stopReason = stopReason;
+  Logger::Info("Waking up server thread to stop");
   notify();
 }
 
 void HttpServer::stopOnSignal(int sig) {
-  // Signal to the main server thread to exit immediately if
-  // we want to die on SIGTERM
-  if (RuntimeOption::ServerKillOnSIGTERM && sig == SIGTERM) {
-    Lock lock(this);
-    m_stopped = true;
-    m_killed = true;
-    m_stopReason = "SIGTERM received";
-    notify();
-    return;
+  int zero = 0;
+  if (SignalReceived.compare_exchange_strong(zero, sig) &&
+      RuntimeOption::ServerKillOnTimeout) {
+    auto const totalWait =
+      RuntimeOption::ServerPreShutdownWait +
+      RuntimeOption::ServerShutdownListenWait +
+      RuntimeOption::ServerGracefulShutdownWait;
+    // In case HttpServer::stop() isn't invoked in the synchronous signal
+    // handler.
+    if (totalWait > 0) {
+        signal(SIGALRM, exit_on_timeout);
+        sigset_t s;
+        sigemptyset(&s);
+        sigaddset(&s, SIGALRM);
+        pthread_sigmask(SIG_UNBLOCK, &s, nullptr);
+        alarm(totalWait);
+    }
   }
+  // Invoke on_kill_server() in the synchronous signal handler thread. We cannot
+  // directly call HttpServer::stop() here directly, because this function must
+  // be asynchronous-signal safe.
+  kill(getpid(), SIGTERM);
+}
 
-  if (RuntimeOption::ServerGracefulShutdownWait) {
-    signal(SIGALRM, exit_on_timeout);
-    alarm(RuntimeOption::ServerGracefulShutdownWait);
-  }
+void HttpServer::EvictFileCache() {
+  // In theory, the kernel should do just as well even if we don't
+  // explicitly advise files out.  But we can do it anyway when we
+  // need more free memory, e.g., when a new instance of the server is
+  // about to start.
+  advise_out(RuntimeOption::RepoLocalPath);
+  advise_out(RuntimeOption::FileCache);
+  apc_advise_out();
+}
 
-  // NOTE: Server->stop does a graceful stop by design.
-  if (m_pageServer) {
-    m_pageServer->stop();
-  }
-  if (m_adminServer) {
-    m_adminServer->stop();
-  }
-
-  waitForServers();
+void HttpServer::PrepareToStop() {
+  MarkShutdownStat(ShutdownEvent::SHUTDOWN_PREPARE);
+  PrepareToStopTime.store(time(nullptr), std::memory_order_release);
+  EvictFileCache();
 }
 
 void HttpServer::createPid() {
   if (!RuntimeOption::PidFile.empty()) {
     FILE * f = fopen(RuntimeOption::PidFile.c_str(), "w");
     if (f) {
-      pid_t pid = Process::GetProcessId();
+      auto const pid = getpid();
       char buf[64];
       snprintf(buf, sizeof(buf), "%" PRId64, (int64_t)pid);
       fwrite(buf, strlen(buf), 1, f);
@@ -438,65 +606,191 @@ void HttpServer::removePid() {
 
 void HttpServer::killPid() {
   if (!RuntimeOption::PidFile.empty()) {
-    CstrBuffer sb(RuntimeOption::PidFile.c_str());
-    if (sb.size()) {
-      int64_t pid = sb.detach().toInt64();
-      if (pid) {
-        kill((pid_t)pid, SIGKILL);
-        return;
-      }
+    std::ifstream in(RuntimeOption::PidFile);
+    int64_t pid;
+    if ((in >> pid) && pid > 0) {
+      in.close();
+      kill((pid_t)pid, SIGKILL);
+      return;
     }
     Logger::Error("Unable to read pid file %s for any meaningful pid",
                   RuntimeOption::PidFile.c_str());
   }
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// watch dog thread
-
-void HttpServer::watchDog() {
-  int count = 0;
-  bool noneed = false;
-  while (!m_stopped && !noneed) {
-    noneed = true;
-
-    if (RuntimeOption::DropCacheCycle > 0) {
-      noneed = false;
-      if ((count % RuntimeOption::DropCacheCycle) == 0) { // every hour
-        dropCache();
+static bool sendAdminCommand(const char* cmd) {
+  if (RuntimeOption::AdminServerPort <= 0) return false;
+  std::string host = RuntimeOption::AdminServerIP;
+  if (host.empty()) host = "localhost";
+  auto passwords = RuntimeOption::AdminPasswords;
+  if (passwords.empty() && !RuntimeOption::AdminPassword.empty()) {
+    passwords.insert(RuntimeOption::AdminPassword);
+  }
+  auto passwordIter = passwords.begin();
+  do {
+    std::string url;
+    if (passwordIter != passwords.end()) {
+      url = folly::sformat("http://{}:{}/{}?auth={}", host,
+                           RuntimeOption::AdminServerPort,
+                           cmd, *passwordIter);
+      ++passwordIter;
+    } else {
+      url = folly::sformat("http://{}:{}/{}", host,
+                           RuntimeOption::AdminServerPort, cmd);
+    }
+    if (CURL* curl = curl_easy_init()) {
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      curl_easy_setopt(curl, CURLOPT_NOBODY, 1);
+      curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3);
+      auto code = curl_easy_perform(curl);
+      curl_easy_cleanup(curl);
+      if (code == CURLE_OK) {
+        Logger::Info("sent %s via admin port", cmd);
+        return true;
       }
     }
+  } while (passwordIter != passwords.end());
+  return false;
+}
 
-    sleep(1);
-    ++count;
+bool HttpServer::ReduceOldServerLoad() {
+  if (!RuntimeOption::StopOldServer) return false;
+  if (OldServerStopTime > 0) return true;
+  Logger::Info("trying to reduce load of the old HPHP server");
+  return sendAdminCommand("prepare-to-stop");
+}
 
-    if (RuntimeOption::MaxRSSPollingCycle > 0) {
-      noneed = false;
-      if ((count % RuntimeOption::MaxRSSPollingCycle) == 0) { // every minute
-        checkMemory();
-      }
+bool HttpServer::StopOldServer() {
+  if (OldServerStopTime > 0) return true;
+  SCOPE_EXIT { OldServerStopTime = time(nullptr); };
+  Logger::Info("trying to shut down old HPHP server by /stop command");
+  return sendAdminCommand("stop");
+}
+
+// Return the estimated amount of memory that can be safely taken into
+// the current process RSS.
+static inline int64_t availableMemory(const MemInfo& mem, int64_t rss,
+                                      int factor) {
+  // Estimation of page cache that are readily evictable without
+  // causing big memory pressure.  We consider it safe to take
+  // `pageFreeFactor` percent of cached pages (excluding those used by
+  // the current process, estimated to be equal to the current RSS)
+  auto const otherCacheMb = std::max((int64_t)0,  mem.cachedMb - rss);
+  auto const availableMb = mem.freeMb + otherCacheMb * factor / 100;
+  return availableMb;
+}
+
+bool HttpServer::CanContinue(const MemInfo& mem, int64_t rssMb,
+                             int64_t rssNeeded, int cacheFreeFactor) {
+  if (!mem.valid()) return false;
+  if (mem.freeMb < RuntimeOption::ServerCriticalFreeMb) return false;
+  auto const availableMb = availableMemory(mem, rssMb, cacheFreeFactor);
+  auto const result = (rssMb + availableMb >= rssNeeded);
+  if (result) assertx(CanStep(mem, rssMb, rssNeeded, cacheFreeFactor));
+  return result;
+}
+
+bool HttpServer::CanStep(const MemInfo& mem, int64_t rssMb,
+                         int64_t rssNeeded, int cacheFreeFactor) {
+  if (!mem.valid()) return false;
+  if (mem.freeMb < RuntimeOption::ServerCriticalFreeMb) return false;
+  auto const availableMb = availableMemory(mem, rssMb, cacheFreeFactor);
+  // Estimation of the memory needed till the next check point.  Since
+  // the current check point is not the last one, we try to be more
+  // optimistic, by assuming that memory requirement won't grow
+  // drastically between successive check points, and that it won't
+  // grow over our estimate.
+  auto const neededToStep = std::min(rssNeeded / 4, rssNeeded - rssMb);
+  return (availableMb >= neededToStep);
+}
+
+void HttpServer::CheckMemAndWait(bool final) {
+  if (!RuntimeOption::StopOldServer) return;
+  if (RuntimeOption::OldServerWait <= 0) return;
+
+  auto const rssNeeded = RuntimeOption::ServerRSSNeededMb;
+  auto const factor = RuntimeOption::CacheFreeFactor;
+  do {
+    // Don't wait too long
+    if (OldServerStopTime > 0 &&
+        time(nullptr) - OldServerStopTime >= RuntimeOption::OldServerWait) {
+      return;
+    }
+
+    auto const rssMb = Process::GetMemUsageMb();
+    MemInfo memInfo;
+    if (!Process::GetMemoryInfo(memInfo)) {
+      Logger::Error("Failed to obtain memory information");
+      HttpServer::StopOldServer();
+      return;
+    }
+    Logger::FInfo("Memory pressure check: free/cached/buffers {}/{}/{} "
+                  "currentRss {}Mb, required {}Mb.",
+                  memInfo.freeMb, memInfo.cachedMb, memInfo.buffersMb,
+                  rssMb, rssNeeded);
+
+    if (!final) {
+      if (CanStep(memInfo, rssMb, rssNeeded, factor)) return;
+    } else {
+      if (CanContinue(memInfo, rssMb, rssNeeded, factor)) return;
+    }
+
+    // OK, we don't have enough memory, let's do something.
+    HttpServer::StopOldServer();  // nop if already called before
+    /* sleep override */ sleep(1);
+  } while (true); // Guaranteed to return in the loop, at least upon timeout.
+  not_reached();
+}
+
+void HttpServer::MarkShutdownStat(ShutdownEvent event) {
+  if (!RuntimeOption::EvalLogServerRestartStats) return;
+  std::lock_guard<folly::MicroSpinLock> lock(StatsLock);
+  MemInfo mem;
+  Process::GetMemoryInfo(mem);
+  auto const rss = Process::GetMemUsageMb();
+  auto const requests = requestCount();
+  if (event == ShutdownEvent::SHUTDOWN_PREPARE) {
+    ShutdownStats.clear();
+    ShutdownStats.reserve(ShutdownEvent::kNumEvents);
+  }
+#ifndef NDEBUG
+  if (!ShutdownStats.empty()) {
+    assertx(ShutdownStats.back().event <= event);
+  }
+#endif
+  ShutdownStats.push_back({event, time(nullptr), mem, rss, requests});
+}
+
+void HttpServer::LogShutdownStats() {
+  if (!RuntimeOption::EvalLogServerRestartStats) return;
+  StructuredLogEntry entry;
+  std::lock_guard<folly::MicroSpinLock> lock(StatsLock);
+  if (ShutdownStats.empty()) return;
+  for (size_t i = 0; i < ShutdownStats.size(); ++i) {
+    const auto& stat = ShutdownStats[i];
+    auto const eventName = stat.eventName();
+    entry.setInt(folly::sformat("{}_rss", eventName), stat.rss);
+    entry.setInt(folly::sformat("{}_free", eventName),
+                 stat.memUsage.freeMb);
+    entry.setInt(folly::sformat("{}_cached", eventName),
+                 stat.memUsage.cachedMb);
+    entry.setInt(folly::sformat("{}_buffers", eventName),
+                 stat.memUsage.buffersMb);
+    // Log the difference since last event, if available
+    if (i > 0) {
+      const auto& last = ShutdownStats[i - 1];
+      auto const lastEvent = last.eventName();
+      entry.setInt(folly::sformat("{}_duration", lastEvent),
+                   stat.time - last.time);
+      entry.setInt(folly::sformat("{}_requests", lastEvent),
+                   stat.requestsServed - last.requestsServed);
+      entry.setInt(folly::sformat("{}_rss_delta", lastEvent),
+                   stat.rss - last.rss);
     }
   }
-}
-
-void HttpServer::dropCache() {
-  FILE *f = fopen("/proc/sys/vm/drop_caches", "w");
-  if (f) {
-    // http://www.linuxinsight.com/proc_sys_vm_drop_caches.html
-    const char *FREE_ALL_CACHES = "3\n";
-    fwrite(FREE_ALL_CACHES, 2, 1, f);
-    fclose(f);
-  }
-}
-
-void HttpServer::checkMemory() {
-  int64_t used = Process::GetProcessRSS(Process::GetProcessId()) * 1024 * 1024;
-  if (RuntimeOption::MaxRSS > 0 && used > RuntimeOption::MaxRSS) {
-    Logger::Error(
-      "ResourceLimit.MaxRSS %" PRId64 " reached %" PRId64 " used, exiting",
-      RuntimeOption::MaxRSS, used);
-    stop();
-  }
+  StructuredLog::log("webserver_shutdown_timing", entry);
+  ShutdownStats.clear();
 }
 
 void HttpServer::getSatelliteStats(
@@ -537,51 +831,15 @@ bool HttpServer::startServer(bool pageServer) {
         m_adminServer->start();
       }
       return true;
-    } catch (FailedToListenException &e) {
+    } catch (FailedToListenException& e) {
       if (RuntimeOption::ServerExitOnBindFail) return false;
 
-      if (i == 0) {
-        Logger::Info("shutting down old HPHP server by /stop command");
-      }
+      StopOldServer();
 
       if (errno == EACCES) {
-        if (pageServer && !RuntimeOption::ServerFileSocket.empty()) {
-          Logger::Error("Permission denied opening socket at %s",
-                        RuntimeOption::ServerFileSocket.c_str());
-        } else {
-          Logger::Error("Permission denied listening on port %d", port);
-        }
+        Logger::Error("%s: Permission denied.", e.what());
         return false;
       }
-
-      HttpClient http;
-      std::string url = "http://";
-      std::string serverIp = (RuntimeOption::ServerIP.empty()) ? "localhost" :
-        RuntimeOption::ServerIP;
-      url += serverIp;
-      url += ":";
-      url += folly::to<std::string>(RuntimeOption::AdminServerPort);
-      url += "/stop";
-      std::string auth;
-
-      auto passwords = RuntimeOption::AdminPasswords;
-      if (passwords.empty() && !RuntimeOption::AdminPassword.empty()) {
-        passwords.insert(RuntimeOption::AdminPassword);
-      }
-      auto passwordIter = passwords.begin();
-      int statusCode = 401;
-      do {
-        std::string auth_url;
-        if (passwordIter != passwords.end()) {
-          auth_url = url + "?auth=";
-          auth_url += *passwordIter;
-          passwordIter++;
-        } else {
-          auth_url = url;
-        }
-        StringBuffer response;
-        statusCode = http.get(auth_url.c_str(), response);
-      } while (statusCode == 401 && passwordIter != passwords.end());
 
       if (pageServer && !RuntimeOption::ServerFileSocket.empty()) {
         if (i == 0) {
@@ -613,7 +871,7 @@ bool HttpServer::startServer(bool pageServer) {
           m_adminServer->start();
         }
         return true;
-      } catch (FailedToListenException &e) {
+      } catch (FailedToListenException& e) {
         if (i == 0) {
           Logger::Info("shutting down old HPHP server by pid file");
         }
@@ -633,7 +891,7 @@ bool HttpServer::startServer(bool pageServer) {
           m_adminServer->start();
         }
         return true;
-      } catch (FailedToListenException &e) {
+      } catch (FailedToListenException& e) {
         if (pageServer && !RuntimeOption::ServerFileSocket.empty()) {
           if (i == 0) {
             Logger::Info("unlinking socket at %s",

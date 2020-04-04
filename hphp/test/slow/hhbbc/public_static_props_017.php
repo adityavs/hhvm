@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 class X {
-  static $y = array(1,2,3);
+  static $y = varray[1,2,3];
 
   static function go() {
     unset(self::$y[0]);
@@ -11,5 +11,9 @@ class X {
   }
 }
 
+
+<<__EntryPoint>>
+function main_public_static_props_017() {
 X::go();
 var_dump(X::y());
+}

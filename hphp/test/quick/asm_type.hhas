@@ -1,9 +1,12 @@
+.hh_file 1;
 # just testing istype opcodes
 
 .main {
-  FPushFuncD 0 "main"
-  FCall 0
-  PopR
+  NullUninit
+  NullUninit
+  NullUninit
+  FCallFuncD <> 0 1 "" - "" "main"
+  PopC
   Int 1
   RetC
 }

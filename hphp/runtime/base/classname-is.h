@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -28,20 +28,30 @@ namespace HPHP {
  * function that will be called for construction (init). One copy of
  * static data is generated per T/init.
  */
-template <class T, class TInit, TInit init()>
+template <typename T, typename TInit, TInit init()>
 struct InstantStatic {
   static T value;
 };
 
-template <class T, class TInit, TInit init()>
+template <typename T, typename TInit, TInit init()>
 T InstantStatic<T, TInit, init>::value(init());
 
 #define CLASSNAME_IS(str)                                               \
-  static const char *GetClassName() { return str; }                     \
+  static const auto& GetClassName() { return str; }                     \
   static const StaticString& classnameof() {                            \
-    return InstantStatic<const StaticString, const char*, GetClassName> \
-      ::value;                                                          \
+    return InstantStatic<const StaticString,                            \
+                         decltype(GetClassName()),                      \
+                         GetClassName>::value;                          \
   }
+
+#define RESOURCENAME_IS(str)                                            \
+  static const auto& GetResourceName() { return str; }                  \
+  static const StaticString& resourcenameof() {                         \
+    return InstantStatic<const StaticString,                            \
+                         decltype(GetResourceName()),                   \
+                         GetResourceName>::value;                       \
+  }
+
 }
 
 #endif

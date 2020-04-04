@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,23 +17,27 @@
 #ifndef incl_HPHP_HTTP_SERVER_TRANSPORT_H_
 #define incl_HPHP_HTTP_SERVER_TRANSPORT_H_
 
+#include "hphp/runtime/base/debuggable.h"
+#include "hphp/runtime/base/request-tracing.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/type-string.h"
+#include "hphp/util/functional.h"
+#include "hphp/util/gzip.h"
+#include "hphp/util/string-holder.h"
+
 #include <list>
 #include <string>
 #include <unordered_map>
 #include <utility>
-
-#include "hphp/util/compression.h"
-#include "hphp/util/functional.h"
-#include "hphp/runtime/base/debuggable.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/string-holder.h"
-#include "hphp/runtime/base/type-string.h"
+#include <vector>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Array;
+struct Array;
 struct Variant;
+struct ResponseCompressorManager;
+struct StructuredLogEntry;
 
 /**
  * For storing headers and cookies.
@@ -45,6 +49,36 @@ using CaseInsenMap =
 using HeaderMap = CaseInsenMap<std::vector<std::string>>;
 using CookieList = std::vector<std::pair<std::string, std::string>>;
 
+struct ITransportHeaders {
+  enum class Method {
+    Unknown,
+    GET,
+    POST,
+    HEAD,
+    AUTO, // check GET parameter first, then POST
+  };
+  /* Request header methods */
+  virtual const char *getUrl() = 0;
+  virtual std::string getCommand() = 0; // URL with params stripped
+  virtual std::string getHeader(const char *name) = 0;
+  virtual const HeaderMap& getHeaders() = 0;
+  virtual Method getMethod() = 0;
+  virtual const char *getMethodName() = 0;
+  virtual const void *getPostData(size_t &size) = 0;
+
+  /* Response header methods */
+  virtual void addHeaderNoLock(const char *name, const char *value) = 0;
+  virtual void addHeader(const char *name, const char *value) = 0;
+  virtual void addHeader(const String& header) = 0;
+  virtual void replaceHeader(const char *name, const char *value) = 0;
+  virtual void replaceHeader(const String& header) = 0;
+  virtual void removeHeader(const char *name) = 0;
+  virtual void removeAllHeaders() = 0;
+  virtual void getResponseHeaders(HeaderMap& headers) = 0;
+  virtual void addToCommaSeparatedHeader(
+      const char* name, const char* value) = 0;
+};
+
 /**
  * A class defining an interface that request handler can use to query
  * transport related information.
@@ -52,16 +86,8 @@ using CookieList = std::vector<std::pair<std::string, std::string>>;
  * Note that one transport object is created for each request, and
  * one transport is ONLY accessed from one single thread.
  */
-class Transport : public IDebuggable {
-public:
-  enum class Method {
-    Unknown,
-
-    GET,
-    POST,
-    HEAD,
-    AUTO, // check GET parameter first, then POST
-  };
+struct Transport : IDebuggable, ITransportHeaders {
+  using Method = ITransportHeaders::Method;
 
   // TODO: add all status codes
   // (http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html)
@@ -93,7 +119,7 @@ public:
 
 public:
   Transport();
-  virtual ~Transport();
+  ~Transport() override;
 
   void onRequestStart(const timespec &queueTime);
   const timespec &getQueueTime() const { return m_queueTime; }
@@ -111,6 +137,12 @@ public:
     m_nsleepTimeS += seconds + (m_nsleepTimeN / 1000000000);
     m_nsleepTimeN %= 1000000000;
   }
+
+  void forceInitRequestTrace();
+  rqtrace::Trace* getRequestTrace() { return m_requestTrace.get_pointer(); }
+  StructuredLogEntry* createStructuredLogEntry();
+  StructuredLogEntry* getStructuredLogEntry();
+  void resetStructuredLogEntry();
 
   ///////////////////////////////////////////////////////////////////////////
   // Functions sub-classes have to implement.
@@ -151,16 +183,16 @@ public:
   /**
    * POST request's data.
    */
-  virtual const void *getPostData(int &size) = 0;
+  virtual const void *getPostData(size_t &size) = 0;
   virtual bool hasMorePostData() { return false; }
-  virtual const void *getMorePostData(int &size) { size = 0; return nullptr; }
-  virtual bool getFiles(std::string &files) { return false; }
+  virtual const void *getMorePostData(size_t &size) { size = 0;return nullptr; }
+  virtual bool getFiles(std::string& /*files*/) { return false; }
   /**
    * Is this a GET, POST or anything?
    */
   virtual Method getMethod() = 0;
   virtual const char *getExtendedMethod() { return nullptr;}
-  const char *getMethodName();
+  const char *getMethodName() override;
 
   /**
    * What version of HTTP was the request?
@@ -170,29 +202,34 @@ public:
   /**
    * Get http request size.
    */
-  virtual int getRequestSize() const;
+  virtual size_t getRequestSize() const;
 
   /**
-   * Get request header(s).
+   * Get transport params.
    */
-  virtual std::string getHeader(const char *name) = 0;
-  virtual void getHeaders(HeaderMap &headers) = 0;
-  virtual void getTransportParams(HeaderMap &serverParams) {};
+  virtual void getTransportParams(HeaderMap& /*serverParams*/){};
 
+  /**
+   * Get a description of the type of transport.
+   */
+  virtual String describe() const = 0;
 
   /**
    * Get/set response headers.
    */
-  void addHeaderNoLock(const char *name, const char *value);
-  void addHeader(const char *name, const char *value);
-  void addHeader(const String& header);
-  void replaceHeader(const char *name, const char *value);
-  void replaceHeader(const String& header);
-  void removeHeader(const char *name);
-  void removeAllHeaders();
-  void getResponseHeaders(HeaderMap &headers);
+  void addHeaderNoLock(const char *name, const char *value) override;
+  void addHeader(const char *name, const char *value) override;
+  void addHeader(const String& header) override;
+  void replaceHeader(const char *name, const char *value) override;
+  void replaceHeader(const String& header) override;
+  void removeHeader(const char *name) override;
+  void removeAllHeaders() override;
+  void getResponseHeaders(HeaderMap &headers) override;
   std::string getFirstHeaderFile() const { return m_firstHeaderFile;}
   int getFirstHeaderLine() const { return m_firstHeaderLine;}
+  // Appends value to the response header field, separated with a ", "
+  // If the value doesn't exist in m_responseHeaders[name] then, we add it
+  void addToCommaSeparatedHeader(const char* name, const char* value) override;
 
   /**
    * Content/MIME type related functions.
@@ -203,20 +240,19 @@ public:
   void setUseDefaultContentType(bool send) { m_sendContentType = send;}
 
   /**
-   * Can we gzip response?
+   * Can we compress response?
    */
-  void enableCompression() { m_compression = true;}
-  void disableCompression() { m_compression = false;}
-  bool isCompressionEnabled() const {
-    return m_compression && RuntimeOption::GzipCompressionLevel;
-  }
+  void enableCompression();
+  void disableCompression();
+  bool isCompressionEnabled();
 
   /**
    * Set cookie response header.
    */
   bool setCookie(const String& name, const String& value, int64_t expire = 0,
-                 const String& path = "", const String& domain = "", bool secure = false,
-                 bool httponly = false, bool encode_url = true);
+                 const String& path = "", const String& domain = "",
+                 bool secure = false, bool httponly = false,
+                 bool encode_url = true);
 
   /**
    * Add/remove a response header.
@@ -228,8 +264,9 @@ public:
    * Add/remove a request header. Default is no-op, because not all transports
    * need to support incoming request header manipulations.
    */
-  virtual void addRequestHeaderImpl(const char *name, const char *value) {}
-  virtual void removeRequestHeaderImpl(const char *name) {}
+  virtual void
+  addRequestHeaderImpl(const char* /*name*/, const char* /*value*/) {}
+  virtual void removeRequestHeaderImpl(const char* /*name*/) {}
 
   /**
    * Called when all sending should be done by this time point. Designed for
@@ -258,7 +295,9 @@ public:
    * Attempt to push the resource identified by host/path on this transport
    *
    * @param priority (3 bit priority, 0 = highest, 7 = lowest),
-   * @param headers HTTP headers for this resource
+   * @param promiseHeaders HTTP request headers for this resource
+   *        (for PUSH_PROMISE)
+   * @param responseHeaders HTTP response headers for this resource
    * @param body body bytes (optional)
    * @param size length of @p body or 0
    * @param eom true if no more body bytes are expected
@@ -267,9 +306,11 @@ public:
    *         is being streamed later.  0 indicates that the push failed
    *         immediately.
    */
-  virtual int64_t pushResource(const char *host, const char *path,
-                               uint8_t priority, const Array& headers,
-                                const void *data, int size, bool eom) {
+  virtual int64_t
+  pushResource(const char* /*host*/, const char* /*path*/, uint8_t /*priority*/,
+               const Array& /*promiseHeaders*/,
+               const Array& /*responseHeaders*/, const void* /*data*/,
+               int /*size*/, bool /*eom*/) {
     return 0;
   };
 
@@ -281,8 +322,8 @@ public:
    * @param size length of @p body
    * @param eom true if no more body bytes are expected
    */
-  virtual void pushResourceBody(int64_t id, const void *data, int size,
-                                bool eom) {}
+  virtual void pushResourceBody(int64_t /*id*/, const void* /*data*/,
+                                int /*size*/, bool /*eom*/) {}
 
   /**
    * Need this implementation to break keep-alive connections.
@@ -363,34 +404,28 @@ public:
   std::string getCookie(const std::string &name);
 
   /**
-   * Test whether client is okay to accept compressed response.
-   */
-  bool decideCompression();
-
-  /**
    * Sending back a response.
    */
   void setResponse(int code, const char *info = nullptr);
   const std::string &getResponseInfo() const { return m_responseCodeInfo; }
   bool headersSent() { return m_headerSent;}
-  bool setHeaderCallback(const Variant& callback);
-  void sendRaw(void *data, int size, int code = 200,
-               bool compressed = false, bool chunked = false,
+  void sendRaw(const char *data, int size, int code = 200,
+               bool precompressed = false, bool chunked = false,
                const char *codeInfo = nullptr);
 private:
-  void sendRawInternal(const void *data, int size, int code = 200,
-                       bool compressed = false,
+  void sendRawInternal(const char *data, int size, int code = 200,
+                       bool precompressed = false,
                        const char *codeInfo = nullptr);
 public:
-  void sendString(const char *data, int code = 200, bool compressed = false,
+  void sendString(const char *data, int code = 200, bool precompressed = false,
                   bool chunked = false,
                   const char * codeInfo = nullptr) {
-    sendRaw((void*)data, strlen(data), code, compressed, chunked, codeInfo);
+    sendRaw(data, strlen(data), code, precompressed, chunked, codeInfo);
   }
   void sendString(const std::string &data, int code = 200,
-                  bool compressed = false, bool chunked = false,
+                  bool precompressed = false, bool chunked = false,
                   const char *codeInfo = nullptr) {
-    sendRaw((void*)data.c_str(), data.length(), code, compressed, chunked,
+    sendRaw(data.c_str(), data.length(), code, precompressed, chunked,
             codeInfo);
   }
   void redirect(const char *location, int code, const char *info = nullptr);
@@ -415,10 +450,15 @@ public:
   const char *getThreadTypeName() const;
 
   // implementing IDebuggable
-  virtual void debuggerInfo(InfoVec &info);
+  void debuggerInfo(InfoVec& info) override;
 
   void setSSL() {m_isSSL = true;}
   bool isSSL() const {return m_isSSL;}
+
+  /*
+   * Request to adjust the maximum number of threads on the server.
+   */
+  virtual void trySetMaxThreadCount(int max) {}
 
 protected:
   /**
@@ -428,10 +468,10 @@ protected:
    * token's start char * addresses in ParamMaps. Therefore, this entire
    * process is very efficient without excessive string copying.
    */
-  typedef hphp_hash_map<const char*, std::vector<const char*>,
-                        cstr_hash, eqstr> ParamMap;
+  using ParamMap = hphp_hash_map<const char*, std::vector<const char*>,
+                                 cstr_hash, eqstr>;
 
-  // timers
+  // timers and other perf data
   timespec m_queueTime;
   timespec m_wallTime;
   timespec m_cpuTime;
@@ -443,6 +483,8 @@ protected:
   int64_t m_nsleepTimeS;
   int32_t m_nsleepTimeN;
 
+  std::unique_ptr<StructuredLogEntry> m_structLogEntry;
+
   // input
   char *m_url;
   char *m_postData;
@@ -453,8 +495,6 @@ protected:
   // output
   bool m_chunkedEncoding;
   bool m_headerSent;
-  Cell m_headerCallback;
-  bool m_headerCallbackDone;  // used to prevent infinite loops
   int m_responseCode;
   std::string m_responseCodeInfo;
   HeaderMap m_responseHeaders;
@@ -472,20 +512,14 @@ protected:
 
   std::string m_mimeType;
   bool m_sendContentType;
-  bool m_compression;
-  StreamCompressor *m_compressor;
+
+  std::unique_ptr<ResponseCompressorManager> m_compressor;
 
   bool m_isSSL;
 
-  enum class CompressionDecision {
-    NotDecidedYet,
-    ShouldNot,
-    Should,
-    HasTo,
-  };
-  CompressionDecision m_compressionDecision;
-
   ThreadType m_threadType;
+
+  folly::Optional<rqtrace::Trace> m_requestTrace;
 
   // helpers
   void parseGetParams();
@@ -495,11 +529,12 @@ protected:
   bool splitHeader(const String& header, String &name, const char *&value);
   std::list<std::string> getCookieLines();
 
-  StringHolder prepareResponse(const void *data, int size, bool &compressed,
-                               bool last);
+  ResponseCompressorManager& getCompressor();
+
 
 private:
-  void prepareHeaders(bool compressed, bool chunked,
+  StringHolder compressResponse(const char *data, int size, bool last);
+  void prepareHeaders(bool precompressed, bool chunked,
     const StringHolder &response, const StringHolder& orig_response);
 };
 

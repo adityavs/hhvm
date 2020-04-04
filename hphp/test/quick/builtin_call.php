@@ -1,9 +1,9 @@
-<?php
+<?hh
 function foo($a) {
   $sc = new SoapClient(null,
-                       array('location' =>
+                       darray['location' =>
                              "http://fizzle/does-not-exist.php",
-                             'uri' => "http://does-not-exit-uri/"));
+                             'uri' => "http://does-not-exit-uri/"]);
   try {
     var_dump($sc->NotASoapFunction());
   } catch (Exception $e) {
@@ -11,4 +11,6 @@ function foo($a) {
   }
   var_dump((string)strtoupper($a));
 }
+<<__EntryPoint>> function main(): void {
 foo("bar");
+}

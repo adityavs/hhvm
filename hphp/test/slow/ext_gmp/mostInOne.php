@@ -1,5 +1,8 @@
-<?php
+<?hh
+
 // gmp_abs
+<<__EntryPoint>>
+function main_most_in_one() {
 $abs1 = gmp_abs("274982683358");
 $abs2 = gmp_abs("-274982683358");
 echo gmp_strval($abs1) . "\n";
@@ -17,7 +20,7 @@ echo gmp_strval($and2) . "\n";
 
 // gmp_clrbit
 $clrbit = gmp_init("0xff");
-gmp_clrbit($clrbit, 0);
+gmp_clrbit(inout $clrbit, 0);
 echo gmp_strval($clrbit) . "\n";
 
 // gmp_cmp
@@ -61,8 +64,6 @@ echo gmp_strval($div1) . "\n";
 // gmp_divexact
 $div1 = gmp_divexact("10", "2");
 echo gmp_strval($div1) . "\n";
-$div2 = gmp_divexact("10", "3"); // bogus result
-echo gmp_strval($div2) . "\n";
 
 // gmp_fact
 $fact1 = gmp_fact(5); // 5 * 4 * 3 * 2 * 1
@@ -203,15 +204,15 @@ echo gmp_scan1($s2, 5) . "\n";
 // gmp_setbit
 $a = gmp_init("2"); //
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
-gmp_setbit($a, 0); // 0b10 now becomes 0b11
+gmp_setbit(inout $a, 0); // 0b10 now becomes 0b11
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
 $a = gmp_init("0xfd");
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
-gmp_setbit($a, 1); // index starts at 0
+gmp_setbit(inout $a, 1); // index starts at 0
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
 $a = gmp_init("0xff");
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
-gmp_setbit($a, 0, false); // clear bit at index 0
+gmp_setbit(inout $a, 0, false); // clear bit at index 0
 echo gmp_strval($a), ' -> 0b', gmp_strval($a, 2), "\n";
 
 // gmp_sign
@@ -248,7 +249,7 @@ echo gmp_strval($sub) . "\n";
 // gmp_testbit
 $n = gmp_init("1000000");
 var_dump(gmp_testbit($n, 1));
-gmp_setbit($n, 1);
+gmp_setbit(inout $n, 1);
 var_dump(gmp_testbit($n, 1));
 
 // gmp_xor
@@ -276,3 +277,4 @@ $b = gmp_init(0xFFFFFF, 16);
 var_dump(gmp_strval($b));
 $c = gmp_init($b);
 var_dump(gmp_strval($c, 16));
+}

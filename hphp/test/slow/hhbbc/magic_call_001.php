@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 final class Asd {
   protected function heh() {
@@ -20,4 +20,8 @@ function main() {
   var_dump($y);
 }
 
+
+<<__EntryPoint>>
+function main_magic_call_001() {
 main();
+}

@@ -1,4 +1,4 @@
-<?php
+<?hh
 class B {
   public static function g1() {
     static::h();
@@ -26,5 +26,6 @@ class D extends C {
     echo "D\n";
   }
 }
+<<__EntryPoint>> function main(): void {
 D::f();
-
+}

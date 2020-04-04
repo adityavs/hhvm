@@ -1,164 +1,199 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-open Core
-open Utils
+open Core_kernel
+open ServerCommandTypes.Method_jumps
+open Typing_defs
+module Reason = Typing_reason
+module Cls = Decl_provider.Class
 
-type result = {
-  orig_name: string;
-  orig_pos: Pos.absolute;
-  dest_name: string;
-  dest_pos: Pos.absolute;
-  orig_p_name: string; (* Used for methods to find their parent class *)
-  dest_p_name: string;
-}
+let string_filter_to_method_jump_filter = function
+  | "No_filter" -> Some No_filter
+  | "Class" -> Some Class
+  | "Interface" -> Some Interface
+  | "Trait" -> Some Trait
+  | _ -> None
 
 (* Used so the given input doesn't need the `\`. *)
 let add_ns name =
-  if name.[0] = '\\' then name else "\\" ^ name
+  if name.[0] = '\\' then
+    name
+  else
+    "\\" ^ name
 
-let get_overridden_methods origin_class or_mthds dest_class is_child acc =
-  let dest_class =
-    Naming_heap.ClassHeap.find_unsafe dest_class in
+let get_overridden_methods ctx origin_class get_or_method dest_class acc =
+  match Decl_provider.get_class ctx dest_class with
+  | None -> acc
+  | Some dest_class ->
+    (* Check if each destination method exists in the origin *)
+    List.fold
+      (Cls.methods dest_class)
+      ~init:acc
+      ~f:(fun acc (m_name, de_mthd) ->
+        (* Filter out inherited methods *)
+        if de_mthd.ce_origin <> Cls.name dest_class then
+          acc
+        else
+          let or_mthd = get_or_method m_name in
+          match or_mthd with
+          | Some or_mthd when or_mthd.ce_origin = origin_class ->
+            let get_pos (lazy ty) =
+              ty |> Typing_defs.get_pos |> Pos.to_absolute
+            in
+            {
+              orig_name = m_name;
+              orig_pos = get_pos or_mthd.ce_type;
+              dest_name = m_name;
+              dest_pos = get_pos de_mthd.ce_type;
+              orig_p_name = origin_class;
+              dest_p_name = Cls.name dest_class;
+            }
+            :: acc
+          | Some _
+          | None ->
+            acc)
 
-  (* Check if each destination method exists in the origin *)
-  List.fold_left dest_class.Nast.c_methods ~init:acc ~f:begin fun acc de_mthd ->
-    let or_mthd = SMap.get (snd de_mthd.Nast.m_name) or_mthds in
-    match or_mthd with
-    | Some or_mthd -> {
-          orig_name = snd or_mthd.Nast.m_name;
-          orig_pos = Pos.to_absolute (fst or_mthd.Nast.m_name);
-          dest_name = snd de_mthd.Nast.m_name;
-          dest_pos = Pos.to_absolute (fst de_mthd.Nast.m_name);
-          orig_p_name = origin_class;
-          dest_p_name = snd dest_class.Nast.c_name;
-        } :: acc
-    | None -> acc
-  end
-
-let check_if_extends_class_and_find_methods target_class_name mthds
-      target_class_pos class_name acc =
-  let class_ = Typing_env.Classes.get class_name in
+let check_if_extends_class_and_find_methods
+    ctx target_class_name get_method target_class_pos class_name acc =
+  let class_ = Decl_provider.get_class ctx class_name in
   match class_ with
   | None -> acc
-  | Some c
-      when SMap.mem target_class_name c.Typing_defs.tc_ancestors ->
-        let acc = get_overridden_methods
-                      target_class_name mthds
-                      class_name
-                      true
-                      acc in {
-          orig_name = target_class_name;
-          orig_pos = Pos.to_absolute target_class_pos;
-          dest_name = c.Typing_defs.tc_name;
-          dest_pos = Pos.to_absolute c.Typing_defs.tc_pos;
-          orig_p_name = "";
-          dest_p_name = "";
-        } :: acc
+  | Some c when Cls.has_ancestor c target_class_name ->
+    let acc =
+      get_overridden_methods ctx target_class_name get_method class_name acc
+    in
+    {
+      orig_name = target_class_name;
+      orig_pos = Pos.to_absolute target_class_pos;
+      dest_name = Cls.name c;
+      dest_pos = Pos.to_absolute (Cls.pos c);
+      orig_p_name = "";
+      dest_p_name = "";
+    }
+    :: acc
   | _ -> acc
 
-let filter_extended_classes target_class_name mthds target_class_pos
-      acc classes =
-  List.fold_left classes ~init:acc ~f:begin fun acc cid ->
-   check_if_extends_class_and_find_methods
-      target_class_name
-      mthds
-      target_class_pos
-      (snd cid)
-      acc
-  end
+let filter_extended_classes
+    ctx target_class_name get_method target_class_pos acc classes =
+  List.fold_left classes ~init:acc ~f:(fun acc cid ->
+      check_if_extends_class_and_find_methods
+        ctx
+        target_class_name
+        get_method
+        target_class_pos
+        (snd cid)
+        acc)
 
-let find_extended_classes_in_files target_class_name mthds target_class_pos
-      acc classes =
-  List.fold_left classes ~init:acc ~f:begin fun acc classes ->
-    filter_extended_classes target_class_name mthds target_class_pos acc classes
-  end
+let find_extended_classes_in_files
+    ctx target_class_name get_method target_class_pos acc classes =
+  List.fold_left classes ~init:acc ~f:(fun acc classes ->
+      filter_extended_classes
+        ctx
+        target_class_name
+        get_method
+        target_class_pos
+        acc
+        classes)
 
-let find_extended_classes_in_files_parallel workers target_class_name mthds
-      target_class_pos files_info files =
-  let classes = Relative_path.Set.fold begin fun fn acc ->
-    let { FileInfo.classes; _ } = Relative_path.Map.find_unsafe fn files_info in
-    classes :: acc
-  end files [] in
-
+let find_extended_classes_in_files_parallel
+    ctx workers target_class_name get_method target_class_pos naming_table files
+    =
+  let classes =
+    Relative_path.Set.fold files ~init:[] ~f:(fun fn acc ->
+        let { FileInfo.classes; _ } =
+          Naming_table.get_file_info_unsafe naming_table fn
+        in
+        classes :: acc)
+  in
   if List.length classes > 10 then
     MultiWorker.call
       workers
-      ~job:(find_extended_classes_in_files
-        target_class_name
-        mthds
-        target_class_pos)
-      ~merge:(List.rev_append)
-      ~neutral:([])
-      ~next:(Bucket.make classes)
+      ~job:
+        (find_extended_classes_in_files
+           ctx
+           target_class_name
+           get_method
+           target_class_pos)
+      ~merge:List.rev_append
+      ~neutral:[]
+      ~next:(MultiWorker.next workers classes)
   else
     find_extended_classes_in_files
-        target_class_name mthds target_class_pos [] classes
+      ctx
+      target_class_name
+      get_method
+      target_class_pos
+      []
+      classes
 
 (* Find child classes *)
-let get_child_classes_and_methods cls mthds env genv acc =
-  let files = FindRefsService.get_child_classes_files
-      genv.ServerEnv.workers
-      env.ServerEnv.files_info
-      cls.Typing_defs.tc_name in
+let get_child_classes_and_methods ctx cls ~filter naming_table workers =
+  if filter <> No_filter then
+    failwith "Method jump filters not implemented for finding children";
+  let files = FindRefsService.get_child_classes_files ctx (Cls.name cls) in
   find_extended_classes_in_files_parallel
-      genv.ServerEnv.workers
-      cls.Typing_defs.tc_name
-      mthds
-      cls.Typing_defs.tc_pos
-      env.ServerEnv.files_info
-      files
+    ctx
+    workers
+    (Cls.name cls)
+    (Cls.get_method cls)
+    (Cls.pos cls)
+    naming_table
+    files
+
+let class_passes_filter ~filter cls =
+  match (filter, cls) with
+  | (No_filter, _) -> true
+  | (Class, cls) when Cls.kind cls = Ast_defs.Cnormal -> true
+  | (Class, cls) when Cls.kind cls = Ast_defs.Cabstract -> true
+  | (Interface, cls) when Cls.kind cls = Ast_defs.Cinterface -> true
+  | (Trait, cls) when Cls.kind cls = Ast_defs.Ctrait -> true
+  | _ -> false
 
 (* Find ancestor classes *)
-let get_ancestor_classes_and_methods cls mthds acc =
-  let class_ = Typing_env.Classes.get cls.Typing_defs.tc_name in
+let get_ancestor_classes_and_methods ctx cls ~filter acc =
+  let class_ = Decl_provider.get_class ctx (Cls.name cls) in
   match class_ with
   | None -> []
   | Some cls ->
-      SMap.fold begin fun k v acc ->
-        let class_ = Typing_env.Classes.get k in
+    List.fold (Cls.all_ancestor_names cls) ~init:acc ~f:(fun acc k ->
+        let class_ = Decl_provider.get_class ctx k in
         match class_ with
-        | None -> acc
-        | Some c ->
-            let acc = get_overridden_methods
-                          cls.Typing_defs.tc_name
-                          mthds
-                          c.Typing_defs.tc_name
-                          false
-                          acc in {
-              orig_name = Utils.strip_ns cls.Typing_defs.tc_name;
-              orig_pos = Pos.to_absolute cls.Typing_defs.tc_pos;
-              dest_name = Utils.strip_ns c.Typing_defs.tc_name;
-              dest_pos = Pos.to_absolute c.Typing_defs.tc_pos;
-              orig_p_name = "";
-              dest_p_name = "";
-            } :: acc
-      end cls.Typing_defs.tc_ancestors acc
-
-let build_method_smap cls =
-  let cls =
-    Naming_heap.ClassHeap.find_unsafe cls in
-
-  List.fold_left cls.Nast.c_methods ~init:SMap.empty ~f:begin fun acc or_mthd ->
-    SMap.add (snd or_mthd.Nast.m_name) or_mthd acc
-  end
+        | Some c when class_passes_filter ~filter c ->
+          let acc =
+            get_overridden_methods
+              ctx
+              (Cls.name cls)
+              (Cls.get_method cls)
+              (Cls.name c)
+              acc
+          in
+          {
+            orig_name = Utils.strip_ns (Cls.name cls);
+            orig_pos = Pos.to_absolute (Cls.pos cls);
+            dest_name = Utils.strip_ns (Cls.name c);
+            dest_pos = Pos.to_absolute (Cls.pos c);
+            orig_p_name = "";
+            dest_p_name = "";
+          }
+          :: acc
+        | _ -> acc)
 
 (*  Returns a list of the ancestor or child
  *  classes and methods for a given class
  *)
-let get_inheritance class_ find_children env genv =
+let get_inheritance ctx class_ ~filter ~find_children naming_table workers =
   let class_ = add_ns class_ in
-  let class_ = Typing_env.Classes.get class_ in
+  let class_ = Decl_provider.get_class ctx class_ in
   match class_ with
   | None -> []
   | Some c ->
-    let mthds = build_method_smap c.Typing_defs.tc_name in
-    if find_children then get_child_classes_and_methods c mthds env genv []
-    else get_ancestor_classes_and_methods c mthds []
+    if find_children then
+      get_child_classes_and_methods ctx c ~filter naming_table workers
+    else
+      get_ancestor_classes_and_methods ctx c ~filter []

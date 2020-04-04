@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,6 +29,7 @@ namespace HPHP {
 struct Array;
 struct StringData;
 struct String;
+struct TypedValue;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -39,11 +40,14 @@ struct String;
  * We refer to these strings as "static strings"---they may be passed
  * around like request local strings, but have a bit set in their
  * reference count which indicates they should not actually be
- * incref'd or decref'd, and therefore are never freed.
+ * incref'd or decref'd, and therefore are never freed. Furthermore,
+ * any string marked static must be in the table and therefore can
+ * be compared by pointer.
  *
- * Note that when a static string is in a TypedValue, it may or may
- * not have KindOfStaticString.  (But no non-static strings will ever
- * have KindOfStaticString.)
+ * Note that when a static or uncounted string is in a TypedValue,
+ * it may or may not have KindOfPersistentString. (But no non-persistent
+ * strings will ever have KindOfPersistentString.) so-called "uncounted"
+ * strings are persistent (not ref counted) but not static.
  *
  * Because all constants defined in hhvm programs create a
  * process-lifetime string for the constant name, this module also
@@ -51,6 +55,8 @@ struct String;
  */
 
 //////////////////////////////////////////////////////////////////////
+
+extern StringData** precomputed_chars;
 
 /*
  * Attempt to lookup a string (specified in various ways) in the
@@ -65,6 +71,14 @@ StringData* makeStaticString(const char* str, size_t len);
 StringData* makeStaticString(const char* str);
 
 /*
+ * As their counterparts above, but check that the static string
+ * table has been initialized. These should be used for anything
+ * that might run before main().
+ */
+StringData* makeStaticStringSafe(const char* str, size_t len);
+StringData* makeStaticStringSafe(const char* str);
+
+/*
  * Lookup static strings for single character strings.  (We pre-create
  * static strings for all 256 characters at process startup.)
  */
@@ -72,15 +86,12 @@ StringData* makeStaticString(char c);
 
 /*
  * Attempt to look up a static string for `str' if it exists, without
- * inserting it if not.
+ * inserting it if not. Requires the input string to be known non-static.
  *
  * Returns: a string that isStatic(), or nullptr if there was none.
- *
- * TODO(#2880477): can this have a precondition that str is not
- * static?  Also can't it assume the static string map is already
- * allocated...
  */
 StringData* lookupStaticString(const StringData* str);
+StringData* lookupStaticString(folly::StringPiece);
 
 /*
  * Return the number of static strings in the process.
@@ -97,7 +108,14 @@ size_t makeStaticStringSize();
  * given request.
  */
 rds::Handle lookupCnsHandle(const StringData* cnsName);
-rds::Handle makeCnsHandle(const StringData* cnsName, bool persistent);
+rds::Handle makeCnsHandle(const StringData* cnsName);
+
+/*
+ * Bind a persistent constant if its not yet been bound.
+ *
+ * Returns true iff the constant has a persistent handle.
+ */
+bool bindPersistentCns(const StringData* cnsName, const TypedValue& value);
 
 /*
  * Return an array of all the static strings in the current
@@ -110,6 +128,12 @@ std::vector<StringData*> lookupDefinedStaticStrings();
  * execution context.
  */
 Array lookupDefinedConstants(bool categorize = false);
+
+/*
+ * Return the number of static strings that correspond to defined
+ * constants.
+ */
+size_t countStaticStringConstants();
 
 /*
  * The static string table is generally initially created before main

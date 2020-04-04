@@ -22,6 +22,9 @@ step
 step
 variable
 step
+step
+step
+step
 variable
 step
 step
@@ -62,7 +65,5 @@ break flow_small.php:7
 @test(7)
 break clear all
 break flow_small.php:62
-continue
-break clear all
 continue
 quit

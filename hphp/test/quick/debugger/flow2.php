@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 // Warning: line numbers are sensitive, do not change
 
@@ -22,9 +22,9 @@ private
     error_log('Constructor');
   }
 
-  public function __destruct() {
-    error_log('Destructor');
-  }
+
+
+
 };
 
 // Test the following:

@@ -1,4 +1,4 @@
-<?php 
+<?hh
 
 $xml =<<<EOF
 <?xml version='1.0'?>
@@ -66,13 +66,12 @@ class SXETest extends SimpleXMLIterator
 	}
 }
 
-$sxe = new SXETest((binary)$xml);
+$sxe = new SXETest((string)$xml);
 $rit = new RecursiveIteratorIterator($sxe, RecursiveIteratorIterator::SELF_FIRST);
 
 foreach($rit as $data) {
 	var_dump(get_class($data));
-	var_dump(trim($data));
+	var_dump(trim((string)$data));
 }
 
-?>
-===DONE===
+echo "===DONE===\n";

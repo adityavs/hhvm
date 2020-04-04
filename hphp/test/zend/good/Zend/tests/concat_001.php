@@ -1,12 +1,12 @@
-<?php
+<?hh
 
 class test {
-	function __toString() {
-		return "this is test object";
-	}
+    function __toString() {
+        return "this is test object";
+    }
 }
-
-$a = array(1,2,3);
+<<__EntryPoint>> function main(): void {
+$a = varray[1,2,3];
 $o = new test;
 $s = "some string";
 $i = 222;
@@ -43,4 +43,4 @@ var_dump($d.$i);
 var_dump($d.$d);
 
 echo "Done\n";
-?>
+}

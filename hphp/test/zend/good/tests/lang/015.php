@@ -1,3 +1,3 @@
-<?php
+<?hh
 include "015.inc";
-?>
+

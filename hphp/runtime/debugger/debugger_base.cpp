@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -65,7 +65,7 @@ void DSandboxInfo::set(const std::string &id) {
   m_path.clear();
   if (!id.empty()) {
     std::vector<std::string> tokens;
-    split('\t', id.c_str(), tokens);
+    folly::split('\t', id, tokens);
     if (tokens.size() == 2) {
       m_user = tokens[0];
       m_name = tokens[1];
@@ -279,7 +279,6 @@ const char *PHP_KEYWORDS[] = {
   "unset",
   "isset",
   "empty",
-  "halt_compiler",
   "class",
   "interface",
   "extends",
@@ -408,11 +407,11 @@ static void color_line_no(StringBuffer &sb, int line, int lineFocus0,
   }
 }
 
-static void append_line_no(StringBuffer &sb, const char *text,
-                           int &line, const char *color, const char *end,
-                           int lineFocus0, int charFocus0, int lineFocus1,
-                           int charFocus1, const char **palette =
-                           DebuggerClient::DefaultCodeColors) {
+static void
+append_line_no(StringBuffer& sb, const char* text, int& line, const char* color,
+               const char* end, int lineFocus0, int /*charFocus0*/,
+               int lineFocus1, int /*charFocus1*/,
+               const char** palette = DebuggerClient::DefaultCodeColors) {
   TRACE(7, "debugger_base:append_line_no\n");
   const char *colorLineNo = palette[CodeColorLineNo * 2];
   const char *endLineNo = palette[CodeColorLineNo * 2 + 1];

@@ -158,24 +158,9 @@ Default is 1. Similar to scalar arrays, we have literal strings pre-generated
 in files. This option specifies how many of these files are generated for
 faster compilation.
 
-= EnableHipHopSyntax
-
-Default is false. Enables new syntax, including yield, new type names for
-function parameter, function return and class variable type hints (string,
-int, boolean, etc..), new array types (vector, map, set).
-
-= EnableHipHopExperimentalSyntax
-
-Default is false. Enables experimental syntax, including type hints for local
-variables and global variables.
-
 = EnableShortTags
 
 Default is true. Is &lt;? allowed with PHP code?
-
-= EnableAspTags
-
-Default is false. Is &lt;% %&gt; allowed with PHP code?
 
 = EnableXHP
 
@@ -194,11 +179,6 @@ How many threads to use when parsing PHP files. By default, it's 2x CPU count.
 
 Facebook specific. Ignore.
 
-= GenerateDocComments
-
-Default is true. Whether to store doc comments in class map, so they can be
-queried from reflection.
-
 = PregenerateCPP
 
 Default is false. In case clustering of output files has been requested and this
@@ -207,7 +187,7 @@ a more precise partitioning.
 
 = GCCOptimization
 
-Default is disabled. This option allows to selectively decrease the compiler
+Default is disabled. This option allows one to selectively decrease the compiler
 optimization level for long functions. It is specified as:
 
   GCCOptimization {
@@ -250,6 +230,17 @@ EvalJitEnableRenameFunction is false at runtime.)
 
 We should probably rename this option to something like
 InterceptableFunctions, but we haven't yet.
+
+= ConstantFunctions
+
+This is a list of functions and static class methods that may be assumed to
+always return a constant value. Each entry should be in the format
+function_name|serialized_value, like so:
+
+  ConstantFunctions {
+    * = SomeClass::GetString|s:8:"a_string";
+    * = some_function|b:0;
+  }
 
 = CodeGeneration
 

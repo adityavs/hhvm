@@ -1,25 +1,25 @@
-(**
+(*
  * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the "hack" directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the "hack" directory of this source tree.
  *
  *)
 
-type result = ((int * int) * Coverage_level.level) list
-
-let get_level_list check =
-  let type_acc = Hashtbl.create 0 in
-  let fn = Typing.with_expr_hook
-    (fun (p, _) ty -> Hashtbl.replace type_acc p ty) check in
-  let level_of_type = Coverage_level.level_of_type_mapper fn in
-  let result = Hashtbl.fold (fun p ty xs ->
-    (Pos.info_raw p, level_of_type (p, ty)) :: xs) type_acc [] in
-  result
-
-let go env f_in =
-  get_level_list begin fun () ->
-    ServerIdeUtils.check_file_input env.ServerEnv.nenv env.ServerEnv.files_info f_in
-  end
+let go_quarantined ~(ctx : Provider_context.t) ~(entry : Provider_context.entry)
+    =
+  try
+    let { Tast_provider.Compute_tast.tast; _ } =
+      Tast_provider.compute_tast_quarantined ~ctx ~entry
+    in
+    Coverage_level.get_levels ctx tast entry.Provider_context.path
+  with _ ->
+    (* The "Fixme Provider" will throw an exception if the file cannot be found.
+     * Let's convert that exception to a plain result. *)
+    ( [],
+      {
+        Coverage_level_defs.checked = 0;
+        Coverage_level_defs.partial = 0;
+        Coverage_level_defs.unchecked = 0;
+      } )

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -65,6 +65,63 @@ PhysReg rsp();
 
 
 ///////////////////////////////////////////////////////////////////////////////
+// Calling convention registers.
+
+/*
+ * PHP return value registers.
+ */
+PhysReg rret_data();
+PhysReg rret_type();
+
+/*
+ * Native return value registers.
+ */
+PhysReg rret(size_t i = 0);
+PhysReg rret_simd(size_t i);
+
+/*
+ * Native argument registers.
+ */
+PhysReg rarg(size_t i);
+PhysReg rarg_simd(size_t i);
+PhysReg rarg_ind_ret(size_t i);
+
+/*
+ * Number of available argument registers.
+ */
+size_t num_arg_regs();
+size_t num_arg_regs_simd();
+size_t num_arg_regs_ind_ret();
+
+/*
+ * RegSet for a call with `n' arguments.
+ */
+RegSet arg_regs(size_t n);
+RegSet arg_regs_simd(size_t n);
+RegSet arg_regs_ind_ret(size_t n);
+
+/*
+ * Service request argument registers.
+ */
+PhysReg r_svcreq_req();
+PhysReg r_svcreq_stub();
+PhysReg r_svcreq_sf();
+PhysReg r_svcreq_arg(size_t i);
+
+/*
+ * PHP call registers (used by Call IR).
+ *
+ * - r_php_call_flags: see struct CallFlags
+ * - r_php_call_func: the func being called
+ * - r_php_call_num_args: the number of arguments being passed
+ * - r_php_call_ctx: the $this/static:class context (TCtx)
+ */
+inline PhysReg r_php_call_flags() { return rarg(0); }
+inline PhysReg r_php_call_func() { return rarg(1); }
+inline PhysReg r_php_call_num_args() { return rarg(2); }
+inline PhysReg r_php_call_ctx() { return rarg(3); }
+
+///////////////////////////////////////////////////////////////////////////////
 // JIT and TC boundary ABI registers.
 //
 // These registers should not be used for scratch purposes between tracelets,
@@ -76,6 +133,12 @@ PhysReg rsp();
  */
 RegSet vm_regs_with_sp();
 RegSet vm_regs_no_sp();
+
+/*
+ * Registers that need to be preserved across enterTC. Should not
+ * include rvmfp, or anything else that is "naturally" preserved.
+ */
+RegSet cross_jit_save();
 
 /*
  * Registers that are live between tracelets, in two flavors, depending whether
@@ -91,60 +154,41 @@ inline RegSet cross_trace_regs_resumed()  { return vm_regs_with_sp(); }
 inline RegSet leave_trace_regs() { return vm_regs_with_sp(); }
 
 /*
- * Registers that are live during a PHP function call, between the caller and
- * the callee.
+ * Registers that are live between the caller and the callee when making a PHP
+ * function call.
  */
-inline RegSet php_call_regs() { return cross_trace_regs(); }
+inline RegSet php_call_regs(bool withCtx) {
+  auto regs =
+    vm_regs_with_sp() |
+    r_php_call_flags() |
+    r_php_call_func() |
+    r_php_call_num_args();
+  if (withCtx) regs |= r_php_call_ctx();
+  return regs;
+}
 
 /*
  * Registers that are live after a PHP function return.
  *
  * TODO(#2288359): We don't want this to include rvmsp() eventually.
  */
-inline RegSet php_return_regs() { return vm_regs_with_sp(); }
+inline RegSet php_return_regs() {
+  return vm_regs_with_sp() | rret_data() | rret_type();
+}
 
 /*
- * Registers that are live on entry to fcallArrayHelper.
+ * Registers that are live on entry to fcallUnpackHelper.
  *
  * TODO(#2288359): We don't want this to include rvmsp() eventually.
  */
-inline RegSet fcall_array_regs() { return vm_regs_with_sp(); }
-
+inline RegSet fcall_unpack_regs() { return vm_regs_with_sp(); }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Calling convention registers.
 
 /*
- * Native return value registers.
+ * Return the status flags that must be set when testing 'cc'.
  */
-PhysReg rret(size_t i = 0);
-PhysReg rret_simd(size_t i);
-
-/*
- * Native argument registers.
- */
-PhysReg rarg(size_t i);
-PhysReg rarg_simd(size_t i);
-
-/*
- * Number of available argument registers.
- */
-size_t num_arg_regs();
-size_t num_arg_regs_simd();
-
-/*
- * RegSet for a call with `n' arguments.
- */
-RegSet arg_regs(size_t n);
-RegSet arg_regs_simd(size_t n);
-
-/*
- * Service request argument registers.
- */
-PhysReg r_svcreq_req();
-PhysReg r_svcreq_stub();
-PhysReg r_svcreq_sf();
-PhysReg r_svcreq_arg(size_t i);
+Vflags required_flags(ConditionCode cc);
 
 ///////////////////////////////////////////////////////////////////////////////
 

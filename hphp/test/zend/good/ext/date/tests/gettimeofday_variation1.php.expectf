@@ -1,0 +1,132 @@
+*** Testing gettimeofday() : usage variation ***
+
+--int 0--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, integer given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--int 1--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, integer given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--int 12345--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, integer given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--int -12345--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, integer given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--float 10.5--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, double given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--float -10.5--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, double given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--float 12.3456789000e10--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, double given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--float -12.3456789000e10--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, double given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--float .5--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, double given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--empty array--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, array given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--int indexed array--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, array given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--associative array--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, array given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--nested arrays--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, array given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--uppercase NULL--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, null given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--lowercase null--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, null given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--lowercase true--
+float(%f)
+
+--lowercase false--
+array(4) {
+  ["sec"]=>
+  int(%d)
+  ["usec"]=>
+  int(%d)
+  ["minuteswest"]=>
+  int(-330)
+  ["dsttime"]=>
+  int(0)
+}
+
+--uppercase TRUE--
+float(%f)
+
+--uppercase FALSE--
+array(4) {
+  ["sec"]=>
+  int(%d)
+  ["usec"]=>
+  int(%d)
+  ["minuteswest"]=>
+  int(-330)
+  ["dsttime"]=>
+  int(0)
+}
+
+--empty string DQ--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--empty string SQ--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--string DQ--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--string SQ--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--mixed case string--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--heredoc--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, string given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--instance of classWithToString--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, object given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--instance of classWithoutToString--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, object given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--undefined var--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, null given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+
+--unset var--
+
+Warning: gettimeofday() expects parameter 1 to be boolean, null given in %s/zend/good/ext/date/tests/gettimeofday_variation1.php on line 94
+===DONE===

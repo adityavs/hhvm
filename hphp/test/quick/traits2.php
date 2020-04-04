@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 trait T {
 }
@@ -6,3 +6,4 @@ trait T {
 interface I {
   use T;
 }
+

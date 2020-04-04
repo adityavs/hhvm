@@ -11,8 +11,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_ResourceBundle;
 
-class ResourceBundle : public IntlError {
-public:
+struct ResourceBundle : IntlError {
   ResourceBundle() {}
   ResourceBundle(const ResourceBundle&) = delete;
   ResourceBundle& operator=(const ResourceBundle& src) {
@@ -34,7 +33,7 @@ public:
   static Object newInstance(icu::ResourceBundle* bundle) {
     if (!c_ResourceBundle) {
       c_ResourceBundle = Unit::lookupClass(s_ResourceBundle.get());
-      assert(c_ResourceBundle);
+      assertx(c_ResourceBundle);
     }
     Object obj{c_ResourceBundle};
     auto data = Native::data<ResourceBundle>(obj);
@@ -62,7 +61,7 @@ public:
     return true;
   }
   icu::ResourceBundle iterCurrent(UErrorCode& error) {
-    assert(iterValid());
+    assertx(iterValid());
     return m_rsrc->get(m_iterIndex, error);
   }
   Variant iterKey() {

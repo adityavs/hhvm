@@ -1,36 +1,36 @@
-<?hh
+<?hh // partial
 
 namespace {
 /* Finds whether the given variable is a boolean.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_bool(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_bool(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the type of the given variable is integer.  To test if a
  * variable is a number or a numeric string (such as form input, which is
  * always a string), you must use is_numeric().
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_int(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_int(<<__MaybeMutable>> mixed $var): bool;
 
-<<__Native, __ParamCoerceModeFalse>>
-function is_integer(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_integer(<<__MaybeMutable>> mixed $var): bool;
 
-<<__Native, __ParamCoerceModeFalse>>
-function is_long(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_long(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the type of the given variable is float.  To test if a
  * variable is a number or a numeric string (such as form input, which is
  * always a string), you must use is_numeric().
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_float(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_float(<<__MaybeMutable>> mixed $var): bool;
 
-<<__Native, __ParamCoerceModeFalse>>
-function is_double(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_double(<<__MaybeMutable>> mixed $var): bool;
 
-<<__Native, __ParamCoerceModeFalse>>
-function is_real(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_real(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is numeric. Numeric strings consist of
  * optional sign, any number of digits, optional decimal part and optional
@@ -38,13 +38,13 @@ function is_real(mixed $var): bool;
  * notation (0xFF) is allowed too but only without sign, decimal and
  * exponential part.
  */
-<<__Native>>
-function is_numeric(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_numeric(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the type given variable is string.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_string(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_string(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is a scalar.  Scalar variables are those
  * containing an integer, float, string or boolean. Types array, object and
@@ -53,69 +53,63 @@ function is_string(mixed $var): bool;
  * based on integers. This implementation detail should not be relied upon, as
  * it may change.
  */
-<<__Native>>
-function is_scalar(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_scalar(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is an array.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_array(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_array(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is an object.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_object(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_object(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is a resource.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_resource(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_resource(<<__MaybeMutable>> mixed $var): bool;
 
 /* Finds whether the given variable is NULL.
  */
-<<__Native, __ParamCoerceModeFalse>>
-function is_null(mixed $var): bool;
+<<__IsFoldable, __Native, __Rx>>
+function is_null(<<__MaybeMutable>> mixed $var): bool;
 
 /* Returns the type of the PHP variable var. Warning Never use gettype() to
  * test for a certain type, since the returned string may be subject to change
  * in a future version. In addition, it is slow too, as it involves string
  * comparison. Instead, use the is_* functions.
  */
-<<__Native>>
-function gettype(mixed $v): string;
+<<__IsFoldable, __Native, __Rx>>
+function gettype(<<__MaybeMutable>> mixed $v): string;
 
 /* This function gets the type of the given resource.
  */
-<<__Native>>
-function get_resource_type(resource $handle): string;
+<<__IsFoldable, __Native, __Rx>>
+function get_resource_type(<<__MaybeMutable>> resource $handle): string;
 
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function boolval(mixed $var): bool;
 
 /* Returns the integer value of var, using the specified base for the
  * conversion (the default is base 10). intval() should not be used on
  * objects, as doing so will emit an E_NOTICE level error and return 1.
  */
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function intval(mixed $var,
                 int $base = 10): int;
 
 /* Gets the float value of var.
  */
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function floatval(mixed $var): float;
 
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function doubleval(mixed $var): float;
 
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function strval(mixed $var): string;
-
-/* Set the type of variable var to type.
- */
-<<__Native>>
-function settype(mixed &$var,
-                 string $type): bool;
 
 /* print_r() displays information about a variable in a way that's readable by
  * humans.  print_r(), var_dump() and var_export() will also show protected
@@ -150,25 +144,20 @@ function debug_zval_dump(mixed $variable): void;
 /* Generates a storable representation of a value  This is useful for storing
  * or passing PHP values around without losing their type and structure.  To
  * make the serialized string into a PHP value again, use unserialize().
+ *
+ * Calls to serialize are foldable because only objects can invoke user-defined
+ * code.
  */
-<<__Native>>
+<<__IsFoldable, __Native, __Rx>>
 function serialize(mixed $value): string;
 
-<<__Native>>
+<<__Native, __Rx>>
 function unserialize(string $str,
-                     array $options = []): mixed;
-
-/* This function returns a multidimensional array containing a list of all
- * defined variables, be they environment, server or user-defined
- * variables, within the scope in which get_defined_vars() is called.
- */
-<<__Native>>
-function get_defined_vars(): array;
+                     darray $options = darray[]): mixed;
 
 /* Imports GET/POST/Cookie variables into the global scope. It is useful if
  * you disabled register_globals, but would like to see some variables in the
- * global scope.  If you're interested in importing other variables into the
- * global scope, such as $_SERVER, consider using extract().
+ * global scope.
  */
 function import_request_variables(string $types,
                                   string $prefix = ""): bool {
@@ -181,18 +170,8 @@ function import_request_variables(string $types,
                       "this function is called.");
 }
 
-/* Import variables from an array into the current symbol table.  Checks each
- * key to see whether it has a valid variable name. It also checks for
- * collisions with existing variables in the symbol table.
- */
-<<__Native>>
-function extract(mixed &$var_array,
-                 int $extract_type = EXTR_OVERWRITE,
-                 string $prefix = ""): int;
-
 /*
- * Parses str as if it were the query string passed via a URL and sets
- * variables in the current scope.
+ * Parses str as if it were the query string passed via a URL and sets $arr.
  *
  * To get the current QUERY_STRING, you may use the variable
  * $_SERVER['QUERY_STRING']. Also, you may want to read the section on
@@ -203,27 +182,133 @@ function extract(mixed &$var_array,
  * $_POST, etc. variables.
  */
 <<__Native>>
-function parse_str(string $str, mixed &$arr = null): void;
+function parse_str(string $str,
+                   <<__OutOnly("KindOfArray")>>
+                   inout mixed $arr): void;
 
 }
 
-/*
- * Several of the above functions can affect the variable environment of the
- * their caller.  In order to allow the JIT to make more aggressive
- * optimizations, we have an option that disables dynamic calls to these
- * functions---to make that work, non-dynamic calls are rewritten to call these
- * __SystemLib versions, which are still allowed to modify the caller variable
- * environment when the option is enabled.
- */
-namespace __SystemLib {
-  <<__Native>>
-  function extract(mixed &$var_array,
-                   int $extract_type = EXTR_OVERWRITE,
-                   string $prefix = ""): int;
+namespace HH {
 
-  <<__Native>>
-  function get_defined_vars(): array;
+  /* Finds whether the given variable is a vec.
+   */
+  <<__Native, __IsFoldable, __Rx>>
+  function is_vec(<<__MaybeMutable>> mixed $var): bool;
 
+  /* Finds whether the given variable is a dict.
+   */
+  <<__Native, __IsFoldable, __Rx>>
+  function is_dict(<<__MaybeMutable>> mixed $var): bool;
+
+  /* Finds whether the given variable is a keyset.
+   */
+  <<__Native, __IsFoldable, __Rx>>
+  function is_keyset(<<__MaybeMutable>> mixed $var): bool;
+
+  <<__Native, __IsFoldable, __Rx>>
+  function is_varray(<<__MaybeMutable>> mixed $var): bool;
+
+  <<__Native, __IsFoldable, __Rx>>
+  function is_darray(<<__MaybeMutable>> mixed $var): bool;
+
+  <<__Native, __IsFoldable, __Rx>>
+  function is_any_array(<<__MaybeMutable>> mixed $var): bool;
+
+  <<__Native, __Rx>>
+  function is_php_array(<<__MaybeMutable>> mixed $var): bool;
+
+  /*
+   * Check if the input is an array-like containing only integer keys running
+   * from 0 to N-1, in that order.
+   */
+  <<__Native, __IsFoldable, __Rx>>
+  function is_list_like(<<__MaybeMutable>> arraylike $var): bool;
+
+  <<__Native, __IsFoldable, __Rx>>
+  function is_meth_caller(<<__MaybeMutable>> mixed $var): bool;
+
+ /*
+  * Behaves like serialize() but takes an optional set of options.
+  *
+  * Options:
+  *
+  * warnOnHackArrays - If true, emit a Hack array compat notice if serializing a
+  *                    Hack array
+  * warnOnPHPArrays  - If true, emit a Hack array compat notice if serializing a
+  *                    PHP array
+  * forcePHPArrays   - If true, serialize all Hack arrays as PHP arrays
+  * keepDVArrays     - If true, use custom HHVM-specific serialization format,
+  *                    which preserves varray and darray intact.
+  */
+  <<__Native, __IsFoldable>>
+  function serialize_with_options(mixed $value, dict $options = dict[]): string;
+
+  /*
+   * This function returns an array of an object's properties in the same manner
+   * as casting the object to an array.
+   */
   <<__Native>>
-  function parse_str(string $str, mixed &$arr = null): void;
+  function object_prop_array(object $obj): darray;
+
+  /*
+   * Return true if the <<__LateInit>> property (with name $prop) on the given
+   * object is initialized to a value (and therefore will not throw when
+   * accessed). Throws InvalidArgumentException if the property does not exist
+   * or is inaccessible in the current context.
+   */
+  <<__Native>>
+  function is_late_init_prop_init(object $obj, string $prop): bool;
+
+  /*
+   * Return true if the <<__LateInit>> static property (with name $prop) on the
+   * class given by $cls is initialized to a value (and therefore will not throw
+   * when accessed). Throws InvalidArgumentException if $cls is not a valid
+   * classname, if the static property does not exist, or if the static property
+   * is inaccessible in the current context.
+   */
+  <<__Native>>
+  function is_late_init_sprop_init(string $cls, string $prop): bool;
+
+  /*
+   * Return all of the keys of the globals array shared between
+   * runtime and user code. Currently backed by $GLOBALS.
+   */
+  <<__Native>>
+  function global_keys(): keyset<string>;
+
+  /*
+   * Does the key exist in the globals array shared between runtime
+   * and code.
+   */
+  <<__Native>>
+  function global_key_exists(string $key): bool;
+}
+
+namespace HH\Lib\_Private\Native {
+  /*
+  * container intrinsic for HH\traversable
+  */
+  <<__Native, __IsFoldable, __Rx, __AtMostRxAsArgs>>
+  function first(
+    <<__OnlyRxIfImpl(\HH\Rx\Traversable::class), __MaybeMutable>>
+    mixed $iterable
+  ): mixed;
+
+  <<__Native, __IsFoldable, __Rx, __AtMostRxAsArgs>>
+  function first_key(
+    <<__OnlyRxIfImpl(\HH\Rx\Traversable::class), __MaybeMutable>>
+    mixed $iterable
+  ): mixed;
+
+  <<__Native, __IsFoldable, __Rx, __AtMostRxAsArgs>>
+  function last(
+    <<__OnlyRxIfImpl(\HH\Rx\Traversable::class), __MaybeMutable>>
+    mixed $iterable
+  ): mixed;
+
+  <<__Native, __IsFoldable, __Rx, __AtMostRxAsArgs>>
+  function last_key(
+    <<__OnlyRxIfImpl(\HH\Rx\Traversable::class), __MaybeMutable>>
+    mixed $iterable
+  ): mixed;
 }

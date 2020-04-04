@@ -1,12 +1,15 @@
-<?php
+<?hh
 
-$array = array(
+
+<<__EntryPoint>>
+function main_key() {
+$array = darray[
   "fruit1" => "apple",
   "fruit2" => "orange",
   "fruit3" => "grape",
   "fruit4" => "apple",
   "fruit5" => "apple"
-);
+];
 
 // this cycle echoes all associative array
 // key where value equals "apple"
@@ -17,7 +20,9 @@ while (true) {
   if ($fruit_name === 'apple') {
     $output .= key($array);
   }
-  next($array);
+  next(inout $array);
 }
 var_dump($output);
-var_dump(key(array()));
+$array = varray[];
+var_dump(key($array));
+}

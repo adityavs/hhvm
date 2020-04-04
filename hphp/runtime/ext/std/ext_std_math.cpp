@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,20 +17,15 @@
 
 #include "hphp/runtime/ext/std/ext_std_math.h"
 
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/comparisons.h"
-#include "hphp/runtime/base/zend-math.h"
 #include "hphp/runtime/base/zend-multiply.h"
 #include "hphp/runtime/base/container-functions.h"
 #include "hphp/runtime/ext/std/ext_std.h"
-#include "hphp/system/constants.h"
+#include "hphp/zend/zend-math.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-
-const int64_t k_PHP_ROUND_HALF_UP =   PHP_ROUND_HALF_UP;
-const int64_t k_PHP_ROUND_HALF_DOWN = PHP_ROUND_HALF_DOWN;
-const int64_t k_PHP_ROUND_HALF_EVEN = PHP_ROUND_HALF_EVEN;
-const int64_t k_PHP_ROUND_HALF_ODD =  PHP_ROUND_HALF_ODD;
 
 const double k_M_PI       = 3.1415926535898;
 const double k_M_1_PI     = 0.31830988618379;
@@ -54,98 +49,68 @@ Variant HHVM_FUNCTION(min,
                       const Variant& value,
                       const Array& args /* = null_array */) {
   if (args.empty()) {
-    const auto& cell_value = *value.asCell();
+    const auto& cell_value = *value.asTypedValue();
     if (UNLIKELY(!isContainer(cell_value))) {
-      if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::WARN) {
-        raise_warning("min(): This will return the value instead of null, "
-                      "when hhvm.hack.lang.min_max_allow_degenerate=on");
-      } else if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::ON) {
-        return value;
-      }
-      raise_warning("min(): When only one parameter is given,"
-                    " it must be an array");
-      return init_null();
+      return value;
     }
 
     ArrayIter iter(cell_value);
     if (!iter) {
-      if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::WARN) {
-        raise_warning("min(): This will return null instead of false, "
-                      "when hhvm.hack.lang.min_max_allow_degenerate=on");
-      } else if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::ON) {
-        return init_null();
-      }
-      raise_warning("min(): Array must contain at least one element");
-      return false;
+      return init_null();
     }
-    Variant ret = iter.secondRefPlus();
+    auto ret = iter.secondValPlus();
     ++iter;
     for (; iter; ++iter) {
-      Variant currVal = iter.secondRefPlus();
-      if (less(currVal, ret)) {
-        ret = currVal;
+      auto const cur = iter.secondValPlus();
+      if (tvLess(cur, ret)) {
+        ret = cur;
       }
     }
-    return ret;
+    return Variant(VarNR(ret));
   }
 
-  Variant ret = value;
+  auto ret = *value.asTypedValue();
   for (ArrayIter iter(args); iter; ++iter) {
-    Variant currVal = iter.secondRef();
-    if (less(currVal, ret)) {
-      ret = currVal;
+    auto const cur = iter.secondVal();
+    if (tvLess(cur, ret)) {
+      ret = cur;
     }
   }
-  return ret;
+  return Variant(VarNR(ret));
 }
 
 Variant HHVM_FUNCTION(max,
                       const Variant& value,
                       const Array& args /* = null_array */) {
   if (args.empty()) {
-    const auto& cell_value = *value.asCell();
+    const auto& cell_value = *value.asTypedValue();
     if (UNLIKELY(!isContainer(cell_value))) {
-      if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::WARN) {
-        raise_warning("max(): This will return the value instead of null, "
-                      "when hhvm.hack.lang.min_max_allow_degenerate=on");
-      } else if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::ON) {
-        return value;
-      }
-      raise_warning("max(): When only one parameter is given,"
-                    " it must be an array");
-      return init_null();
+      return value;
     }
 
     ArrayIter iter(cell_value);
     if (!iter) {
-      if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::WARN) {
-        raise_warning("max(): This will return null instead of false, "
-                      "when hhvm.hack.lang.min_max_allow_degenerate=on");
-      } else if (RuntimeOption::MinMaxAllowDegenerate == HackStrictOption::ON) {
-        return init_null();
-      }
-      raise_warning("max(): Array must contain at least one element");
-      return false;
+      return init_null();
     }
-    Variant ret = iter.secondRefPlus();
+    auto ret = iter.secondValPlus();
     ++iter;
     for (; iter; ++iter) {
-      Variant currVal = iter.secondRefPlus();
-      if (more(currVal, ret)) {
-        ret = currVal;
+      auto const cur = iter.secondValPlus();
+      if (tvGreater(cur, ret)) {
+        ret = cur;
       }
     }
-    return ret;
+    return Variant(VarNR(ret));
   }
 
-  Variant ret = value;
+  auto ret = *value.asTypedValue();
   for (ArrayIter iter(args); iter; ++iter) {
-    Variant currVal = iter.secondRef();
-    if (more(currVal, ret)) {
-      ret = currVal;
+    auto const cur = iter.secondVal();
+    if (tvGreater(cur, ret)) {
+      ret = cur;
     }
   }
-  return ret;
+  return Variant(VarNR(ret));
 }
 
 /*
@@ -187,9 +152,9 @@ Variant HHVM_FUNCTION(abs, const Variant& number) {
   }
 }
 
-bool HHVM_FUNCTION(is_finite, double val) { return finite(val);}
-bool HHVM_FUNCTION(is_infinite, double val) { return isinf(val);}
-bool HHVM_FUNCTION(is_nan, double val) { return isnan(val);}
+bool HHVM_FUNCTION(is_finite, double val) { return std::isfinite(val);}
+bool HHVM_FUNCTION(is_infinite, double val) { return std::isinf(val);}
+bool HHVM_FUNCTION(is_nan, double val) { return std::isnan(val);}
 
 Variant HHVM_FUNCTION(ceil, const Variant& number) {
   int64_t ival;
@@ -265,11 +230,11 @@ Variant HHVM_FUNCTION(base_convert,
                       int64_t frombase,
                       int64_t tobase) {
   if (!string_validate_base(frombase)) {
-    throw_invalid_argument("Invalid frombase: %" PRId64, frombase);
+    raise_invalid_argument_warning("Invalid frombase: %" PRId64, frombase);
     return false;
   }
   if (!string_validate_base(tobase)) {
-    throw_invalid_argument("Invalid tobase: %" PRId64, tobase);
+    raise_invalid_argument_warning("Invalid tobase: %" PRId64, tobase);
     return false;
   }
   String str = number.toString();
@@ -293,7 +258,9 @@ static MaybeDataType convert_for_pow(const Variant& val,
       dval = val.toDouble();
       return KindOfDouble;
 
-    case KindOfStaticString:
+    case KindOfFunc:
+    case KindOfClass:
+    case KindOfPersistentString:
     case KindOfString: {
       auto dt = val.toNumeric(ival, dval, true);
       if ((dt != KindOfInt64) && (dt != KindOfDouble)) {
@@ -303,10 +270,21 @@ static MaybeDataType convert_for_pow(const Variant& val,
       return dt;
     }
 
+    case KindOfPersistentVec:
+    case KindOfVec:
+    case KindOfPersistentDict:
+    case KindOfDict:
+    case KindOfPersistentKeyset:
+    case KindOfKeyset:
+    case KindOfPersistentDArray:
+    case KindOfDArray:
+    case KindOfPersistentVArray:
+    case KindOfVArray:
+    case KindOfPersistentArray:
     case KindOfArray:
+    case KindOfClsMeth:
       // Not reachable since HHVM_FN(pow) deals with these base cases first.
-    case KindOfRef:
-    case KindOfClass:
+    case KindOfRecord:
       break;
   }
 
@@ -347,7 +325,8 @@ Variant HHVM_FUNCTION(pow, const Variant& base, const Variant& exp) {
   }
 
   auto const castableToNumber = [] (const ObjectData* obj) {
-    return obj->getAttribute(ObjectData::CallToImpl) && !obj->isCollection();
+    return !obj->isCollection() &&
+           obj->getVMClass()->rtAttribute(Class::CallToImpl);
   };
 
   // We'll have already raised a notice in convert_for_pow
@@ -400,20 +379,23 @@ int64_t HHVM_FUNCTION(getrandmax) { return RAND_MAX;}
 
 // Note that MSVC's rand is actually thread-safe to begin with
 // so no changes are actually needed to make it so.
+// For APPLE and MSFT configurations the rand() would be kept as thread local
+// For Linux the RadomBuf structure is beeing moved to RDS
 #ifdef __APPLE__
 static bool s_rand_is_seeded = false;
 #elif defined(_MSC_VER)
-static __thread bool s_rand_is_seeded = false;
+static __thread bool s_rand_is_seeded = false; // For now keep as thread local
 #else
 struct RandomBuf {
   random_data data;
   char        buf[128];
   enum {
-    Uninit = 0, ThreadInit, RequestInit
-  }           state;
+    Uninit = 0,
+    RequestInit
+  } state;
 };
 
-static __thread RandomBuf s_state;
+RDS_LOCAL(RandomBuf, rl_state);
 #endif
 
 static void randinit(uint32_t seed) {
@@ -424,16 +406,16 @@ static void randinit(uint32_t seed) {
   s_rand_is_seeded = true;
   srand(seed);
 #else
-  if (s_state.state == RandomBuf::Uninit) {
-    initstate_r(seed, s_state.buf, sizeof s_state.buf, &s_state.data);
+  if (rl_state->state == RandomBuf::Uninit) {
+    initstate_r(seed, rl_state->buf, sizeof rl_state->buf, &rl_state->data);
   } else {
-    srandom_r(seed, &s_state.data);
+    srandom_r(seed, &rl_state->data);
   }
-  s_state.state = RandomBuf::RequestInit;
+  rl_state->state = RandomBuf::RequestInit;
 #endif
 }
 
-void HHVM_FUNCTION(srand, const Variant& seed /* = null_variant */) {
+void HHVM_FUNCTION(srand, const Variant& seed /* = uninit_variant */) {
   if (seed.isNull()) {
     randinit(math_generate_seed());
     return;
@@ -447,11 +429,11 @@ void HHVM_FUNCTION(srand, const Variant& seed /* = null_variant */) {
 
 int64_t HHVM_FUNCTION(rand,
                       int64_t min /* = 0 */,
-                      const Variant& max /* = null_variant */) {
+                      const Variant& max /* = uninit_variant */) {
 #if defined(__APPLE__) || defined(_MSC_VER)
   if (!s_rand_is_seeded) {
 #else
-  if (s_state.state != RandomBuf::RequestInit) {
+  if (rl_state->state != RandomBuf::RequestInit) {
 #endif
     randinit(math_generate_seed());
   }
@@ -463,7 +445,7 @@ int64_t HHVM_FUNCTION(rand,
   number = rand();
 #else
   int32_t numberIn;
-  random_r(&s_state.data, &numberIn);
+  random_r(&rl_state->data, &numberIn);
   number = numberIn;
 #endif
   int64_t int_max = max.isNull() ? RAND_MAX : max.toInt64();
@@ -476,7 +458,7 @@ int64_t HHVM_FUNCTION(rand,
 int64_t HHVM_FUNCTION(mt_getrandmax) { return MT_RAND_MAX;}
 
 void HHVM_FUNCTION(mt_srand,
-                   const Variant& seed /* = null_variant */) {
+                   const Variant& seed /* = uninit_variant */) {
   if (seed.isNull()) {
     return math_mt_srand(math_generate_seed());
   }
@@ -489,7 +471,7 @@ void HHVM_FUNCTION(mt_srand,
 
 int64_t HHVM_FUNCTION(mt_rand,
                       int64_t min /* = 0 */,
-                      const Variant& max /* = null_variant */) {
+                      const Variant& max /* = uninit_variant */) {
   return math_mt_rand(min, max.isNull() ? RAND_MAX : max.toInt64());
 }
 
@@ -497,14 +479,10 @@ double HHVM_FUNCTION(lcg_value) { return math_combined_lcg();}
 
 Variant HHVM_FUNCTION(intdiv, int64_t numerator, int64_t divisor) {
   if (divisor == 0) {
-    // TODO(https://github.com/facebook/hhvm/issues/6012)
-    // This should throw a DivisionByZeroError.
-    SystemLib::throwInvalidOperationExceptionObject(Strings::DIVISION_BY_ZERO);
+    SystemLib::throwDivisionByZeroErrorObject(Strings::DIVISION_BY_ZERO);
   } else if (divisor == -1 &&
              numerator == std::numeric_limits<int64_t>::min()) {
-    // TODO(https://github.com/facebook/hhvm/issues/6012)
-    // This should throw an ArithmeticError.
-    SystemLib::throwInvalidOperationExceptionObject(
+    SystemLib::throwArithmeticErrorObject(
       "Division of PHP_INT_MIN by -1 is not an integer");
   }
   return numerator/divisor;
@@ -512,48 +490,37 @@ Variant HHVM_FUNCTION(intdiv, int64_t numerator, int64_t divisor) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-const StaticString s_PHP_ROUND_HALF_UP("PHP_ROUND_HALF_UP");
-const StaticString s_PHP_ROUND_HALF_DOWN("PHP_ROUND_HALF_DOWN");
-const StaticString s_PHP_ROUND_HALF_EVEN("PHP_ROUND_HALF_EVEN");
-const StaticString s_PHP_ROUND_HALF_ODD("PHP_ROUND_HALF_ODD");
-
-#define ICONST(nm)                                                             \
-  Native::registerConstant<KindOfInt64>(makeStaticString(#nm), k_##nm)         \
-
-#define DCONST(nm)                                                             \
-  Native::registerConstant<KindOfDouble>(makeStaticString("M_"#nm), k_M_##nm)  \
-
-void StandardExtension::requestInit() {
+void StandardExtension::requestInitMath() {
 #if !defined(__APPLE__) && !defined(_MSC_VER)
-  if (s_state.state == RandomBuf::RequestInit) {
-    s_state.state = RandomBuf::ThreadInit;
+  if (rl_state->state == RandomBuf::RequestInit) {
+    rl_state->state = RandomBuf::Uninit;
   }
 #endif
 }
 
 void StandardExtension::initMath() {
-  ICONST(PHP_ROUND_HALF_UP);
-  ICONST(PHP_ROUND_HALF_DOWN);
-  ICONST(PHP_ROUND_HALF_EVEN);
-  ICONST(PHP_ROUND_HALF_ODD);
+  HHVM_RC_INT_SAME(PHP_ROUND_HALF_UP);
+  HHVM_RC_INT_SAME(PHP_ROUND_HALF_DOWN);
+  HHVM_RC_INT_SAME(PHP_ROUND_HALF_EVEN);
+  HHVM_RC_INT_SAME(PHP_ROUND_HALF_ODD);
 
-  DCONST(PI);
-  DCONST(1_PI);
-  DCONST(2_PI);
-  DCONST(2_SQRTPI);
-  DCONST(E);
-  DCONST(EULER);
-  DCONST(LN10);
-  DCONST(LN2);
-  DCONST(LNPI);
-  DCONST(LOG10E);
-  DCONST(LOG2E);
-  DCONST(PI_2);
-  DCONST(PI_4);
-  DCONST(SQRT1_2);
-  DCONST(SQRT2);
-  DCONST(SQRT3);
-  DCONST(SQRTPI);
+  HHVM_RC_DBL(M_PI, k_M_PI);
+  HHVM_RC_DBL(M_1_PI, k_M_1_PI);
+  HHVM_RC_DBL(M_2_PI, k_M_2_PI);
+  HHVM_RC_DBL(M_2_SQRTPI, k_M_2_SQRTPI);
+  HHVM_RC_DBL(M_E, k_M_E);
+  HHVM_RC_DBL(M_EULER, k_M_EULER);
+  HHVM_RC_DBL(M_LN10, k_M_LN10);
+  HHVM_RC_DBL(M_LN2, k_M_LN2);
+  HHVM_RC_DBL(M_LNPI, k_M_LNPI);
+  HHVM_RC_DBL(M_LOG10E, k_M_LOG10E);
+  HHVM_RC_DBL(M_LOG2E, k_M_LOG2E);
+  HHVM_RC_DBL(M_PI_2, k_M_PI_2);
+  HHVM_RC_DBL(M_PI_4, k_M_PI_4);
+  HHVM_RC_DBL(M_SQRT1_2, k_M_SQRT1_2);
+  HHVM_RC_DBL(M_SQRT2, k_M_SQRT2);
+  HHVM_RC_DBL(M_SQRT3, k_M_SQRT3);
+  HHVM_RC_DBL(M_SQRTPI, k_M_SQRTPI);
 
   HHVM_FE(min);
   HHVM_FE(max);

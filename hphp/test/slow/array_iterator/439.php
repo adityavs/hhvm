@@ -1,7 +1,7 @@
-<?php
+<?hh
 
 class MyIterator implements Iterator{
-  private $var = array();
+  private $var = varray[];
   public function __construct($array)  {
     echo "constructing
 ";
@@ -12,22 +12,30 @@ class MyIterator implements Iterator{
   public function rewind() {
     echo "rewinding
 ";
-    reset($this->var);
+    $__var = $this->var;
+    reset(inout $__var);
+    $this->var = $__var;
   }
   public function current() {
-    $var = current($this->var);
+    $__var = $this->var;
+    $var = current($__var);
+    $this->var = $__var;
     echo "current: $var
 ";
     return $var;
   }
   public function key() {
-    $var = key($this->var);
+    $__var = $this->var;
+    $var = key($__var);
+    $this->var = $__var;
     echo "key: $var
 ";
     return $var;
   }
   public function next() {
-    $var = next($this->var);
+    $__var = $this->var;
+    $var = next(inout $__var);
+    $this->var = $__var;
     echo "next: $var
 ";
     return $var;
@@ -39,33 +47,32 @@ class MyIterator implements Iterator{
     return $var;
   }
 }
-$values = array(1,2,3);
-$it = new MyIterator($values);
-foreach ($it as $a => $b) {
-  print "$a: $b
-";
-}
-$itp = "it";
-foreach ($$itp as $a => $b) {
-  print "$a: $b
-";
-}
 function getIter() {
-  $values = array(1,2,3);
+  $values = varray[1,2,3];
   $it = new MyIterator($values);
   return $it;
-}
-foreach (getIter() as $a => $b) {
-  print "$a: $b
-";
 }
 class MyIteratorAggregate implements IteratorAggregate {
   public function getIterator() {
     return getIter();
   }
 }
+
+<<__EntryPoint>>
+function main_439() {
+$values = varray[1,2,3];
+$it = new MyIterator($values);
+foreach ($it as $a => $b) {
+  print "$a: $b
+";
+}
+foreach (getIter() as $a => $b) {
+  print "$a: $b
+";
+}
 $obj = new MyIteratorAggregate();
 foreach ($obj as $a => $b) {
   print "$a: $b
 ";
+}
 }

@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
   public function foo() {
@@ -27,9 +27,10 @@ class B extends A {
     $a->f();
   }
 }
-
+<<__EntryPoint>> function main(): void {
 $a = new A;
 $b = new B();
 $b->foo();
 $b->g($a);
 #$b->h($a);
+}

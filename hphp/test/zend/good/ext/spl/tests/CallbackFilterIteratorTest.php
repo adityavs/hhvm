@@ -1,4 +1,4 @@
-<?php
+<?hh
 
 class A {
     function test($value, $key, $inner) {
@@ -13,22 +13,22 @@ class B {
 }
 
 function test($value, $key, $inner) {
-	printf("%s / %s / %d / %d\n"
-		, $value
-		, $key
-		, $value == $inner->current()
-		, $key == $inner->key()
-	);
-	return $value === 1 || $value === 4;
+    printf("%s / %s / %d / %d\n"
+        , $value
+        , $key
+        , $value == $inner->current()
+        , $key == $inner->key()
+    );
+    return $value === 1 || $value === 4;
 }
-
-$tests = array(
-    'instance method'    => function() { return array(new A, 'test'); },
-    'static method'      => function() { return array('B', 'test'); },
+<<__EntryPoint>> function main(): void {
+$tests = darray[
+    'instance method'    => function() { return varray[new A, 'test']; },
+    'static method'      => function() { return varray['B', 'test']; },
     'static method (2)'  => function() { return 'B::test'; },
     'function'           => function() { return 'test'; },
     'anonymous function' => function() { return function($value, $key, $inner) { return test($value, $key, $inner); }; },
-);
+];
 
 foreach($tests as $name => $test) {
 
@@ -42,7 +42,7 @@ foreach($tests as $name => $test) {
         echo "=> $value\n";
     }
 
-	// same test, with no reference to callback
+    // same test, with no reference to callback
 
     $it = new ArrayIterator(range(1, 5));
     $it = new CallbackFilterIterator($it, $test());
@@ -51,4 +51,5 @@ foreach($tests as $name => $test) {
     foreach($it as $value) {
         echo "=> $value\n";
     }
+}
 }

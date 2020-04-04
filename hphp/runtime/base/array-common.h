@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,7 +23,7 @@ namespace HPHP {
 //////////////////////////////////////////////////////////////////////
 
 struct ArrayData;
-struct MArrayIter;
+struct ObjectData;
 struct Variant;
 
 //////////////////////////////////////////////////////////////////////
@@ -43,18 +43,26 @@ struct ArrayCommon {
   static ssize_t ReturnInvalidIndex(const ArrayData*);
 
   /*
-   * The normal case for ValidMArrayIter is shared between packed and
-   * mixed arrays.
-   */
-  static bool ValidMArrayIter(const ArrayData*, const MArrayIter&);
-
-  /*
-   * Generic Pop and Dequeue implementations in terms of other
-   * functions.
+   * Generic Pop and Dequeue implementations in terms of other functions.
    */
   static ArrayData* Pop(ArrayData*, Variant&);
   static ArrayData* Dequeue(ArrayData*, Variant&);
+
+  static ArrayData* ToVec(ArrayData*, bool);
+  static ArrayData* ToDict(ArrayData*, bool);
+  static ArrayData* ToKeyset(ArrayData*, bool);
+
+  static ArrayData* ToVArray(ArrayData*, bool);
+  static ArrayData* ToDArray(ArrayData*, bool);
 };
+
+//////////////////////////////////////////////////////////////////////
+
+ArrayData* castObjToVec(ObjectData*);
+ArrayData* castObjToDict(ObjectData*);
+ArrayData* castObjToKeyset(ObjectData*);
+ArrayData* castObjToVArray(ObjectData*);
+ArrayData* castObjToDArray(ObjectData*);
 
 //////////////////////////////////////////////////////////////////////
 

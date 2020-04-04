@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,31 +25,37 @@
 
 #include <sqlite3.h>
 
-// For sysconf(3).
-#include <unistd.h>
 // For getpwuid_r(3).
 #include <sys/types.h>
 #include <pwd.h>
 
+#include "hphp/runtime/base/repo-autoload-map.h"
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/litstr-repo-proxy.h"
 #include "hphp/runtime/vm/preclass-emitter.h"
+#include "hphp/runtime/vm/record-emitter.h"
+#include "hphp/runtime/vm/repo-status.h"
 #include "hphp/runtime/vm/unit-emitter.h"
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Repo : public RepoProxy {
-  static SimpleMutex s_lock;
-  static unsigned s_nRepos;
+namespace Native {
+struct FuncTable;
+}
 
-public:
+struct Repo : RepoProxy {
   struct GlobalData;
 
   // Do not directly instantiate this class; a thread-local creates one per
   // thread on demand when Repo::get() is called.
   static Repo& get();
+  // Prefork is called before forking. It attempts to shut down other
+  // threads and returns true if forking should be prevented, false if
+  // it's ok to proceed.
   static bool prefork();
   static void postfork(pid_t pid);
 
@@ -61,10 +67,12 @@ public:
   static void shutdown();
 
   Repo();
-  ~Repo();
+  ~Repo() noexcept;
+  Repo(const Repo&) = delete;
+  Repo& operator=(const Repo&) = delete;
 
   const char* dbName(int repoId) const {
-    assert(repoId < RepoIdCount);
+    assertx(repoId < RepoIdCount);
     return kDbs[repoId];
   }
   sqlite3* dbc() const { return m_dbc; }
@@ -75,7 +83,7 @@ public:
     case UnitOrigin::Eval:
       return m_evalRepoId;
     default:
-      assert(false);
+      assertx(false);
       return RepoIdInvalid;
     }
   }
@@ -89,15 +97,21 @@ public:
 
   UnitRepoProxy& urp() { return m_urp; }
   PreClassRepoProxy& pcrp() { return m_pcrp; }
+  RecordRepoProxy& rrp() { return m_rrp; }
   FuncRepoProxy& frp() { return m_frp; }
   LitstrRepoProxy& lsrp() { return m_lsrp; }
 
   static void setCliFile(const std::string& cliFile);
 
-  std::unique_ptr<Unit> loadUnit(const std::string& name, const MD5& md5);
-  bool findFile(const char* path, const std::string& root, MD5& md5);
-  bool insertMd5(UnitOrigin unitOrigin, UnitEmitter* ue, RepoTxn& txn);
-  void commitMd5(UnitOrigin unitOrigin, UnitEmitter* ue);
+  std::unique_ptr<Unit> loadUnit(const folly::StringPiece name,
+                                 const SHA1& sha1,
+                                 const Native::FuncTable&);
+  void forgetUnit(const std::string& path);
+  RepoStatus findFile(const char* path, const std::string& root, SHA1& sha1);
+  RepoStatus findPath(int64_t unitSn, const std::string& root, String& path);
+  RepoStatus findUnit(const char* path, const std::string& root, int64_t& unitSn);
+  RepoStatus insertSha1(UnitOrigin unitOrigin, UnitEmitter* ue, RepoTxn& txn);
+  void commitSha1(UnitOrigin unitOrigin, UnitEmitter* ue);
 
   /*
    * Return the largest size for a static string that can be inserted into the
@@ -106,17 +120,23 @@ public:
   size_t stringLengthLimit() const;
 
   /*
-   * Return a vector of (filepath, MD5) for every unit in central
+   * Return a vector of (filepath, SHA1) for every unit in central
    * repo.
    */
-  std::vector<std::pair<std::string,MD5>> enumerateUnits(
-    int repoId, bool preloadOnly, bool warn);
+  std::vector<std::pair<std::string,SHA1>> enumerateUnits(
+    int repoId, bool warn);
+
+  /*
+   * Check if the repo has global data. If it does the repo was built using
+   * WholeProgram mode.
+   */
+  bool hasGlobalData();
 
   /*
    * Load the repo-global metadata table, including the global litstr
    * table.  Normally called during process initialization.
    */
-  void loadGlobalData(bool allowFailure = false);
+  void loadGlobalData(bool readArrayTable = true);
 
   /*
    * Access to global data.
@@ -125,7 +145,7 @@ public:
    * RuntimeOption::RepoAuthoritative.
    */
   static const GlobalData& global() {
-    assert(RuntimeOption::RepoAuthoritative);
+    assertx(RuntimeOption::RepoAuthoritative);
     return s_globalData;
   }
 
@@ -137,7 +157,7 @@ public:
    * No other threads may be reading or writing the repo GlobalData
    * when this is called.
    */
-  void saveGlobalData(GlobalData newData);
+  void saveGlobalData(GlobalData&& newData);
 
  private:
   /*
@@ -145,38 +165,59 @@ public:
    */
   struct InsertFileHashStmt : public RepoProxy::Stmt {
     InsertFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    void insert(RepoTxn& txn, const StringData* path, const MD5& md5);
+    void insert(RepoTxn& txn, const StringData* path, const SHA1& sha1);
+    // throws(RepoExc)
   };
 
   struct GetFileHashStmt : public RepoProxy::Stmt {
     GetFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
-    bool get(const char* path, MD5& md5);
+    RepoStatus get(const char* path, SHA1& sha1);
+  };
+
+  struct RemoveFileHashStmt : public RepoProxy::Stmt {
+    RemoveFileHashStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    void remove(RepoTxn& txn, const std::string& path);
+  };
+
+  struct GetUnitPathStmt : public RepoProxy::Stmt {
+    GetUnitPathStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    RepoStatus get(int64_t unitSn, String& path);
+  };
+
+  struct GetUnitStmt : public RepoProxy::Stmt {
+    GetUnitStmt(Repo& repo, int repoId) : Stmt(repo, repoId) {}
+    RepoStatus get(const char* path, int64_t& unitSn);
   };
 
   InsertFileHashStmt m_insertFileHash[RepoIdCount];
   GetFileHashStmt m_getFileHash[RepoIdCount];
+  RemoveFileHashStmt m_removeFileHash[RepoIdCount];
+  GetUnitPathStmt m_getUnitPath[RepoIdCount];
+  GetUnitStmt m_getUnit[RepoIdCount];
 
  public:
   std::string table(int repoId, const char* tablePrefix);
-  void exec(const std::string& sQuery);
+  void exec(const std::string& sQuery); // throws(RepoExc)
 
-  void begin();
+  RepoTxn begin(); // throws(RepoExc)
  private:
-  void txPop();
- public:
+  friend struct RepoTxn;
+  void txPop(); // throws(RepoExc)
   void rollback(); // nothrow
-  void commit();
-  bool insertUnit(UnitEmitter* ue, UnitOrigin unitOrigin,
-                  RepoTxn& txn); // nothrow
+  void commit(); // throws(RepoExc)
+ public:
+  RepoStatus insertUnit(UnitEmitter* ue, UnitOrigin unitOrigin,
+                        RepoTxn& txn); // nothrow
   void commitUnit(UnitEmitter* ue, UnitOrigin unitOrigin); // nothrow
 
-  // All database table names use the schema ID (md5 checksum based on the
+  // All database table names use the schema ID (sha1 checksum based on the
   // source code) as a suffix.  For example, if the schema ID is
-  // "b02c58478ce89719782fea89f3009295", the file magic is stored in the
-  // magic_b02c58478ce89719782fea89f3009295 table:
+  // "b02c58478ce89719782fea89f3009295faceb00c", the file magic is stored in the
+  // magic_b02c58478ce89719782fea89f3009295faceb00c table:
   //
-  //   CREATE TABLE magic_b02c58478ce89719782fea89f3009295(product[TEXT]);
-  //   INSERT INTO magic_b02c58478ce89719782fea89f3009295 VALUES(
+  //   CREATE TABLE magic_b02c58478ce89719782fea89f3009295faceb00c(
+  //     product[TEXT]);
+  //   INSERT INTO magic_b02c58478ce89719782fea89f3009295faceb00c VALUES(
   //     'facebook.com HipHop Virtual Machine bytecode repository');
   //
   // This allows multiple schemas to coexist in the same database, which is
@@ -185,25 +226,24 @@ public:
  private:
   // Magic product constant used to distinguish a .hhbc database.
   static const char* kMagicProduct;
-  static const char* kSchemaPlaceholder;
-
   static const char* kDbs[RepoIdCount];
 
   void connect();
-  void disconnect();
+  void disconnect() noexcept;
   void initCentral();
-  std::string insertSchema(const char* path);
-  bool openCentral(const char* repoPath, std::string& errorMsg);
+  RepoStatus openCentral(const char* repoPath, std::string& errorMsg);
   void initLocal();
   void attachLocal(const char* repoPath, bool isWritable);
-  void pragmas(int repoId);
-  void getIntPragma(int repoId, const char* name, int& val);
-  void setIntPragma(int repoId, const char* name, int val);
+  void pragmas(int repoId); // throws(RepoExc)
+  void getIntPragma(int repoId, const char* name, int& val); // throws(RepoExc)
+  void setIntPragma(int repoId, const char* name, int val); // throws(RepoExc)
   void getTextPragma(int repoId, const char* name, std::string& val);
+  // throws(RepoExc)
   void setTextPragma(int repoId, const char* name, const char* val);
-  bool initSchema(int repoId, bool& isWritable, std::string& errorMsg);
+  // throws(RepoExc)
+  RepoStatus initSchema(int repoId, bool& isWritable, std::string& errorMsg);
   bool schemaExists(int repoId);
-  bool createSchema(int repoId, std::string& errorMsg);
+  RepoStatus createSchema(int repoId, std::string& errorMsg);
   bool writable(int repoId);
 
 private:
@@ -223,6 +263,7 @@ private:
   RepoStmt m_commitStmt;
   UnitRepoProxy m_urp;
   PreClassRepoProxy m_pcrp;
+  RecordRepoProxy m_rrp;
   FuncRepoProxy m_frp;
   LitstrRepoProxy m_lsrp;
 };
@@ -230,9 +271,10 @@ private:
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Try to commit a vector of unit emitters to the current repo.
+ * Try to commit a vector of unit emitters to the current repo.  Note that
+ * errors are ignored!
  */
-void batchCommit(std::vector<std::unique_ptr<UnitEmitter>>);
+void batchCommit(const std::vector<std::unique_ptr<UnitEmitter>>&);
 
 //////////////////////////////////////////////////////////////////////
 

@@ -1,4 +1,4 @@
-<?php
+<?hh
 function gcd($x, $y) {
   if ($x >= $y) {
     $a = $x;
@@ -14,5 +14,7 @@ function gcd($x, $y) {
   }
   return gcd($b+0, $a-$b);
 }
+<<__EntryPoint>> function main(): void {
 echo gcd(330, 462);
 echo "\n";
+}

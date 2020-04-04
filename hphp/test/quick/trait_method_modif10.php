@@ -1,4 +1,4 @@
-<?php
+<?hh
 trait T {
   abstract static function f();
 }
@@ -13,5 +13,6 @@ class Bar extends Foo {
     echo "Foo\n";
   }
 }
-
+<<__EntryPoint>> function main(): void {
 Bar::f();
+}

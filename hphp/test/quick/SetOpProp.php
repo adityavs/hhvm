@@ -1,13 +1,11 @@
-<?php
-
-print "Test begin\n";
+<?hh
 
 class C {
   public $p = 0;
 }
 
 class D {
-  private $container = array("a" => "D::a", "b" => 42);
+  private $container = darray["a" => "D::a", "b" => 42];
   public $p = 0;
   public function __get($k) {
     print "In D::__get($k)\n";
@@ -16,7 +14,7 @@ class D {
 }
 
 class E {
-  private $container = array("a" => "E::a", "b" => 42);
+  private $container = darray["a" => "E::a", "b" => 42];
   public $p = 0;
   public function __get($k) {
     print "In E::__get($k)\n";
@@ -27,6 +25,8 @@ class E {
     $this->container[$k] = $v;
   }
 }
+<<__EntryPoint>> function main(): void {
+print "Test begin\n";
 
 $o = new C;
 $o->a .= "<a>";
@@ -71,3 +71,4 @@ print_r($o);
 print "\n";
 
 print "Test end\n";
+}

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,8 +24,9 @@
 #include "hphp/util/htonll.h"
 
 #include <sys/types.h>
-#include <unistd.h>
 #include <stdexcept>
+
+#include <folly/portability/Unistd.h>
 
 namespace HPHP { namespace thrift {
 ///////////////////////////////////////////////////////////////////////////////
@@ -64,13 +65,16 @@ extern const StaticString
   s_val,
   s_elem,
   s_var,
+  s_union,
   s_type,
+  s__type,
   s_ktype,
   s_vtype,
   s_etype,
   s_format,
   s_collection,
-  s_TSPEC,
+  s_harray,
+  s_SPEC,
   s_TProtocolException,
   s_TApplicationException;
 
@@ -183,11 +187,11 @@ struct PHPInputTransport {
   ~PHPInputTransport() {
     try {
       put_back();
-    } catch (Exception &e) {
-      Logger::Error("%s", e.getMessage().c_str());
+    } catch (Exception& e) {
+      Logger::Error(e.getMessage());
     } catch (Object &e) {
       try {
-        Logger::Error("%s", e.toString().c_str());
+        Logger::Error(throwable_to_string(e.get()).toCppString());
       } catch (...) {
         Logger::Error("(e.toString() failed)");
       }
@@ -260,10 +264,9 @@ struct PHPInputTransport {
 
 private:
   void refill(size_t len) {
-    assert(buffer_used == 0);
+    assertx(buffer_used == 0);
     len = std::max<size_t>(len, SIZE);
-    buffer =
-      m_transport->o_invoke_few_args(s_read, 1, (int64_t)len);
+    buffer = m_transport->o_invoke_few_args(s_read, 1, (int64_t)len).toString();
     buffer_used = buffer.size();
     buffer_ptr = buffer.data();
   }

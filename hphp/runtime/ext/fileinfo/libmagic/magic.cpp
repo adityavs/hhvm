@@ -31,14 +31,10 @@
 FILE_RCSID("@(#)$File: magic.c,v 1.78 2013/01/07 18:20:19 christos Exp $")
 #endif  /* lint */
 
+#include "hphp/util/assertions.h"
 #include "magic.h" // @nolint
 
 #include <stdlib.h>
-#ifdef PHP_WIN32
-#include "win32/unistd.h" // @nolint
-#else
-#include <unistd.h>
-#endif
 #include <string.h>
 
 #ifdef PHP_WIN32
@@ -46,6 +42,8 @@ FILE_RCSID("@(#)$File: magic.c,v 1.78 2013/01/07 18:20:19 christos Exp $")
 #endif
 
 #include <limits.h>  /* for PIPE_BUF */
+
+#include <folly/portability/Unistd.h>
 
 #if defined(HAVE_UTIMES)
 # include <sys/time.h>
@@ -55,10 +53,6 @@ FILE_RCSID("@(#)$File: magic.c,v 1.78 2013/01/07 18:20:19 christos Exp $")
 # elif defined(HAVE_UTIME_H)
 #  include <utime.h>
 # endif
-#endif
-
-#ifdef HAVE_UNISTD_H
-#include <unistd.h>  /* for read() */
 #endif
 
 #ifndef PIPE_BUF
@@ -228,6 +222,8 @@ magic_open(int flags)
 private int
 unreadable_info(struct magic_set *ms, mode_t md, const char *file)
 {
+  if (!file) not_reached();
+
   /* We cannot open it, but we were able to stat it. */
   if (access(file, W_OK) == 0)
     if (file_printf(ms, "writable, ") == -1)
@@ -279,10 +275,12 @@ magic_list(struct magic_set *ms, const char *magicfile)
   return file_apprentice(ms, magicfile, FILE_LIST);
 }
 
-private void
-close_and_restore(const struct magic_set *ms, const char *name, int fd,
-    const struct stat *sb)
-{
+private
+void close_and_restore(const struct magic_set* ms, const char* name, int /*fd*/,
+                       const struct stat* sb) {
+
+  if (name == NULL)
+    return;
 
   if ((ms->flags & MAGIC_PRESERVE_ATIME) != 0) {
     /*
@@ -313,9 +311,8 @@ close_and_restore(const struct magic_set *ms, const char *name, int fd,
 /*
  * find type of descriptor
  */
-public const char *
-magic_descriptor(struct magic_set *ms, int fd)
-{
+public
+const char* magic_descriptor(struct magic_set* ms, int /*fd*/) {
   if (ms == NULL)
     return NULL;
   return file_or_stream(ms, NULL, NULL);

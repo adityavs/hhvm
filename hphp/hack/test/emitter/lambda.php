@@ -34,36 +34,30 @@ function wait(): Awaitable<void> {
 class Argh {
   public static async function afoo(int $x): Awaitable<void> {
     await wait();
-    $a = array($x, $x+1, $x+2);
+    $a = varray[$x, $x+1, $x+2];
     $y = await gena_(array_map(async $y ==> $x * $x * $y + foo($x), $a));
     var_dump($y);
   }
 }
 
 function prep<T>(Awaitable<T> $aw): T {
-  /* HH_FIXME[4053]: WaitHandle missing join in hh_single_type_check */
-  return $aw->getWaitHandle()->join();
+  return HH\Asio\join($aw);
 }
-function gena_<Tk, Tv>(
-  KeyedTraversable<Tk, Awaitable<Tv>> $awaitables
-  ): Awaitable<array<Tv>> {
-  $wait_handles = array();
-  foreach ($awaitables as $index => $awaitable) {
-    $wait_handles[$index] = $awaitable->getWaitHandle();
-  }
-  /* HH_FIXME[2049] */
-  /* HH_FIXME[4026] */
-  return GenArrayWaitHandle::create($wait_handles);
+async function gena_<Tk, Tv>(
+  KeyedTraversable<Tk, Awaitable<Tv>> $awaitables,
+): Awaitable<array<Tv>> {
+  await AwaitAllWaitHandle::fromArray($awaitables);
+  return array_map($wh ==> \HH\Asio\result($wh), $awaitables);
 }
 
 async function lurr(): Awaitable<void> {
   $i = 12;
-  await gena_(array(Argh::afoo(100),
+  await gena_(varray[Argh::afoo(100),
                     async {
                       await wait();
                       return await Argh::afoo($i);
                     }
-                   ));
+                   ]);
 }
 
 final class C2 {

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,6 +15,10 @@
 */
 
 #include "hphp/runtime/server/source-root-info.h"
+
+#include <sstream>
+
+#include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/config.h"
 #include "hphp/runtime/base/php-globals.h"
@@ -26,13 +30,10 @@
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/transport.h"
 
-using std::map;
-
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_path);
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_phproot);
+THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_path);
 
 const StaticString s_default("default");
 const StaticString s___builtin("__builtin");
@@ -40,7 +41,6 @@ SourceRootInfo::SourceRootInfo(Transport* transport)
     : m_sandboxCond(RuntimeOption::SandboxMode ? SandboxCondition::On :
                                                  SandboxCondition::Off) {
   s_path.destroy();
-  s_phproot.destroy();
 
   auto documentRoot = transport->getDocumentRoot();
   if (!documentRoot.empty()) {
@@ -58,22 +58,34 @@ SourceRootInfo::SourceRootInfo(Transport* transport)
   Variant r = preg_match(String(RuntimeOption::SandboxPattern.c_str(),
                                 RuntimeOption::SandboxPattern.size(),
                                 CopyString), host, &matches);
-  if (!same(r, 1)) {
+  if (!same(r, static_cast<int64_t>(1))) {
+    auto const user = RO::GetDefaultUser();
+    if (!user.empty()) {
+      m_user = user;
+      m_sandbox = s_default;
+      createFromUserConfig();
+      if (sandboxOn()) *s_path.getCheck() = m_path.c_str();
+      return;
+    }
     m_sandboxCond = SandboxCondition::Off;
     return;
   }
-  if (RuntimeOption::SandboxFromCommonRoot) {
-    String sandboxName = matches.toArray().rvalAt(1).toString();
-    createFromCommonRoot(sandboxName);
+
+  auto const alias = RO::SandboxHostAlias;
+  auto const name = tvCastToString(matches.toArray().rval(1).tv());
+  if (!alias.empty() && !strcmp(name.data(), alias.data())) {
+    m_sandboxCond = SandboxCondition::Off;
+    return;
+  } else if (RuntimeOption::SandboxFromCommonRoot) {
+    createFromCommonRoot(name);
   } else {
-    Array pair = StringUtil::Explode(
-      matches.toArray().rvalAt(1).toString(), "-", 2).toArray();
-    m_user = pair.rvalAt(0).toString();
+    Array pair = StringUtil::Explode(name, "-", 2).toArray();
+    m_user = tvCastToString(pair.rval(0).tv());
     bool defaultSb = pair.size() == 1;
     if (defaultSb) {
       m_sandbox = s_default;
     } else {
-      m_sandbox = pair.rvalAt(1).toString();
+      m_sandbox = tvCastToString(pair.rval(1).tv());
     }
 
     createFromUserConfig();
@@ -86,7 +98,6 @@ SourceRootInfo::SourceRootInfo(const std::string &user,
     : m_sandboxCond(RuntimeOption::SandboxMode ? SandboxCondition::On :
                                                  SandboxCondition::Off) {
   s_path.destroy();
-  s_phproot.destroy();
   if (!sandboxOn()) return;
   m_user = user;
   m_sandbox = sandbox;
@@ -116,35 +127,31 @@ void SourceRootInfo::createFromCommonRoot(const String &sandboxName) {
 }
 
 void SourceRootInfo::createFromUserConfig() {
-  String homePath = String(RuntimeOption::SandboxHome) + "/" + m_user + "/";
-  {
-    struct stat hstat;
-    if (stat(homePath.c_str(), &hstat) != 0) {
-      if (!RuntimeOption::SandboxFallback.empty()) {
-        homePath = String(RuntimeOption::SandboxFallback) + "/" + m_user + "/";
-        if (stat(homePath.c_str(), &hstat) != 0) {
-          m_sandboxCond = SandboxCondition::Off;
-          return;
-        }
-      }
-    }
+  auto maybeHomePath = RuntimeOption::GetHomePath(m_user.get()->slice());
+  if (!maybeHomePath) {
+    m_sandboxCond = SandboxCondition::Off;
+    return;
   }
 
-  std::string confFileName = std::string(homePath.c_str()) +
-    RuntimeOption::SandboxConfFile;
   IniSetting::Map ini = IniSetting::Map::object;
   Hdf config;
-  String sp, lp, alp, userOverride;
-  try {
-    Config::ParseConfigFile(confFileName, ini, config);
-    userOverride = Config::Get(ini, config, "user_override");
-    sp = Config::Get(ini, config, (m_sandbox + ".path").c_str());
-    lp = Config::Get(ini, config, (m_sandbox + ".log").c_str());
-    alp = Config::Get(ini, config, (m_sandbox + ".accesslog").c_str());
-  } catch (HdfException &e) {
-    Logger::Error("%s ignored: %s", confFileName.c_str(),
-                  e.getMessage().c_str());
+  bool success = RuntimeOption::ReadPerUserSettings(
+      (*maybeHomePath) / RuntimeOption::SandboxConfFile, ini, config
+  );
+  if (!success) {
+    m_sandboxCond = SandboxCondition::Off;
+    return;
   }
+
+  // Do not prepend "hhvm." to these when accessing.
+  String userOverride = Config::Get(ini, config, "user_override", "", false);
+  String sp = Config::Get(
+      ini, config, (m_sandbox + ".path").c_str(), "", false
+  );
+  String lp = Config::Get(ini, config, (m_sandbox + ".log").c_str(), "", false);
+  String alp = Config::Get(
+      ini, config, (m_sandbox + ".accesslog").c_str(), "", false
+  );
   auto sandbox_servervars_callback = [&] (const IniSetting::Map &ini_ss,
                                           const Hdf &hdf_ss,
                                           const std::string &ini_ss_key) {
@@ -167,10 +174,11 @@ void SourceRootInfo::createFromUserConfig() {
     m_sandboxCond = SandboxCondition::Error;
     return;
   }
+  String homePath = maybeHomePath->native();
   if (sp.charAt(0) == '/') {
     m_path = std::move(sp);
   } else {
-    m_path = homePath + sp;
+    m_path = homePath + "/" + sp;
   }
   if (m_path.charAt(m_path.size() - 1) != '/') {
     m_path += "/";
@@ -209,19 +217,26 @@ void SourceRootInfo::handleError(Transport *t) {
 ///////////////////////////////////////////////////////////////////////////////
 
 Array SourceRootInfo::setServerVariables(Array server) const {
-  if (!sandboxOn()) return std::move(server);
-  for (auto it = RuntimeOption::SandboxServerVariables.begin();
-       it != RuntimeOption::SandboxServerVariables.end();
-       ++it) {
-    server.set(String(it->first),
-               String(parseSandboxServerVariable(it->second)));
+  if (!sandboxOn()) return server;
+  for (auto const& it : RuntimeOption::SandboxServerVariables) {
+    String idx(it.first);
+    const auto arrkey = server.convertKey<IntishCast::Cast>(idx);
+    String str(parseSandboxServerVariable(it.second));
+    server.set(arrkey, make_tv<KindOfString>(str.get()), true);
   }
 
   if (!m_serverVars.empty()) {
-    server += m_serverVars;
+    IterateKVNoInc(
+      m_serverVars.get(),
+      [&](TypedValue key, TypedValue val) {
+        if (!server.exists(key)) {
+          server.set(key, val);
+        }
+      }
+    );
   }
 
-  return std::move(server);
+  return server;
 }
 
 Eval::DSandboxInfo SourceRootInfo::getSandboxInfo() const {
@@ -245,7 +260,7 @@ SourceRootInfo::parseSandboxServerVariable(const std::string &format) const {
           // skip trailing /
           const char *data = m_path.data();
           int n = m_path.size() - 1;
-          assert(data[n] == '/');
+          assertx(data[n] == '/');
           res.write(data, n);
           break;
         }
@@ -269,21 +284,6 @@ std::string SourceRootInfo::path() const {
   } else {
     return RuntimeOption::SourceRoot;
   }
-}
-
-const StaticString
-  s_SERVER("_SERVER"),
-  s_PHP_ROOT("PHP_ROOT");
-
-std::string& SourceRootInfo::initPhpRoot() {
-  auto v = php_global(s_SERVER).toArray().rvalAt(s_PHP_ROOT);
-  if (v.isString()) {
-    *s_phproot.getCheck() = std::string(v.asCStrRef().data()) + "/";
-  } else {
-    // Our best guess at the source root.
-    *s_phproot.getCheck() = GetCurrentSourceRoot();
-  }
-  return *s_phproot.getCheck();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

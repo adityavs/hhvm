@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,14 +21,20 @@
 namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
-Vlabel Vunit::makeBlock(AreaIndex area) {
+constexpr int Vframe::Top;
+
+Vlabel Vunit::makeBlock(AreaIndex area, uint64_t weight) {
   auto i = blocks.size();
-  blocks.emplace_back(area);
+  blocks.emplace_back(area, weight);
   return Vlabel{i};
 }
 
+Vlabel Vunit::makeBlock(AreaIndex area) {
+  return makeBlock(area, areaWeightFactor(area));
+}
+
 Vlabel Vunit::makeScratchBlock() {
-  return makeBlock(AreaIndex::Main);
+  return makeBlock(AreaIndex::Main, 1);
 }
 
 void Vunit::freeScratchBlock(Vlabel l) {

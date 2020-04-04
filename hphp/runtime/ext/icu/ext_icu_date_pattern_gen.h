@@ -10,8 +10,7 @@ namespace HPHP { namespace Intl {
 /////////////////////////////////////////////////////////////////////////////
 extern const StaticString s_IntlDatePatternGenerator;
 
-class IntlDatePatternGenerator : public IntlError {
- public:
+struct IntlDatePatternGenerator : IntlError {
   IntlDatePatternGenerator() {}
   IntlDatePatternGenerator(const IntlDatePatternGenerator&) = delete;
   IntlDatePatternGenerator& operator=(const IntlDatePatternGenerator& src)
@@ -27,7 +26,7 @@ class IntlDatePatternGenerator : public IntlError {
     if (!c_IntlDatePatternGenerator) {
       c_IntlDatePatternGenerator =
         Unit::lookupClass(s_IntlDatePatternGenerator.get());
-      assert(c_IntlDatePatternGenerator);
+      assertx(c_IntlDatePatternGenerator);
     }
     Object ret{c_IntlDatePatternGenerator};
     if (generator) {

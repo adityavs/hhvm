@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-present Facebook, Inc. (http://www.facebook.com)  |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,113 +19,26 @@
 #endif
 
 namespace HPHP { namespace jit {
-///////////////////////////////////////////////////////////////////////////////
-// Translator accessors.
-
-inline ProfData* Translator::profData() const {
-  return m_profData.get();
-}
-
-inline const SrcDB& Translator::getSrcDB() const {
-  return m_srcDB;
-}
-
-inline SrcRec* Translator::getSrcRec(SrcKey sk) {
-  // XXX: Add a insert-or-find primitive to THM.
-  if (SrcRec* r = m_srcDB.find(sk)) return r;
-  assertx(s_writeLease.amOwner());
-
-  auto rec = m_srcDB.insert(sk);
-  if (RuntimeOption::EvalEnableReusableTC) {
-    recordFuncSrcRec(sk.func(), rec);
-  }
-
-  return rec;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Translator configuration.
-
-inline TransKind Translator::mode() const {
-  return m_mode;
-}
-
-inline void Translator::setMode(TransKind mode) {
-  m_mode = mode;
-}
-
-inline bool Translator::useAHot() const {
-  return m_useAHot;
-}
-
-inline void Translator::setUseAHot(bool val) {
-  m_useAHot = val;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// TransDB.
-
-inline bool Translator::isTransDBEnabled() {
-  return debug ||
-         RuntimeOption::EvalDumpTC ||
-         RuntimeOption::EvalDumpIR ||
-         RuntimeOption::EvalDumpRegion;
-}
-
-inline const TransRec* Translator::getTransRec(TCA tca) const {
-  if (!isTransDBEnabled()) return nullptr;
-
-  TransDB::const_iterator it = m_transDB.find(tca);
-  if (it == m_transDB.end()) {
-    return nullptr;
-  }
-  if (it->second >= m_translations.size()) {
-    return nullptr;
-  }
-  return &m_translations[it->second];
-}
-
-inline const TransRec* Translator::getTransRec(TransID transId) const {
-  if (!isTransDBEnabled()) return nullptr;
-
-  always_assert(transId < m_translations.size());
-  return &m_translations[transId];
-}
-
-inline TransID Translator::getCurrentTransID() const {
-  return m_translations.size();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-inline Lease& Translator::WriteLease() {
-  return s_writeLease;
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // TransContext.
 
-inline TransContext::TransContext(TransID id, SrcKey sk, FPInvOffset spOff)
+inline TransContext::TransContext(
+  TransID id, TransKind kind, TransFlags flags,
+  SrcKey sk, FPInvOffset spOff, int optIndex, const RegionDesc* region)
   : transID(id)
+  , optIndex(optIndex)
+  , kind(kind)
+  , flags(flags)
   , initSpOffset(spOff)
-  , func(sk.valid() ? sk.func() : nullptr)
-  , initBcOffset(sk.offset())
-  , prologue(sk.prologue())
-  , resumed(sk.resumed())
+  , initSrcKey(sk)
+  , region(region)
 {}
-
-inline SrcKey TransContext::srcKey() const {
-  if (prologue) {
-    assertx(!resumed);
-    return SrcKey { func, initBcOffset, SrcKey::PrologueTag{} };
-  }
-  return SrcKey { func, initBcOffset, resumed };
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Control flow information.
 
-inline ControlFlowInfo opcodeControlFlowInfo(const Op op) {
+inline ControlFlowInfo opcodeControlFlowInfo(const Op op, bool inlining) {
   switch (op) {
     case Op::Jmp:
     case Op::JmpNS:
@@ -136,37 +49,38 @@ inline ControlFlowInfo opcodeControlFlowInfo(const Op op) {
     case Op::CreateCont:
     case Op::Yield:
     case Op::YieldK:
-    case Op::Await:
+    case Op::YieldFromDelegate:
     case Op::RetC:
-    case Op::RetV:
+    case Op::RetM:
+    case Op::RetCSuspended:
     case Op::Exit:
     case Op::Fatal:
-    case Op::IterNext:
-    case Op::IterNextK:
-    case Op::MIterNext:
-    case Op::MIterNextK:
-    case Op::WIterNext:
-    case Op::WIterNextK:
-    case Op::IterInit: // May branch to fail case.
-    case Op::IterInitK: // Ditto
-    case Op::MIterInit: // Ditto
-    case Op::MIterInitK: // Ditto
-    case Op::WIterInit: // Ditto
-    case Op::WIterInitK: // Ditto
-    case Op::DecodeCufIter: // Ditto
-    case Op::IterBreak:
+    case Op::IterInit:  // May branch to fail case.
+    case Op::LIterInit: // Ditto
+    case Op::IterNext:  // Ditto
+    case Op::LIterNext: // Ditto
     case Op::Throw:
-    case Op::Unwind:
     case Op::Eval:
     case Op::NativeImpl:
     case Op::BreakTraceHint:
+    case Op::MemoGet:
+    case Op::MemoGetEager:
       return ControlFlowInfo::BreaksBB;
-    case Op::FCall:
-    case Op::FCallD:
-    case Op::FCallArray:
-    case Op::FCallUnpack:
+    case Op::Await:
+    case Op::AwaitAll:
+      return inlining ? ControlFlowInfo::ChangesPC : ControlFlowInfo::BreaksBB;
+    case Op::FCallClsMethod:
+    case Op::FCallClsMethodD:
+    case Op::FCallClsMethodS:
+    case Op::FCallClsMethodSD:
+    case Op::FCallCtor:
+    case Op::FCallFunc:
+    case Op::FCallFuncD:
+    case Op::FCallObjMethod:
+    case Op::FCallObjMethodD:
     case Op::ContEnter:
     case Op::ContRaise:
+    case Op::ContEnterDelegate:
     case Op::Incl:
     case Op::InclOnce:
     case Op::Req:
@@ -179,21 +93,41 @@ inline ControlFlowInfo opcodeControlFlowInfo(const Op op) {
 }
 
 inline bool opcodeChangesPC(const Op op) {
-  return opcodeControlFlowInfo(op) >= ControlFlowInfo::ChangesPC;
+  return opcodeControlFlowInfo(op, false) >= ControlFlowInfo::ChangesPC;
 }
 
-inline bool opcodeBreaksBB(const Op op) {
-  return opcodeControlFlowInfo(op) == ControlFlowInfo::BreaksBB;
+inline bool opcodeBreaksBB(const Op op, bool inlining) {
+  if (op == Op::ClsCns || op == Op::CGetS) {
+    // side exits if it misses in the RDS, and may produce an overly
+    // specific type without guarding if the class comes from an
+    // object (during form_region, the class will appear to be a
+    // specific type, but during irgen, it will probably be a generic
+    // type).
+
+    // We can't mark it BreaksBB because BreaksBB => opcodeChangesPC
+    return true;
+  }
+  return opcodeControlFlowInfo(op, inlining) == ControlFlowInfo::BreaksBB;
+}
+
+inline bool opcodeIgnoresInnerType(const Op op) {
+  switch (op) {
+    case Op::RetC:
+    case Op::RetCSuspended:
+    case Op::RetM:
+      return true;
+    default:
+      return false;
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Input and output information.
 
 inline std::string InputInfo::pretty() const {
-  std::string p = loc.pretty();
+  std::string p = show(loc);
   if (dontBreak) p += ":dc";
   if (dontGuard) p += ":dg";
-  if (dontGuardInner) p += ":dgi";
   return p;
 }
 

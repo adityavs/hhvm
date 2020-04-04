@@ -1,5 +1,5 @@
-<?php
-$i = new ArrayIterator(array(1,1,1,1,1));
+<?hh <<__EntryPoint>> function main(): void {
+$i = new ArrayIterator(varray[1,1,1,1,1]);
 $i = new CachingIterator($i);
 try {
   $i->count();
@@ -8,5 +8,5 @@ try {
   echo "Exception raised\n";
 }
 
-?>
-===DONE===
+echo "===DONE===\n";
+}
